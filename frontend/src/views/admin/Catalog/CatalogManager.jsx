@@ -314,28 +314,32 @@ export default function CatalogManager() {
 
             <div className="border-t border-slate-800/80 pt-3 mt-2 space-y-3">
               <div>
-                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-                  Authorized Supplier Reference Name
+                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5 flex justify-between">
+                  <span>Authorized Supplier Reference Name</span>
+                  <span className="text-[9px] text-blue-400">Auto-Linked</span>
                 </label>
                 <input
                   type="text"
                   value={form.supplier_name}
                   onChange={(e) => setForm({ ...form, supplier_name: e.target.value })}
-                  placeholder="e.g. CSPC Central Procurement"
-                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white text-xs outline-none"
+                  readOnly
+                  placeholder="Auto-filled from referenced proposal..."
+                  className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 text-xs outline-none cursor-not-allowed"
                 />
               </div>
 
               <div>
-                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-                  Canvas Proof S3 URL Link
+                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5 flex justify-between">
+                  <span>Canvas Proof S3 URL Link</span>
+                  <span className="text-[9px] text-blue-400">Auto-Linked</span>
                 </label>
                 <input
                   type="url"
                   value={form.canvas_evidence_url}
                   onChange={(e) => setForm({ ...form, canvas_evidence_url: e.target.value })}
-                  placeholder="https://cspc-compliance.s3.amazonaws.com/..."
-                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white text-xs outline-none font-mono"
+                  readOnly
+                  placeholder="Auto-filled from referenced proposal..."
+                  className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 text-xs outline-none font-mono cursor-not-allowed"
                 />
               </div>
             </div>
@@ -438,4 +442,3 @@ export default function CatalogManager() {
     </div>
   );
 }
-

@@ -135,6 +135,15 @@ def create_department(
     try:
         new_dept = Department(name=clean_name)
         db.add(new_dept)
+        db.flush() # Flush to get the ID for the audit trail
+        
+        audit = AuditTrail(
+            action="SYSTEM_DEPARTMENT_CREATED",
+            user_id=admin["id"],
+            old_value=None,
+            new_value={"department_id": new_dept.id, "department_name": new_dept.name}
+        )
+        db.add(audit)
         db.commit()
         db.refresh(new_dept)
         return {"status": "success", "department_id": new_dept.id, "department_name": new_dept.name}
@@ -166,7 +175,16 @@ def update_department(
         if existing:
             raise HTTPException(status_code=400, detail="Department name already exists in the system registry.")
         
+        old_name = dept.name
         dept.name = clean_name
+        
+        audit = AuditTrail(
+            action="SYSTEM_DEPARTMENT_MODIFIED",
+            user_id=admin["id"],
+            old_value={"department_id": dept.id, "department_name": old_name},
+            new_value={"department_id": dept.id, "department_name": clean_name}
+        )
+        db.add(audit)
         db.commit()
         return {"status": "success", "department_id": dept.id, "department_name": dept.name}
     except HTTPException:
@@ -195,6 +213,14 @@ def delete_department(
                 detail=f"Cannot delete department. There are {linked_users_count} whitelisted users linked to this division."
             )
             
+        audit = AuditTrail(
+            action="SYSTEM_DEPARTMENT_DELETED",
+            user_id=admin["id"],
+            old_value={"department_id": dept.id, "department_name": dept.name},
+            new_value={"event": "Department removed from system registries."}
+        )
+        db.add(audit)
+        
         db.delete(dept)
         db.commit()
         return {"status": "success", "message": "Department successfully purged from registry."}
@@ -268,16 +294,14 @@ def set_active_planning_cycle(
     admin: dict = Depends(require_admin)
 ):
     try:
-        # 1. Identify the previously active cycle before deactivating
         prev_active = db.query(MasterNarrative).filter(
             MasterNarrative.is_active == True,
             MasterNarrative.issp_period != issp_period
         ).first()
+        prev_period = prev_active.issp_period if prev_active else "None"
 
-        # 2. Deactivate ALL other cycles cleanly (Avoids complex boolean-filter query bugs)
         db.query(MasterNarrative).update({MasterNarrative.is_active: False})
 
-        # Parse years from period string
         try:
             years = [int(y) for y in issp_period.split("-") if y.isdigit()]
             from_year = years[0] if len(years) >= 1 else None
@@ -286,7 +310,6 @@ def set_active_planning_cycle(
             from_year = None
             to_year = None
 
-        # 3. Get or create target narrative
         target_narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
         if not target_narrative:
             target_narrative = MasterNarrative(
@@ -300,12 +323,10 @@ def set_active_planning_cycle(
             db.add(target_narrative)
             db.flush()
         else:
-            # Crucial Fix: Always explicitly populate the year boundaries to prevent unhandled TypeErrors
             target_narrative.issp_period_from = from_year
             target_narrative.issp_period_to = to_year
             target_narrative.is_active = True
 
-        # 4. Clone office templates if the new cycle does not have any yet
         has_offices = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).first()
         if not has_offices and prev_active:
             old_offices = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == prev_active.issp_period).all()
@@ -318,6 +339,13 @@ def set_active_planning_cycle(
                 )
                 db.add(cloned_office)
 
+        audit = AuditTrail(
+            action="SYSTEM_ISSP_CYCLE_ACTIVATED",
+            user_id=admin["id"],
+            old_value={"previous_active_cycle": prev_period},
+            new_value={"new_active_cycle": issp_period}
+        )
+        db.add(audit)
         db.commit()
         return {
             "status": "success", 
@@ -343,6 +371,13 @@ def reset_planning_cycle(
         db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).delete(synchronize_session=False)
         db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).delete(synchronize_session=False)
         
+        audit = AuditTrail(
+            action="SYSTEM_ISSP_CYCLE_RESET",
+            user_id=admin["id"],
+            old_value={"purged_cycle": issp_period},
+            new_value={"event": "All drafts, submissions, and ceilings linked to this cycle were permanently deleted."}
+        )
+        db.add(audit)
         db.commit()
         return {"status": "success", "message": f"Planning cycle '{issp_period}' and associated data purged successfully."}
     except Exception as e:
@@ -463,11 +498,22 @@ def add_user_to_whitelist(
 
         existing = db.query(User).filter(User.email == payload.email).first()
         if existing:
+            old_role = existing.role_tag.value
+            old_dept = existing.department_id
+            
             existing.is_whitelisted = True
             existing.department_id = payload.assigned_department_id
             existing.role_tag = payload.role_tag
             if hashed_pwd:
                 existing.password_hash = hashed_pwd
+                
+            audit = AuditTrail(
+                action="SYSTEM_USER_WHITELIST_MODIFIED",
+                user_id=admin["id"],
+                old_value={"email": existing.email, "role": old_role, "department_id": old_dept},
+                new_value={"email": existing.email, "role": payload.role_tag.value, "department_id": payload.assigned_department_id}
+            )
+            db.add(audit)
             try:
                 db.commit()
                 db.refresh(existing)
@@ -488,6 +534,16 @@ def add_user_to_whitelist(
             password_hash=hashed_pwd
         )
         db.add(new_user)
+        db.flush()
+        
+        audit = AuditTrail(
+            action="SYSTEM_USER_WHITELISTED",
+            user_id=admin["id"],
+            old_value=None,
+            new_value={"user_id": new_user.id, "email": new_user.email, "role": payload.role_tag.value, "department_id": payload.assigned_department_id}
+        )
+        db.add(audit)
+        
         try:
             db.commit()
             db.refresh(new_user)
@@ -521,6 +577,14 @@ def update_whitelisted_user(
         if not target_user:
             raise HTTPException(status_code=404, detail="Whitelisted user not found.")
 
+        old_state = {
+            "email": target_user.email,
+            "role": target_user.role_tag.value,
+            "department_id": target_user.department_id
+        }
+        
+        new_state = {}
+
         if payload.email is not None:
             parts = payload.email.split('@')
             if len(parts) != 2 or parts[1] != "cspc.edu.ph":
@@ -530,23 +594,36 @@ def update_whitelisted_user(
             if existing:
                 raise HTTPException(status_code=400, detail="Email address is already whitelisted.")
             target_user.email = payload.email.lower()
+            new_state["email"] = target_user.email
 
         if payload.role_tag is not None:
             target_user.role_tag = payload.role_tag
+            new_state["role"] = payload.role_tag.value
 
         if payload.assigned_department_id is not None:
             if payload.assigned_department_id == 0:
                 target_user.department_id = None
+                new_state["department_id"] = None
             else:
                 dept = db.query(Department).filter(Department.id == payload.assigned_department_id).first()
                 if not dept:
                     raise HTTPException(status_code=400, detail="Department does not exist.")
                 target_user.department_id = payload.assigned_department_id
+                new_state["department_id"] = payload.assigned_department_id
 
         if payload.password:
             salt = bcrypt.gensalt()
             target_user.password_hash = bcrypt.hashpw(payload.password.encode("utf-8"), salt).decode("utf-8")
+            new_state["password_rotated"] = True
 
+        audit = AuditTrail(
+            action="SYSTEM_USER_WHITELIST_MODIFIED",
+            user_id=admin["id"],
+            old_value=old_state,
+            new_value=new_state
+        )
+        db.add(audit)
+        
         db.commit()
         db.refresh(target_user)
         return target_user
@@ -571,6 +648,14 @@ def delete_whitelisted_user(
         
         if user_to_delete.email == admin["email"]:
             raise HTTPException(status_code=400, detail="Administrative lockout protection: You cannot delete your own session account.")
+
+        audit = AuditTrail(
+            action="SYSTEM_USER_REMOVED",
+            user_id=admin["id"],
+            old_value={"user_id": user_to_delete.id, "email": user_to_delete.email, "role": user_to_delete.role_tag.value},
+            new_value={"event": "User account permanently removed from system whitelist."}
+        )
+        db.add(audit)
 
         db.delete(user_to_delete)
         db.commit()
@@ -1256,16 +1341,19 @@ def set_departmental_ceiling(
              )
 
         existing_query = db.query(BudgetCeiling).filter(
-            BudgetCeiling.department_id == payload.department_id
-)
+            BudgetCeiling.department_id == payload.department_id,
+            BudgetCeiling.issp_period == issp_period
+        )
         if not is_sqlite:
             existing_query = existing_query.with_for_update()
         existing = existing_query.first()
         
+        old_capex = existing.allocated_capex if existing else Decimal("0.00")
+        old_mooe = existing.allocated_mooe if existing else Decimal("0.00")
+        
         if existing:
             existing.allocated_capex = payload.allocated_capex
             existing.allocated_mooe = payload.allocated_mooe
-            existing.issp_period = issp_period  
         else:
             new_ceiling = BudgetCeiling(
                 department_id=payload.department_id,
@@ -1274,6 +1362,23 @@ def set_departmental_ceiling(
                 issp_period=issp_period
             )
             db.add(new_ceiling)
+        
+        audit = AuditTrail(
+            action="SYSTEM_BUDGET_CEILING_UPDATED",
+            user_id=admin["id"],
+            old_value={
+                "department_id": payload.department_id,
+                "allocated_capex": str(old_capex),
+                "allocated_mooe": str(old_mooe)
+            },
+            new_value={
+                "department_id": payload.department_id,
+                "allocated_capex": str(payload.allocated_capex),
+                "allocated_mooe": str(payload.allocated_mooe),
+                "cycle": issp_period
+            }
+        )
+        db.add(audit)
         
         try:
             db.commit()
@@ -1340,8 +1445,9 @@ def update_budget_ceilings_bulk(
 
                 for item in payload.sub_ceilings:
                     record_query = db.query(BudgetCeiling).filter(
-                        BudgetCeiling.department_id == item.department_id
-)
+                        BudgetCeiling.department_id == item.department_id,
+                        BudgetCeiling.issp_period == issp_period
+                    )
                     # Fix (Anomaly 26): Enforce row level validation locking prior to mass modifications
                     if not is_sqlite:
                         record_query = record_query.with_for_update()
@@ -1349,7 +1455,6 @@ def update_budget_ceilings_bulk(
 
                     if record:
                         record.sub_ceiling = item.sub_ceiling
-                        record.issp_period = issp_period  
                     else:
                         new_record = BudgetCeiling(
                             department_id=item.department_id,
@@ -1357,6 +1462,15 @@ def update_budget_ceilings_bulk(
                         )
                         new_record.sub_ceiling = item.sub_ceiling
                         db.add(new_record)
+                
+                # We log a single bulk audit trail entry for compactness
+                audit = AuditTrail(
+                    action="SYSTEM_BULK_BUDGET_CEILINGS_UPDATED",
+                    user_id=admin["id"],
+                    old_value={"event": "Bulk sub-ceiling allocations modified."},
+                    new_value={"global_ceiling": str(payload.global_ceiling), "cycle": issp_period, "departments_updated_count": len(payload.sub_ceilings)}
+                )
+                db.add(audit)
                     
             db.commit()
             return {
@@ -1409,11 +1523,20 @@ def update_global_budget_ceiling(
         
         try:
             setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
+            old_val = setting.value if setting else "N/A"
             if not setting:
                 setting = SystemSetting(key="global_budget_ceiling", value=str(payload.global_ceiling))
                 db.add(setting)
             else:
                 setting.value = str(payload.global_ceiling)
+                
+            audit = AuditTrail(
+                action="SYSTEM_GLOBAL_CEILING_UPDATED",
+                user_id=admin["id"],
+                old_value={"global_ceiling": old_val},
+                new_value={"global_ceiling": str(payload.global_ceiling)}
+            )
+            db.add(audit)
             db.commit()
         except Exception as e:
             db.rollback()

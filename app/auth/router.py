@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.database.session import get_db
-from app.database.models import User, RoleTag, MasterNarrative
+from app.database.models import User, RoleTag, MasterNarrative, AuditTrail
 from app.schemas import GoogleAuthRequest, TokenResponse
 from app.config import settings
 
@@ -246,7 +246,6 @@ async def authenticate_standard(
     # Isolate password verification execution paths to prevent side-channel timing analysis
     has_valid_user = user is not None and getattr(user, "password_hash", None) is not None
     
-    # Fix (Anomaly 17): Compute a dynamic dummy hash on demand to ensure matching execution times for missing users
     if not has_valid_user:
         dummy_salt = bcrypt.gensalt(rounds=12)
         password_hash_to_verify = bcrypt.hashpw(b"dummy_password", dummy_salt).decode("utf-8")
@@ -303,6 +302,15 @@ async def change_password(
     ).decode("utf-8")
     
     current_user.password_hash = new_hash
+    
+    # Audit trail for password rotation
+    audit = AuditTrail(
+        action="SYSTEM_SECURITY_PASSWORD_ROTATED",
+        user_id=current_user.id,
+        old_value={"user_email": current_user.email},
+        new_value={"event": "Security credentials rotated successfully."}
+    )
+    db.add(audit)
     
     try:
         db.commit()

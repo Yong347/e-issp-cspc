@@ -283,7 +283,9 @@ class ISSPStorageClient:
                 logger.error(f"Failed generating download link for key {object_key}: {e}")
                 return None
         else:
-            return f"/static/uploads/{object_key}"
+            # FIX: Prepend the Backend API URL to resolve local frontend port routing issues
+            base_url = settings.API_BASE_URL.rstrip('/')
+            return f"{base_url}/static/uploads/{object_key}"
 
     def upload_compiled_pdf(self, file_data: bytes, issp_id: str) -> bool:
         key = self.get_generated_pdf_key(issp_id)
@@ -331,7 +333,10 @@ class ISSPStorageClient:
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 with open(local_path, "wb") as f:
                     f.write(file_data)
-                return f"/static/uploads/{key}"
+                    
+                # FIX: Prepend the Backend API URL to resolve local frontend port routing issues
+                base_url = settings.API_BASE_URL.rstrip('/')
+                return f"{base_url}/static/uploads/{key}"
             except IOError as e:
                 logger.error(f"Failed writing unserviceable report {filename} to disk: {e}")
                 return None
