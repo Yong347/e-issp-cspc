@@ -1,0 +1,27 @@
+# Python Virtual Environment
+venv/
+.venv/
+env/
+
+# Node Dependencies (Backend & Frontend)
+node_modules/
+frontend/node_modules/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases
+*.db
+*.sqlite3
+
+# Local Uploads
+uploads/*
+!uploads/.gitkeep
+
+# Environment Configurations & Private Keys
+.env
+frontend/.env
