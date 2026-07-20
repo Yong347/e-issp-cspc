@@ -41,13 +41,23 @@ logger = logging.getLogger("app.database.models")
 # ==========================================================
 
 class DecryptionError(Exception):
-    """Raised specifically when cryptographic decryption fails."""
-    pass
+    """
+    Exception raised specifically when cryptographic decryption fails during 
+    the parsing of EncryptedJSON database columns.
+    """
+    def __init__(self, message: str = "Cryptographic decryption failed. Data corruption or incorrect key detected."):
+        self.message = message
+        super().__init__(message)
 
 
 class BusinessRuleViolation(ValueError):
-    """Raised when an action violates an ISSP business rule or budget constraint."""
-    pass
+    """
+    Exception raised when an action or database update violates an active 
+    ISSP business rule, budget ceiling constraint, or compliance policy.
+    """
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
 
 
 # ==========================================================
@@ -121,7 +131,7 @@ for k in keys_list:
 legacy_ciphers = active_ciphers
 
 
-# Size-bounded, thread-safe cache for dynamic V2 ciphers to prevent memory leaks
+# Size-bounded, thread-safe cache for dynamic ciphers to prevent memory leaks
 @lru_cache(maxsize=128)
 def get_v2_cipher(key: str, salt: bytes) -> Fernet:
     """
@@ -431,10 +441,9 @@ class Proposal(Base):
         index=True
     )
     
-    # Enforce RESTRICT on cycle deletions to prevent accidental mass proposal data purges
     issp_period: Mapped[Optional[str]] = mapped_column(
         String(50), 
-        ForeignKey("master_narratives.issp_period", ondelete="RESTRICT", onupdate="CASCADE"), 
+        ForeignKey("master_narratives.issp_period", ondelete="SET NULL", onupdate="CASCADE"), 
         nullable=True,
         index=True
     )
@@ -523,10 +532,9 @@ class SubscriptionProposal(Base):
         index=True
     )
     
-    # Enforce RESTRICT on cycle deletions to prevent accidental mass subscription data purges
     issp_period: Mapped[Optional[str]] = mapped_column(
         String(50), 
-        ForeignKey("master_narratives.issp_period", ondelete="RESTRICT", onupdate="CASCADE"), 
+        ForeignKey("master_narratives.issp_period", ondelete="SET NULL", onupdate="CASCADE"), 
         nullable=True,
         index=True
     )
@@ -554,7 +562,6 @@ class SubscriptionProposal(Base):
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     canvas_evidence_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Configured default=dict block to prevent AttributeError anomalies on instantiation
     payload: Mapped[Dict[str, Any]] = mapped_column(
         MutableDict.as_mutable(EncryptedJSON),
         default=dict,
@@ -658,12 +665,11 @@ class BudgetCeiling(Base):
     allocated_capex: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     allocated_mooe: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    # physical cascading foreign key relationship map pointing back to MasterNarrative with delete protection
     issp_period: Mapped[str] = mapped_column(
         String(50),
-        ForeignKey("master_narratives.issp_period", ondelete="RESTRICT", onupdate="CASCADE"),
+        ForeignKey("master_narratives.issp_period", ondelete="SET NULL", onupdate="CASCADE"),
         default="2026-2028",
-        nullable=False,
+        nullable=True,
         index=True
     )
 
@@ -682,13 +688,17 @@ class BudgetCeiling(Base):
     @sub_ceiling.setter
     def sub_ceiling(self, value: Decimal) -> None:
         """
-        Splits the consolidated sub-ceiling: 70% allocated to CapEx and 30% to MOOE,
-        and updates the respective database columns with standard quantization to prevent rounding precision loss.
+        Fix (Anomaly 1): Calculates CapEx first, then subtracts it from the consolidated sub-ceiling
+        value to determine MOOE, avoiding independent quantization rounding/precision loss.
         """
         if value is None:
             value = Decimal("0.00")
-        self.allocated_capex = (value * Decimal("0.70")).quantize(Decimal("1.00"))
-        self.allocated_mooe = (value * Decimal("0.30")).quantize(Decimal("1.00"))
+        elif not isinstance(value, Decimal):
+            value = Decimal(str(value))
+        # Ensure the total sub-ceiling is quantized to 1.00 to avoid fractional cents
+        quantized_total = value.quantize(Decimal("1.00"))
+        self.allocated_capex = (quantized_total * Decimal("0.70")).quantize(Decimal("1.00"))
+        self.allocated_mooe = quantized_total - self.allocated_capex
 
     @sub_ceiling.expression
     def sub_ceiling(cls):
@@ -712,7 +722,6 @@ class AuditTrail(Base):
         nullable=True
     )
     action: Mapped[str] = mapped_column(String(100), nullable=False)
-    
     user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), 
         nullable=True
@@ -725,16 +734,8 @@ class AuditTrail(Base):
     old_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     new_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
-    proposal: Mapped[Optional[Proposal]] = relationship(
-        "Proposal", 
-        foreign_keys=[proposal_id], 
-        back_populates="audit_logs"
-    )
-    subscription: Mapped[Optional[SubscriptionProposal]] = relationship(
-        "SubscriptionProposal", 
-        foreign_keys=[subscription_id], 
-        back_populates="audit_logs"
-    )
+    proposal: Mapped[Optional[Proposal]] = relationship("Proposal", foreign_keys=[proposal_id], back_populates="audit_logs")
+    subscription: Mapped[Optional[SubscriptionProposal]] = relationship("SubscriptionProposal", foreign_keys=[subscription_id], back_populates="audit_logs")
     user: Mapped[Optional[User]] = relationship("User")
 
 
@@ -749,9 +750,9 @@ class DegreeOffering(Base):
     __tablename__ = "degree_offerings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    department_name: Mapped[str] = mapped_column(String(150), nullable=False)  # College Name
+    department_name: Mapped[str] = mapped_column(String(150), nullable=False)
     degree_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    level: Mapped[str] = mapped_column(String(50), nullable=False)  # "Graduate" / "Undergraduate"
+    level: Mapped[str] = mapped_column(String(50), nullable=False)
     accreditation_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
 
@@ -805,8 +806,8 @@ class ServerCapacityTrack(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     campus_id: Mapped[int] = mapped_column(ForeignKey("campuses.id", ondelete="CASCADE"), nullable=False, index=True)
-    capacity_tier: Mapped[str] = mapped_column(String(50), nullable=False)  # "Above 4TB", "2TB to 4TB", "Below 2TB"
-    location: Mapped[str] = mapped_column(String(50), nullable=False)  # "IN-HOUSE", "CO-LOCATED"
+    capacity_tier: Mapped[str] = mapped_column(String(50), nullable=False)
+    location: Mapped[str] = mapped_column(String(50), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     campus: Mapped[Campus] = relationship("Campus", back_populates="server_capacities")
@@ -854,7 +855,7 @@ class IctStaffPosition(Base):
         index=True
     )
     position_title: Mapped[str] = mapped_column(String(150), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), nullable=False)  # "Permanent", "Contractual", "Casual"
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
     count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="staff_positions_relation")
@@ -898,7 +899,7 @@ class CoreOfficeFunction(Base):
         index=True
     )
     office_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    division: Mapped[str] = mapped_column(String(100), nullable=False)  # Administration, Academic, STO, etc.
+    division: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
     master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="office_functions_relation")
@@ -939,7 +940,7 @@ class PerformanceMetric(Base):
         index=True
     )
     project_title: Mapped[str] = mapped_column(String(200), nullable=False)
-    result_hierarchy: Mapped[str] = mapped_column(String(100), nullable=False)  # "Immediate outcome", etc.
+    result_hierarchy: Mapped[str] = mapped_column(String(100), nullable=False)
     indicator: Mapped[str] = mapped_column(Text, nullable=False)
     baseline: Mapped[str] = mapped_column(String(200), nullable=False)
     target: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -961,8 +962,8 @@ class AnnualCostBreakdown(Base):
         nullable=False,
         index=True
     )
-    project_key: Mapped[str] = mapped_column(String(100), nullable=False)  # Standard project key code matching pipeline
-    cost_type: Mapped[str] = mapped_column(String(50), nullable=False)  # "CapEx", "MOOE", "Continuing"
+    project_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    cost_type: Mapped[str] = mapped_column(String(50), nullable=False)
     item_description: Mapped[str] = mapped_column(String(200), nullable=False)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
     yearly_quantities: Mapped[Dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
@@ -1058,13 +1059,11 @@ class MasterNarrative(Base):
     proposed_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     placement_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Annex A-1 Structured Survey Data
     mithi_network_profile: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
     mithi_special_solutions: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     mithi_data_center: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
     mithi_hardware_inventory: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     
-    # Extended Annex A-1 MITHI Structured Subsections (Gaps 4, 5, 8.2)
     mithi_security_dr: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
     mithi_data_archiving: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
     mithi_ict_issues: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
@@ -1072,32 +1071,25 @@ class MasterNarrative(Base):
     implementation_schedules: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     functional_interface_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     
-    # Target S3 storage locations for complex DICT layout diagrams
     site_development_plan_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    
-    # CSPC Network Diagram & Core topology (Page 129 compliance layout element)
     network_topology_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    
-    # ISSP Process Flow representation (Gap 6)
     process_flow_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Passive deletes on relationships with cascading support
     proposals: Mapped[List[Proposal]] = relationship(
         "Proposal", 
         back_populates="master_narrative",
-        cascade="all, delete-orphan",
+        cascade="save-update, merge",
         passive_deletes=True
     )
     subscriptions: Mapped[List[SubscriptionProposal]] = relationship(
         "SubscriptionProposal", 
         back_populates="master_narrative",
-        cascade="all, delete-orphan",
+        cascade="save-update, merge",
         passive_deletes=True
     )
     
-    # Normalized strategic concerns relationship (Gap 4)
     strategic_concerns_relation: Mapped[List[StrategicConcern]] = relationship(
         "StrategicConcern", 
         back_populates="master_narrative", 
@@ -1105,7 +1097,6 @@ class MasterNarrative(Base):
         passive_deletes=True
     )
 
-    # Normalized office directory relationship (Gap 19)
     office_functions_relation: Mapped[List[CoreOfficeFunction]] = relationship(
         "CoreOfficeFunction", 
         back_populates="master_narrative", 
@@ -1113,7 +1104,6 @@ class MasterNarrative(Base):
         passive_deletes=True
     )
 
-    # Normalized collaborative projects relationship (Gap 24)
     cross_projects_relation: Mapped[List[CrossAgencyProject]] = relationship(
         "CrossAgencyProject", 
         back_populates="master_narrative", 
@@ -1121,7 +1111,6 @@ class MasterNarrative(Base):
         passive_deletes=True
     )
 
-    # Normalized PMF milestones relationship (Gap 25)
     performance_metrics_relation: Mapped[List[PerformanceMetric]] = relationship(
         "PerformanceMetric", 
         back_populates="master_narrative", 
@@ -1129,7 +1118,6 @@ class MasterNarrative(Base):
         passive_deletes=True
     )
 
-    # Normalized cost allocation matrix relationship (Gap 11/12)
     annual_costs_relation: Mapped[List[AnnualCostBreakdown]] = relationship(
         "AnnualCostBreakdown", 
         back_populates="master_narrative", 
@@ -1137,7 +1125,6 @@ class MasterNarrative(Base):
         passive_deletes=True
     )
 
-    # Part IV.B staff positions relationship (Relational staffing configuration)
     staff_positions_relation: Mapped[List[IctStaffPosition]] = relationship(
         "IctStaffPosition",
         back_populates="master_narrative",
@@ -1153,10 +1140,6 @@ class MasterNarrative(Base):
 @event.listens_for(Proposal, 'before_insert')
 @event.listens_for(Proposal, 'before_update')
 def receive_before_save(mapper, connection, target):
-    """
-    Automatically calculates flat total quantities and synchronizes
-    attributes into the encrypted JSON payload prior to saving.
-    """
     if target.yearly_quantities:
         target.total_qty = sum(int(qty) for qty in target.yearly_quantities.values() if qty is not None)
     else:
@@ -1167,10 +1150,6 @@ def receive_before_save(mapper, connection, target):
 @event.listens_for(SubscriptionProposal, 'before_insert')
 @event.listens_for(SubscriptionProposal, 'before_update')
 def receive_subscription_before_save(mapper, connection, target):
-    """
-    Recalculates the total budget for software subscriptions by accurately 
-    summing up the cost of active license seats across each fiscal planning year (Gap 14).
-    """
     if target.yearly_users and target.annual_cost_per_user:
         accumulated_mooe = Decimal("0.00")
         for year, users in target.yearly_users.items():
@@ -1180,3 +1159,13 @@ def receive_subscription_before_save(mapper, connection, target):
     else:
         target.total_multiyear_mooe = Decimal("0.00")
     target.sync_payload()
+
+
+@event.listens_for(ExistingInventory, 'before_insert')
+@event.listens_for(ExistingInventory, 'before_update')
+def validate_inventory_state(mapper, connection, target):
+    if target.status in [AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR]:
+        if not target.unserviceable_report_url or not target.unserviceable_report_url.strip():
+            raise BusinessRuleViolation(
+                "An Unserviceable Report PDF URL is mandatory for Condemned or Needs Repair items."
+            )

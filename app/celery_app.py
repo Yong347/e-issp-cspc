@@ -24,8 +24,8 @@ celery_app.conf.update(
     # Connection settings: Ensure resilience during worker startup if Redis boots slowly
     broker_connection_retry_on_startup=True,
     
-    # Reliability: Restart child processes after a set threshold to prevent memory bloating
-    worker_max_tasks_per_child=100,
+    # Fix (Anomaly 25): Restart child processes after a low threshold to prevent WeasyPrint memory leaks
+    worker_max_tasks_per_child=getattr(settings, "CELERY_WORKER_MAX_TASKS_PER_CHILD", 5),
     
     # Concurrency: Limit prefetching to 1 task per worker to balance heavy PDF compilation tasks
     worker_prefetch_multiplier=1,
@@ -33,8 +33,8 @@ celery_app.conf.update(
     # Reliability: Acknowledge tasks only after completion so crashes can be recovered safely
     task_acks_late=True,
     
-    # Storage setting: Do not automatically re-queue on worker loss to prevent infinite crash loops
-    task_reject_on_worker_lost=False,
+    # Fix (Anomaly 22): Reject and requeue tasks if a worker process terminates abruptly mid-task
+    task_reject_on_worker_lost=getattr(settings, "CELERY_TASK_REJECT_ON_WORKER_LOST", True),
     
     # Lifecycle settings: Ample padding between soft and hard timeouts to capture SoftTimeLimitExceeded
     task_soft_time_limit=300,  # 5 minutes soft limit

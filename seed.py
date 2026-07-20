@@ -19,7 +19,17 @@ from app.database.models import (
     CatalogItem,
     DegreeOffering,
     GaaPerformance,
-    ScopeChoice
+    ScopeChoice,
+    Campus,
+    CoreOfficeFunction,
+    StrategicConcern,
+    PerformanceMetric,
+    GlossaryTerm,
+    GeneralInstruction,
+    ClientOsCensus,
+    OfficeSoftwareCensus,
+    ServerCapacityTrack,
+    IctStaffPosition
 )
 from app.config import settings
 
@@ -32,6 +42,21 @@ def bootstrap_metadata(db):
     Seeds static institutional metadata including academic/support departments,
     baseline standardized DICT catalog items, and the master planning narrative.
     """
+    logger.info("Seeding physical SUC campuses...")
+    campuses_to_seed = [
+        {"name": "Nabua Main Campus", "location": "Nabua, Camarines Sur", "code": "MAIN"},
+        {"name": "Buhi Satellite Campus", "location": "Buhi, Camarines Sur", "code": "BUHI"}
+    ]
+    campus_instances = {}
+    for camp_data in campuses_to_seed:
+        campus = db.query(Campus).filter(Campus.code == camp_data["code"]).first()
+        if not campus:
+            campus = Campus(**camp_data)
+            db.add(campus)
+            db.flush()
+            logger.info(f"Campus registered: '{camp_data['name']}'")
+        campus_instances[camp_data["code"]] = campus
+
     logger.info("Seeding CSPC academic and support departments...")
     departments_to_seed = [
         "College of Engineering",
@@ -43,10 +68,11 @@ def bootstrap_metadata(db):
     ]
 
     dept_instances = {}
+    main_campus = campus_instances["MAIN"]
     for name in departments_to_seed:
         dept = db.query(Department).filter(Department.name == name).first()
         if not dept:
-            dept = Department(name=name)
+            dept = Department(name=name, campus_id=main_campus.id)
             db.add(dept)
             db.flush()
             logger.info(f"Department created: '{name}'")
@@ -162,37 +188,25 @@ def bootstrap_metadata(db):
         {"id": 13, "office_name": "Registrar's Office", "description": "Manages student enrollment files, grades logging, transcripts, and official registrations.", "division": "Academic"},
         {"id": 14, "office_name": "Medical and Dental Clinic", "description": "Provides clinical services and dental checkups to students, faculty, and administrative staff.", "division": "Support"},
         {"id": 15, "office_name": "Library Services", "description": "Manages book catalogs, book circulations, and OPAC digital reference assets.", "division": "Academic Support"},
-        {"id": 16, "office_name": "Physical Plant and Facilities", "description": "Manages physical construction, network cabling routes, electrical setups, and grounds maintenance.", "division": "Support"},
-        {"id": 17, "office_name": "Security Office", "description": "Manages campus security, guards assignments, smart card logging, and emergency response.", "division": "Support"},
-        {"id": 18, "office_name": "Guidance and Counseling", "description": "Offers mental health support, career placements, and guidance counseling for students.", "division": "Support"},
-        {"id": 19, "office_name": "Student Affairs and Services", "description": "Supervises student organizations, student publications, and extracurricular events.", "division": "Support"},
-        {"id": 20, "office_name": "Quality Assurance Office", "description": "Evaluates curriculum systems and certifies compliance with ISO 9001:2015 criteria.", "division": "Administration"},
-        {"id": 21, "office_name": "Internal Audit Services", "description": "Evaluates operational control structures and audits procedural compliance across divisions.", "division": "Administration"},
-        {"id": 22, "office_name": "Legal Affairs Office", "description": "Provides legal counsel, drafts agreements, and represents the SUC in administrative cases.", "division": "Administration"},
-        {"id": 23, "office_name": "Gender and Development Office", "description": "Maintains equality initiatives and enforces gender-fair practices across academic units.", "division": "Support"},
-        {"id": 24, "office_name": "Records and Archives Office", "description": "Secures institutional document registers, records files, and historical archives.", "division": "Administration"},
-        {"id": 25, "office_name": "College of Engineering (Office of the Dean)", "description": "Manages BS Civil, BS Electrical, and BS Mechanical engineering program curricula.", "division": "Academic"},
-        {"id": 26, "office_name": "College of Computer Studies (Office of the Dean)", "description": "Supervises BS Information Technology and BS Computer Science program curricula.", "division": "Academic"},
-        {"id": 27, "office_name": "College of Arts and Sciences (Office of the Dean)", "description": "Supervises liberal arts curricula and general mathematics courses.", "division": "Academic"},
-        {"id": 28, "office_name": "College of Health Sciences (Office of the Dean)", "description": "Supervises Nursing program curricula and clinical training setups.", "division": "Academic"},
-        {"id": 29, "office_name": "College of Tourism (Office of the Dean)", "description": "Supervises Tourism and hospitality management program curricula.", "division": "Academic"},
-        {"id": 30, "office_name": "Extension Services Office", "description": "Designs and executes community development and technical skills transfer programs.", "division": "Research"},
-        {"id": 31, "office_name": "Research and Development Office", "description": "Coordinates academic research programs and administers institutional research grants.", "division": "Research"},
-        {"id": 32, "office_name": "Publications and Media Office", "description": "Coordinates the publication of research journals, academic newsletters, and college books.", "division": "Research"},
-        {"id": 33, "office_name": "Intellectual Property Office", "description": "Coordinates technology transfer and files patent claims with IPOPHL.", "division": "Research"},
-        {"id": 34, "office_name": "Alumni Affairs Office", "description": "Coordinates alumni tracking, updates tracer registries, and runs graduate surveys.", "division": "Support"},
-        {"id": 35, "office_name": "Public Relations Office", "description": "Coordinates SUC press releases and updates social media channels.", "division": "Administration"},
-        {"id": 36, "office_name": "Planning and Development Office", "description": "Formulates institutional land use development plans and coordinates SUC master plans.", "division": "Administration"},
-        {"id": 37, "office_name": "Scholarship and Financial Assistance", "description": "Administers scholarship funds and processes student financial aid records.", "division": "Support"},
-        {"id": 38, "office_name": "Sports and Physical Education", "description": "Coordinates physical education courses and manages campus athletic equipment.", "division": "Support"},
-        {"id": 39, "office_name": "Culture and Arts Department", "description": "Manages institutional musical bands, student chorales, and cultural dance groups.", "division": "Support"},
-        {"id": 40, "office_name": "MIS Unit", "description": "Manages core administrative databases, processes payroll systems, and secures SUC ledgers.", "division": "Technical Operations"},
-        {"id": 41, "office_name": "Network and Infrastructure Unit", "description": "Manages fiber backbones, configures campus Wi-Fi, and secures firewalls.", "division": "Technical Operations"}
+        {"id": 16, "office_name": "Physical Plant and Facilities", "description": "Manages physical construction, network cabling routes, electrical setups, and grounds maintenance.", "division": "Support"}
     ]
 
     baseline_period = "2026-2028"
     logger.info(f"Seeding full DICT-compliant Master Narrative for cycle '{baseline_period}'...")
     narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == baseline_period).first()
+    
+    strategic_concerns_data = [
+        {"mfo": "Enrollment Services", "systems": "Student Information and Accounting System (SIAS)", "problems": "Delayed student enrollment processing and grading sync latency during semesters.", "intended_use": "SIAS Cloud deployment and local caching layers."},
+        {"mfo": "Library Management", "systems": "Online Library Information System", "problems": "Difficulty tracking missing book circulation records in real-time.", "intended_use": "OPAC and Library Information DB integration."},
+        {"mfo": "Monitoring & Security", "systems": "Security Management System", "problems": "Manual check-ins causing queues at entrances and parking spaces.", "intended_use": "Smart Card reader gates and central log DB."},
+        {"mfo": "Human Resources", "systems": "HRMS / Payroll System", "problems": "Biometrics mismatch requiring manual DTR corrections.", "intended_use": "Central biometrics verification system."}
+    ]
+
+    pmf_matrix_data = [
+        {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of courses using the LMS", "baseline": "10% of courses", "target": "100% adoption", "collection_method": "Survey/Logs", "responsibility": "MICT Office"},
+        {"project_title": "Upgrade Leased Line Internet Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Average bandwidth speed in administrative offices", "baseline": "20 Mbps", "target": "100 Mbps", "collection_method": "Speed test logs", "responsibility": "MICT Office"}
+    ]
+
     if not narrative:
         narrative = MasterNarrative(
             issp_period=baseline_period,
@@ -212,6 +226,7 @@ def bootstrap_metadata(db):
             transmittal_recipient_address="DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City",
             transmittal_date="22 February 2023",
             scope_choice=ScopeChoice.DEPARTMENT_WIDE,
+            scope_json={"department_wide": True},
             
             mandate_html="""<p>The College mandate is defined under Section 2 of Batas Pambansa Bilang 512, the law which created the Camarines Sur Polytechnic Colleges (CSPC). BP 512 provides: "The Camarines Sur Polytechnic Colleges shall primarily provide higher technological, professional and vocational instruction and training in fisheries, trade and technology, arts and sciences, and as well as promote research, history, extension services, and progressive leadership in these fields."</p>""",
             vision_html="Polytechnic education at its best for the Bicolanos",
@@ -221,10 +236,7 @@ def bootstrap_metadata(db):
             
             planners_json=[
                 {"name": "DR. IAN P. BENITEZ", "position": "Associate Professor V / Director, MICTC", "email": "ianbenitez@cspc.edu.ph", "contact_number": "09190840018"},
-                {"name": "VINCENT B. CORTEZ", "position": "Instructor / Head, MIS", "email": "vincentcortez@cspc.edu.ph", "contact_number": "09304821749"},
-                {"name": "REY T. CORTEZ", "position": "Instructor / Head, NICM", "email": "reytcortez@cspc.edu.ph", "contact_number": "09124469837"},
-                {"name": "JUNIESEL C. PASCUAL", "position": "Admin Aide V / Head, Repair and Maintenance", "email": "jampascual@cspc.edu.ph", "contact_number": "09070626816"},
-                {"name": "KAELA MARIE N. FORTUNO", "position": "Instructor / Database Administrator", "email": "kfortuno@cspc.edu.ph", "contact_number": "09289764863"}
+                {"name": "VINCENT B. CORTEZ", "position": "Instructor / Head, MIS", "email": "vincentcortez@cspc.edu.ph", "contact_number": "09304821749"}
             ],
             manpower_json={
                 "admin_regular": 53,
@@ -235,78 +247,19 @@ def bootstrap_metadata(db):
             },
             annual_ict_budget=Decimal("31907000.00"),
             core_offices_json=core_offices_registry,
+            strategic_concerns_json=strategic_concerns_data,
+            pmf_matrix_json=pmf_matrix_data,
             
-            # Strategic Concerns Matrix
-            strategic_concerns_json=[
-                {"mfo": "Enrollment Services", "systems": "Student Information and Accounting System (SIAS)", "problems": "Delayed student enrollment processing and grading sync latency during semesters.", "intended_use": "SIAS Cloud deployment and local caching layers."},
-                {"mfo": "Library Management", "systems": "Online Library Information System", "problems": "Difficulty tracking missing book circulation records in real-time.", "intended_use": "OPAC and Library Information DB integration."},
-                {"mfo": "Monitoring & Security", "systems": "Security Management System", "problems": "Manual check-ins causing queues at entrances and parking spaces.", "intended_use": "Smart Card reader gates and central log DB."},
-                {"mfo": "Human Resources", "systems": "HRMS / Payroll System", "problems": "Biometrics mismatch requiring manual DTR corrections.", "intended_use": "Central biometrics verification system."},
-                {"mfo": "Event Management", "systems": "EMS / Online Portal", "problems": "Double-booking of university facilities during events.", "intended_use": "Online facility booking and event calendar system."},
-                {"mfo": "Records & Documents", "systems": "Document Management System", "problems": "Delayed routing of paper documents between departments.", "intended_use": "Digital document signing and tracking system."},
-                {"mfo": "Inventory & Supply", "systems": "Supply Office Inventory System", "problems": "Discrepancies in tracking obsolete equipment counts.", "intended_use": "Dynamic inventory system with QR tracking."},
-                {"mfo": "Budget Management", "systems": "Financial Management System", "problems": "Manual budget tracking causing delayed budget alignments.", "intended_use": "Central accounting system with ceiling limits."},
-                {"mfo": "Extension Services", "systems": "Extension Portal", "problems": "Manual aggregation of community extension service hours.", "intended_use": "Extension portal tracking and reporting."},
-                {"mfo": "Research Services", "systems": "E-Research Portal", "problems": "Difficult to access and verify published research journals.", "intended_use": "E-Research indexing database and access control."}
-            ],
-            
-            # Proposed Systems Profile
             systems_json=[
-                {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Students, Faculty, Registrars", "users_external": "DICT, CHED", "owners": "MICT Office"},
-                {"name": "Online Library System", "description": "Manages book catalogs, book circulations, and OPAC digital reference assets.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Hybrid Scheme", "users_internal": "Librarians, Students, Faculty", "users_external": "Community researchers", "owners": "Library Services"},
-                {"name": "Security Management System", "description": "Handles campus smart card check-ins, vehicle logs, and security tracking.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Local Network Scheme", "users_internal": "Security Guards, Administrative staff", "users_external": "Visitors, Vehicles", "owners": "Security Office"},
-                {"name": "Human Resource Management System (HRMS)", "description": "Handles HR records, manages payroll structures, and automates DTR processing.", "status": "For Enhancement", "dev_strategy": "In-house Developed", "computing_scheme": "Hybrid Scheme", "users_internal": "HR staff, SUC employees", "users_external": "None", "owners": "HRM Office"},
-                {"name": "Document Management System (DMS)", "description": "Coordinates document scanning, digital signatures, and dynamic document routing.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Cloud Computing", "users_internal": "All SUC departments", "users_external": "None", "owners": "Records Office"},
-                {"name": "Supply Office Inventory System (SOIS)", "description": "Coordinates QR code inventory tagging and monitors unserviceable reports.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Local Network Scheme", "users_internal": "Supply staff, SUC property officers", "users_external": "None", "owners": "Supply and Property Unit"},
-                {"name": "Extension Services Portal", "description": "Tracks extension training programs, and aggregates community hours.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Cloud Computing", "users_internal": "Extension officers, SUC faculty", "users_external": "Community partners", "owners": "Extension Services Office"},
-                {"name": "E-Research Indexing Portal", "description": "Tracks research journal submissions, publication approvals, and intellectual property records.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Cloud Computing", "users_internal": "Research directors, SUC faculty", "users_external": "External researchers", "owners": "Research Office"},
-                {"name": "Unified Financial Management System", "description": "Coordinates SUC accounting ledgers, tracks budget limits, and runs budget validation checks.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Hybrid Scheme", "users_internal": "Accounting staff, Budget officers", "users_external": "COA auditors, DBM", "owners": "Accounting Office"}
+                {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Students, Faculty, Registrars", "users_external": "DICT, CHED", "owners": "MICT Office"}
             ],
-            
-            # Databases Required
             databases_json=[
-                {"name": "SIAS Database", "description": "Stores student demographics, grades, accounting receipts, and curriculum mapping.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server", "owners": "Registrar's Office"},
-                {"name": "Library Database", "description": "Stores digital book catalogs, borrower records, and reference logs.", "status": "Proposed", "is_served": "Online Library System", "storage_media": "Local Server and Cloud Backup", "owners": "Library Services"},
-                {"name": "School Monitoring Database", "description": "Stores smart card scans, security guard logs, and visitor access records.", "status": "Proposed", "is_served": "Security Management System", "storage_media": "On-premise NAS server", "owners": "Security Office"},
-                {"name": "HRMS Database", "description": "Stores employee profiles, biometric logs, salary grades, and DTR records.", "status": "Existing", "is_served": "Human Resource Management System (HRMS)", "storage_media": "Local Server and Cloud Backup", "owners": "HRM Office"},
-                {"name": "Supply Database", "description": "Stores SUC asset inventories, equipment status, and unserviceable reports.", "status": "Proposed", "is_served": "Supply Office Inventory System (SOIS)", "storage_media": "Local Server", "owners": "Supply and Property Unit"},
-                {"name": "Document Database", "description": "Stores digital document registers, routing history, and digital signatures.", "status": "Proposed", "is_served": "Document Management System (DMS)", "storage_media": "Secure Cloud Storage", "owners": "Records Office"},
-                {"name": "Extension Database", "description": "Stores extension project milestones, community demographics, and training logs.", "status": "Proposed", "is_served": "Extension Services Portal", "storage_media": "Cloud Database", "owners": "Extension Services Office"},
-                {"name": "E-Research Database", "description": "Stores published journal articles, researcher profiles, and IPO claims.", "status": "Proposed", "is_served": "E-Research Indexing Portal", "storage_media": "Cloud Database", "owners": "Research Office"}
+                {"name": "SIAS Database", "description": "Stores student demographics, grades, accounting receipts, and curriculum mapping.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server", "owners": "Registrar's Office"}
             ],
-            
-            # SUC ICT Projects
             internal_projects_json=[
-                {"name": "Deployment of Moodle LMS", "objectives": "To allow distance teaching and learning\\nTo automate grade computations", "duration": "2026 - 2028", "deliverables": "Online Learning Space (LeOnS)"},
-                {"name": "Upgrade Leased Line Internet Bandwidth", "objectives": "To provide efficient online transaction speed", "duration": "2026 - 2028", "deliverables": "Leased Line Internet"},
-                {"name": "CSPC Campus WiFi Installation", "objectives": "To provide high-speed WiFi connections across campus", "duration": "2026 - 2028", "deliverables": "Enterprise WiFi network"},
-                {"name": "Technology for Education Classrooms", "objectives": "To setup modern interactive classrooms for teaching", "duration": "2026 - 2028", "deliverables": "Smart TV configurations"},
-                {"name": "Buhi Campus Network Infrastructure Setup", "objectives": "To connect satellite campus facilities with Nabua LAN", "duration": "2026 - 2028", "deliverables": "Buhi Campus Fiber Link"},
-                {"name": "Digital VOIP System", "objectives": "To upgrade legacy analog phones with digital VOIP routing", "duration": "2026 - 2028", "deliverables": "Digital Intercom system"},
-                {"name": "Smart TV CATV Campus Network", "objectives": "To deploy digital information monitors across colleges", "duration": "2026 - 2028", "deliverables": "Digital TV signage system"},
-                {"name": "Main Campus LAN Upgrade", "objectives": "To route optical fiber cables to academic buildings", "duration": "2026 - 2028", "deliverables": "Upgraded fiber network links"},
-                {"name": "Advanced Computing Laboratories", "objectives": "To configure modern computer lab setups for CS/IT students", "duration": "2026 - 2028", "deliverables": "Upgraded computer laboratories"},
-                {"name": "CSPC Micro Data Center Build", "objectives": "To construct secure physical server rooms for local backlogs", "duration": "2026 - 2028", "deliverables": "On-premise Server Room"},
-                {"name": "Campus-Wide CCTV Security Surveillance", "objectives": "To mount IP surveillance cameras in security zones", "duration": "2026 - 2028", "deliverables": "Physical security network"},
-                {"name": "Multimedia Center Development", "objectives": "To setup digital editing labs for publications division", "duration": "2026 - 2028", "deliverables": "Upgraded multimedia editing suites"}
+                {"name": "Deployment of Moodle LMS", "objectives": "To allow distance teaching and learning\\nTo automate grade computations", "duration": "2026 - 2028", "deliverables": "Online Learning Space (LeOnS)"}
             ],
             cross_projects_json=[],
-            
-            # Performance Measurement Frameworks
-            pmf_matrix_json=[
-                {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of courses using the LMS", "baseline": "10% of courses", "target": "100% adoption", "collection_method": "Survey/Logs", "responsibility": "MICT Office"},
-                {"project_title": "Upgrade Leased Line Internet Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Average bandwidth speed in administrative offices", "baseline": "20 Mbps", "target": "100 Mbps", "collection_method": "Speed test logs", "responsibility": "MICT Office"},
-                {"project_title": "CSPC Campus WiFi Installation", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of campus covered by active Wi-Fi zones", "baseline": "30% coverage", "target": "100% coverage", "collection_method": "Signal mapping logs", "responsibility": "MICT Office"},
-                {"project_title": "Technology for Education Classrooms", "result_hierarchy": "Immediate outcome", "indicator": "Number of smart interactive classrooms deployed", "baseline": "2 rooms", "target": "20 rooms", "collection_method": "Physical inventory", "responsibility": "MICT Office"},
-                {"project_title": "Buhi Campus Network Infrastructure Setup", "result_hierarchy": "Immediate outcome", "indicator": "Buhi Campus network bandwidth throughput", "baseline": "5 Mbps", "target": "50 Mbps", "collection_method": "Bandwidth speed tests", "responsibility": "Buhi Campus Office"},
-                {"project_title": "Digital VOIP System", "result_hierarchy": "Immediate outcome", "indicator": "Number of departments connected with active VOIP setups", "baseline": "0 units", "target": "40 departments", "collection_method": "Technical checklists", "responsibility": "MICT Office"},
-                {"project_title": "Smart TV CATV Campus Network", "result_hierarchy": "Immediate outcome", "indicator": "Number of digital signage units active in colleges", "baseline": "0 units", "target": "15 units", "collection_method": "Physical inventory", "responsibility": "MICT Office"},
-                {"project_title": "Main Campus LAN Upgrade", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of main campus buildings connected by fiber", "baseline": "40% buildings", "target": "100% buildings", "collection_method": "Network layout maps", "responsibility": "MICT Office"},
-                {"project_title": "Advanced Computing Laboratories", "result_hierarchy": "Immediate outcome", "indicator": "Ratio of modern workstations to computer laboratory students", "baseline": "1:3", "target": "1:1", "collection_method": "Laboratory census logs", "responsibility": "MICT Office"},
-                {"project_title": "CSPC Micro Data Center Build", "result_hierarchy": "Immediate outcome", "indicator": "Security compliance certification of physical server rooms", "baseline": "Not certified", "target": "Certified", "collection_method": "Quality assurance audit", "responsibility": "MICT Office"},
-                {"project_title": "Campus-Wide CCTV Security Surveillance", "result_hierarchy": "Immediate outcome", "indicator": "Security incidents recorded and resolved via camera logs", "baseline": "10% incidents", "target": "95% incidents", "collection_method": "Security logbooks", "responsibility": "Security Office"},
-                {"project_title": "Multimedia Center Development", "result_hierarchy": "Immediate outcome", "indicator": "Number of university journals formatted in editing labs", "baseline": "2 issues", "target": "12 issues", "collection_method": "Publications index", "responsibility": "Publications Office"}
-            ],
             
             # Connectivity Details
             mithi_network_profile={
@@ -321,9 +274,7 @@ def bootstrap_metadata(db):
                 "employees_with_official_email": 324
             },
             mithi_special_solutions=[
-                {"solution_name": "Geographic Information System", "is_used": True, "maintenance_cost": 25000.00},
-                {"solution_name": "Online Payment Gateway Integration", "is_used": True, "maintenance_cost": 50000.00},
-                {"solution_name": "Dynamic Biometrics Fingerprint Synchronization", "is_used": True, "maintenance_cost": 35000.00}
+                {"solution_name": "Geographic Information System", "is_used": True, "maintenance_cost": 25000.00}
             ],
             mithi_data_center={
                 "has_data_center": True,
@@ -331,96 +282,146 @@ def bootstrap_metadata(db):
                 "has_backup_site": True,
                 "maintenance_strategy": "In-house with third-party escalations"
             },
-            
-            # Baseline Equipment Inventory
             mithi_hardware_inventory=[
                 {
                     "device_type": "Desktop PC",
                     "yearly_owned": {"2026": 120, "2027": 150, "2028": 180},
                     "yearly_leased": {"2026": 0, "2027": 0, "2028": 0},
                     "older_than_3_years": 45
-                },
-                {
-                    "device_type": "Workstation Laptop",
-                    "yearly_owned": {"2026": 80, "2027": 100, "2028": 110},
-                    "yearly_leased": {"2026": 0, "2027": 0, "2028": 0},
-                    "older_than_3_years": 12
-                },
-                {
-                    "device_type": "High-End Server",
-                    "yearly_owned": {"2026": 4, "2027": 6, "2028": 8},
-                    "yearly_leased": {"2026": 0, "2027": 0, "2028": 0},
-                    "older_than_3_years": 2
                 }
             ],
-            
-            # Schedules
             implementation_schedules=[
                 {
                     "project_id": "00000000-0000-0000-0000-000000000001",
                     "project_name": "Deployment of Moodle LMS",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000002",
-                    "project_name": "Upgrade Leased Line Internet Bandwidth",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000003",
-                    "project_name": "CSPC Campus WiFi Installation",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000004",
-                    "project_name": "Technology for Education Classrooms",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000005",
-                    "project_name": "Buhi Campus Network Infrastructure Setup",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000006",
-                    "project_name": "Digital VOIP System",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000007",
-                    "project_name": "Smart TV CATV Campus Network",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000008",
-                    "project_name": "Main Campus LAN Upgrade",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000009",
-                    "project_name": "Advanced Computing Laboratories",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000010",
-                    "project_name": "CSPC Micro Data Center Build",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000011",
-                    "project_name": "Campus-Wide CCTV Security Surveillance",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000012",
-                    "project_name": "Multimedia Center Development",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
+                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True}
                 }
             ]
         )
         db.add(narrative)
         db.flush()
         logger.info(f"Default Master Narrative established for cycle '{baseline_period}'.")
+
+    # ==========================================================
+    # POPULATING COMPLEMENTARY NORMALIZED RELATIONAL DIRECTORIES
+    # ==========================================================
+    logger.info("Synchronizing normalized core office functions relational table...")
+    for idx, office in enumerate(core_offices_registry):
+        existing_office = db.query(CoreOfficeFunction).filter(
+            CoreOfficeFunction.office_name == office["office_name"],
+            CoreOfficeFunction.issp_period == baseline_period
+        ).first()
+        if not existing_office:
+            db_office = CoreOfficeFunction(
+                id=office["id"],
+                issp_period=baseline_period,
+                office_name=office["office_name"],
+                division=office["division"],
+                description=office["description"]
+            )
+            db.add(db_office)
+
+    logger.info("Synchronizing normalized strategic concerns relational table...")
+    for idx, concern in enumerate(strategic_concerns_data):
+        existing_concern = db.query(StrategicConcern).filter(
+            StrategicConcern.critical_system == concern["systems"],
+            StrategicConcern.issp_period == baseline_period
+        ).first()
+        if not existing_concern:
+            db_concern = StrategicConcern(
+                issp_period=baseline_period,
+                mfo=concern["mfo"],
+                critical_system=concern["systems"],
+                problems=concern["problems"],
+                intended_use=concern["intended_use"],
+                order_index=idx
+            )
+            db.add(db_concern)
+
+    logger.info("Synchronizing normalized performance metrics relational table...")
+    for pmf in pmf_matrix_data:
+        existing_pmf = db.query(PerformanceMetric).filter(
+            PerformanceMetric.project_title == pmf["project_title"],
+            PerformanceMetric.indicator == pmf["indicator"],
+            PerformanceMetric.issp_period == baseline_period
+        ).first()
+        if not existing_pmf:
+            db_pmf = PerformanceMetric(
+                issp_period=baseline_period,
+                project_title=pmf["project_title"],
+                result_hierarchy=pmf["result_hierarchy"],
+                indicator=pmf["indicator"],
+                baseline=pmf["baseline"],
+                target=pmf["target"],
+                collection_method=pmf["collection_method"],
+                responsibility=pmf["responsibility"]
+            )
+            db.add(db_pmf)
+
+    logger.info("Seeding default Glossary Terms (Pages 6-10)...")
+    glossary_terms = [
+        {"term": "ISSP", "definition": "Information Systems Strategic Plan - a blueprint mapping out an agency's target IT layout frameworks.", "order_index": 1},
+        {"term": "MITHI", "definition": "Medium-Term Information and Communications Technology Harmonization Initiative.", "order_index": 2},
+        {"term": "COA", "definition": "Commission on Audit - the supreme auditing institution of the Republic of the Philippines.", "order_index": 3}
+    ]
+    for term in glossary_terms:
+        existing = db.query(GlossaryTerm).filter(GlossaryTerm.term == term["term"]).first()
+        if not existing:
+            db.add(GlossaryTerm(**term))
+
+    logger.info("Seeding General Submission Guidelines (Page 11)...")
+    guidelines = [
+        {"step_number": 1, "instruction_text": "Ensure all physical hardware inventories (Annex A-5) are documented cleanly before proposing replacements."},
+        {"step_number": 2, "instruction_text": "Verify market canvas quotation values. Standard catalog prices act as absolute ceiling blocks."}
+    ]
+    for step in guidelines:
+        existing = db.query(GeneralInstruction).filter(GeneralInstruction.step_number == step["step_number"]).first()
+        if not existing:
+            db.add(GeneralInstruction(**step))
+
+    logger.info("Seeding physical Server capacity tracks (Gap 15)...")
+    existing_capacity = db.query(ServerCapacityTrack).filter(ServerCapacityTrack.capacity_tier == "Above 4TB").first()
+    if not existing_capacity:
+        db.add(ServerCapacityTrack(campus_id=main_campus.id, capacity_tier="Above 4TB", location="IN-HOUSE", quantity=2))
+
+    logger.info("Seeding baseline OS census tracking metrics (Gap 16)...")
+    standard_os = [
+        {"os_name": "Windows 11 Professional", "workstations_count": 120, "servers_count": 0},
+        {"os_name": "Ubuntu Server 22.04 LTS", "workstations_count": 0, "servers_count": 5}
+    ]
+    for os_data in standard_os:
+        existing = db.query(ClientOsCensus).filter(ClientOsCensus.os_name == os_data["os_name"]).first()
+        if not existing:
+            db.add(ClientOsCensus(**os_data))
+
+    logger.info("Seeding office software productivity census metrics (Gap 17)...")
+    standard_soft = [
+        {"software_name": "Microsoft Office 2021 LTSC", "license_count": 150},
+        {"software_name": "Adobe Creative Cloud", "license_count": 25}
+    ]
+    for soft_data in standard_soft:
+        existing = db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.software_name == soft_data["software_name"]).first()
+        if not existing:
+            db.add(OfficeSoftwareCensus(**soft_data))
+
+    logger.info("Seeding baseline SUC IT Staff Positions profiles (Gap 18)...")
+    positions = [
+        {"position_title": "Database Administrator", "status": "Permanent", "count": 1},
+        {"position_title": "Information Technology Officer I", "status": "Permanent", "count": 2},
+        {"position_title": "Systems Analyst", "status": "Contractual", "count": 1}
+    ]
+    for pos in positions:
+        existing = db.query(IctStaffPosition).filter(
+            IctStaffPosition.position_title == pos["position_title"],
+            IctStaffPosition.issp_period == baseline_period
+        ).first()
+        if not existing:
+            db.add(IctStaffPosition(
+                issp_period=baseline_period,
+                position_title=pos["position_title"],
+                status=pos["status"],
+                count=pos["count"]
+            ))
 
     logger.info("Configuring departmental sub-ceiling limits against global ceiling...")
     ceilings_to_seed = {
@@ -441,17 +442,15 @@ def bootstrap_metadata(db):
             if not ceiling:
                 ceiling = BudgetCeiling(
                     department_id=dept.id,
-                    allocated_capex=limit * Decimal("0.70"),
-                    allocated_mooe=limit * Decimal("0.30"),
                     issp_period=baseline_period
                 )
+                ceiling.sub_ceiling = limit # Auto-derives the 70/30 split cleanly via model setter
                 db.add(ceiling)
                 logger.info(f"Ceiling established for {dept_name}: PHP {limit:,.2f} (70/30 CapEx/MOOE split)")
             else:
-                ceiling.allocated_capex = limit * Decimal("0.70")
-                ceiling.allocated_mooe = limit * Decimal("0.30")
+                ceiling.sub_ceiling = limit
                 ceiling.issp_period = baseline_period
-                logger.info(f"Ceiling updated for {dept_name}: PHP {limit:,.2f} (70/30 CapEx/MOOE split)")
+                logger.info(f"Ceiling updated for {dept_name}: PHP {limit:,.2f}")
 
     return dept_instances
 

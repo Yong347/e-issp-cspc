@@ -87,8 +87,8 @@ class ISSPStorageClient:
 
     def extract_key_from_url(self, url: str) -> Optional[str]:
         """
-        Fix (Audit Issue 22): Robustly extracts S3 or local keys from URLs.
-        Handles custom CNAMEs, pre-signed signatures, and local static prefixes to prevent NoneType deletion blocks.
+        Extracts S3 or local keys from URLs.
+        Handles custom CNAMEs, pre-signed signatures, and local static prefixes.
         """
         if not url:
             return None
@@ -99,9 +99,18 @@ class ISSPStorageClient:
         if "static/uploads/" in clean_url:
             return clean_url.split("static/uploads/")[-1].strip("/")
             
-        # Extract from standard S3 URL (with bucket name in path)
-        if self.bucket_name in clean_url:
-            return clean_url.split(f"{self.bucket_name}/")[-1].strip("/")
+        # Compile allowed buckets list from config
+        allowed_buckets = [self.bucket_name]
+        fallback_buckets = getattr(settings, "AWS_FALLBACK_BUCKETS", [])
+        if fallback_buckets:
+            allowed_buckets.extend(fallback_buckets)
+
+        # Check if any configured bucket name is in the path
+        for b in allowed_buckets:
+            if b in clean_url:
+                parts = clean_url.split(f"{b}/")
+                if len(parts) > 1:
+                    return parts[-1].strip("/")
             
         # Fallback regex for generic amazonaws S3 URLs
         match = re.search(r's3\.[a-z0-9-]+\.amazonaws\.com/(.+)$', clean_url)
@@ -112,6 +121,20 @@ class ISSPStorageClient:
         parsed = urlparse(clean_url)
         path = parsed.path.lstrip("/")
         return path if path else None
+
+    def safe_local_path_resolve(self, key: str) -> Optional[Path]:
+        """
+        Resolves and validates that a given storage key resides safely 
+        within the local uploads directory boundary.
+        """
+        resolved_base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
+        path_parts = [p for p in key.replace("\\", "/").split("/") if p and p not in [".", ".."]]
+        local_path = Path(resolved_base, *path_parts).resolve()
+        
+        if not local_path.is_relative_to(resolved_base):
+            logger.warning(f"Security Alert: Blocked path traversal attempt targeting key: {key}")
+            return None
+        return local_path
 
     def get_as_base64_uri(self, object_url: Optional[str]) -> Optional[str]:
         """
@@ -154,28 +177,17 @@ class ISSPStorageClient:
                 logger.error(f"S3 Direct binary read failed for key {key}: {str(e)}")
                 return object_url
         else:
-            try:
-                # Fix (Audit Issue 23 & 30): Cross-Platform Path Traversal mitigation.
-                # Uses pathlib to resolve exact absolute boundaries, immune to Windows drive-letter bypassing.
-                path_parts = [p for p in key.split("/") if p and p not in [".", ".."]]
-                
-                resolved_base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
-                local_path = Path(resolved_base, *path_parts).resolve()
-                
-                # Check strict containment within the upload directory
-                if not str(local_path).startswith(str(resolved_base)):
-                    logger.warning(f"Security Block: Local directory escape attempt detected. Key: {key}")
-                    return object_url
-                
-                if local_path.exists():
-                    with open(local_path, "rb") as f:
-                        binary_data = f.read()
-                    encoded = base64.b64encode(binary_data).decode('utf-8')
-                    mime_type, _ = mimetypes.guess_type(str(local_path))
-                    if not mime_type:
-                        mime_type = "image/png"
-                    return f"data:{mime_type};base64,{encoded}"
+            local_path = self.safe_local_path_resolve(key)
+            if local_path is None or not local_path.exists():
                 return object_url
+            try:
+                with open(local_path, "rb") as f:
+                    binary_data = f.read()
+                encoded = base64.b64encode(binary_data).decode('utf-8')
+                mime_type, _ = mimetypes.guess_type(str(local_path))
+                if not mime_type:
+                    mime_type = "image/png"
+                return f"data:{mime_type};base64,{encoded}"
             except Exception as e:
                 logger.error(f"Local direct binary read failed for key {key}: {str(e)}")
                 return object_url
@@ -188,38 +200,36 @@ class ISSPStorageClient:
         if not key:
             return False
             
-        # Fix (Audit Issues 9 & 11): Shared Catalog Protection
-        # Do not allow deletion of seeded or shared administrative items.
-        protected_prefixes = ["catalog/", "pc_standard/", "shared/"]
-        if any(prefix in key for prefix in protected_prefixes):
-            logger.info(f"Deletion skipped: Key '{key}' belongs to shared global catalog assets.")
-            return True # Return true so the DB transaction can safely proceed without error
+        normalized_key = key.replace("\\", "/").strip("/")
+        first_segment = normalized_key.split("/")[0] if normalized_key else ""
+        protected_directories = {"catalog", "shared", "pc_standard"}
+        
+        if first_segment in protected_directories:
+            logger.info(f"Deletion bypassed: Key '{key}' belongs to protected shared directories.")
+            return True
 
         if self.storage_type == "s3" and self.client:
             try:
-                self.client.delete_object(Bucket=self.bucket_name, Key=key)
-                logger.info(f"Deleted S3 object: {key}")
+                self.client.delete_object(Bucket=self.bucket_name, Key=normalized_key)
+                logger.info(f"Deleted S3 object: {normalized_key}")
                 return True
             except ClientError as e:
-                logger.error(f"Failed to delete S3 object {key}: {e}")
+                logger.error(f"Failed to delete S3 object {normalized_key}: {e}")
                 return False
         else:
+            local_path = self.safe_local_path_resolve(normalized_key)
+            if local_path is None:
+                return False
             try:
-                path_parts = [p for p in key.split("/") if p and p not in [".", ".."]]
-                resolved_base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
-                local_path = Path(resolved_base, *path_parts).resolve()
-                
-                if str(local_path).startswith(str(resolved_base)) and local_path.exists():
-                    os.remove(local_path)
+                if local_path.exists():
+                    local_path.unlink()
                     logger.info(f"Deleted local file: {local_path}")
                 return True
             except FileNotFoundError:
-                # Fix (Audit Issues 10 & 21): File Cleanup Crash
-                # Ignore missing files so the parent database record can still be deleted
-                logger.warning(f"Local file already missing during deletion: {key}")
+                logger.warning(f"Local file already missing during deletion: {normalized_key}")
                 return True
             except Exception as e:
-                logger.error(f"Failed to delete local file {key}: {e}")
+                logger.error(f"Failed to delete local file {normalized_key}: {e}")
                 return False
 
     def generate_upload_url(
@@ -374,14 +384,11 @@ class ISSPStorageClient:
             is_restoring = "ongoing-request=\"true\"" in restore_header
             restore_completed = "ongoing-request=\"false\"" in restore_header
 
-            # Default fallback when storage state is warm
             progress_val = 100 if storage_class == "STANDARD" else 0
             
             if restore_completed:
                 progress_val = 100
             elif is_restoring:
-                # AWS Standard retrieves require 3-5 hours. Real-time percentages
-                # are not exposed in HEAD responses; providing a safe baseline.
                 progress_val = 50
 
             return {

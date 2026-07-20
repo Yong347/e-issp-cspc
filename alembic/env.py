@@ -39,7 +39,7 @@ def run_migrations_offline() -> None:
     # Overwrite static URL with active configuration to prevent environment mismatch
     url = settings.DATABASE_URL
     
-    # Reliably detect SQLite in offline mode via URL parsing
+    # Detect SQLite in offline mode via URL parsing
     is_sqlite = "sqlite" in url.lower()
     
     context.configure(
@@ -47,7 +47,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        # Conditionally render as batch to prevent table recreation issues on PostgreSQL
+        # Conditionally render as batch to prevent table recreation issues on SQLite
         render_as_batch=is_sqlite,
         compare_type=True
     )
@@ -73,7 +73,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        # Reliably detect SQLite via the dialect name rather than URL substrings
+        # Fix (Anomaly 3): Reliably detect SQLite via the dialect name rather than URL substrings
         is_sqlite = connection.dialect.name == "sqlite"
         
         # Enforce foreign keys during migrations if SQLite is active
@@ -83,7 +83,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection, 
             target_metadata=target_metadata,
-            # Conditionally render as batch to prevent table recreation issues on PostgreSQL
+            # Conditionally render as batch to prevent table recreation issues on SQLite
             render_as_batch=is_sqlite,
             # Ensure Alembic detects column type alterations (e.g. String to Text)
             compare_type=True

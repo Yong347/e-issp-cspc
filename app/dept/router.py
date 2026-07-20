@@ -51,6 +51,7 @@ from app.utils.helpers import (
     validate_active_years_alignment,
     align_and_validate_years,
     check_and_update_glacier_metadata,
+    validate_pdf_content,  # Fix (Anomaly 14)
 )
 
 logger = logging.getLogger(__name__)
@@ -93,9 +94,8 @@ def is_file_referenced_elsewhere(
 
 def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex: bool, incoming_cost: float):
     """
-    Calculates active budget sub-ceiling and total current spent balances (SUBMITTED + APPROVED)
-    for the department in the active cycle to enforce headroom safety limits.
-    Enforces transaction locks conditionally to maintain compatibility across PostgreSQL and SQLite.
+    Fix (Anomaly 3): Calculates active budget sub-ceiling and total current spent balances (SUBMITTED + APPROVED)
+    using precise quantized Decimals to prevent floating-point rounding errors.
     """
     is_sqlite = db.bind.dialect.name == "sqlite"
 
@@ -119,7 +119,7 @@ def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex:
             detail=f"Submission blocked: No budget ceiling allocated for the '{issp_period}' planning cycle."
         )
 
-    incoming_cost_dec = Decimal(str(incoming_cost))
+    incoming_cost_dec = Decimal(str(incoming_cost)).quantize(Decimal("1.00"))
 
     if is_capex:
         spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
@@ -129,28 +129,30 @@ def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex:
             Proposal.is_archived == False
         ).scalar() or Decimal("0.00")
         
-        spent_dec = Decimal(str(spent))
+        spent_dec = Decimal(str(spent)).quantize(Decimal("1.00"))
         limit = ceiling.allocated_capex
-        if limit is not None and (spent_dec + incoming_cost_dec) > limit:
+        limit_dec = limit.quantize(Decimal("1.00")) if limit is not None else Decimal("0.00")
+        if limit is not None and (spent_dec + incoming_cost_dec) > limit_dec:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Submission blocked: Budget ceiling exceeded. CapEx allocation limit is {limit:,.2f}, "
+                detail=f"Submission blocked: Budget ceiling exceeded. CapEx allocation limit is {limit_dec:,.2f}, "
                        f"already spent: {spent_dec:,.2f}, incoming proposal cost: {incoming_cost_dec:,.2f}."
             )
     else:
         spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
             SubscriptionProposal.department_id == dept_id,
             SubscriptionProposal.issp_period == issp_period,
-            SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
+            SubscriptionProposal.status.in_([SubscriptionProposal.status.SUBMITTED, SubscriptionProposal.status.APPROVED]),
             SubscriptionProposal.is_archived == False
         ).scalar() or Decimal("0.00")
         
-        spent_dec = Decimal(str(spent))
+        spent_dec = Decimal(str(spent)).quantize(Decimal("1.00"))
         limit = ceiling.allocated_mooe
-        if limit is not None and (spent_dec + incoming_cost_dec) > limit:
+        limit_dec = limit.quantize(Decimal("1.00")) if limit is not None else Decimal("0.00")
+        if limit is not None and (spent_dec + incoming_cost_dec) > limit_dec:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Submission blocked: Budget ceiling exceeded. MOOE allocation limit is {limit:,.2f}, "
+                detail=f"Submission blocked: Budget ceiling exceeded. MOOE allocation limit is {limit_dec:,.2f}, "
                        f"already spent: {spent_dec:,.2f}, incoming subscription cost: {incoming_cost_dec:,.2f}."
             )
 
@@ -257,7 +259,7 @@ def validate_subscription_constraints(db: Session, dept_id: int, payload: Subscr
 
 
 # ==========================================================
-# EXPLICIT METADATA SYNCHRONIZATION ENDPOINTS (Gap 28 Updated)
+# EXPLICIT METADATA SYNCHRONIZATION ENDPOINTS
 # ==========================================================
 
 @router.post("/proposals/{proposal_id}/sync-metadata")
@@ -358,7 +360,6 @@ def get_department_budget_summary(
         BudgetCeiling.issp_period == issp_period
     ).first()
     
-    # Gracefully backfill default limits if no ceiling is configured yet, avoiding 400 crashes
     allocated_capex = ceiling.allocated_capex if ceiling else Decimal("0.00")
     allocated_mooe = ceiling.allocated_mooe if ceiling else Decimal("0.00")
     sub_ceiling = ceiling.sub_ceiling if ceiling else Decimal("0.00")
@@ -542,7 +543,10 @@ def create_draft_proposal(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Creates a new draft proposal (DRAFT) and prevents client-side price manipulation on standard items. """
+    """
+    Creates a new draft proposal (DRAFT).
+    Fix (Anomaly 5 & 27): Prevents cost and custom spec bypasses on standard catalog items.
+    """
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
     payload.yearly_quantities = aligned_quantities
 
@@ -564,6 +568,7 @@ def create_draft_proposal(
             resolved_canvas_url = catalog_item.canvas_evidence_url
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
+            payload.custom_specification = None  # Clear specs to prevent bypasses
 
     try:
         json_payload = {
@@ -611,7 +616,11 @@ def update_proposal_item(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Updates mutable fields of a proposal. Enforces status checks and S3 Glacier locks. """
+    """
+    Updates mutable fields of a proposal.
+    Fix (Anomaly 7): Synchronizes Glacier metadata states prior to write operations.
+    Fix (Anomaly 27 & 5): Wipes out spec drift on standard catalog alterations.
+    """
     proposal = db.query(Proposal).filter(
         Proposal.id == proposal_id,
         Proposal.department_id == user["department_id"]
@@ -625,6 +634,7 @@ def update_proposal_item(
     
     proposal.s3_storage_class = s3_storage_class
     proposal.is_restoring = is_restoring
+    db.flush()
 
     if is_restoring or s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"]:
         if is_restoring:
@@ -675,6 +685,7 @@ def update_proposal_item(
             resolved_canvas_url = catalog_item.canvas_evidence_url
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
+            payload.custom_specification = None  # Clear specs to prevent custom spec bypass
     else:
         resolved_supplier = "Custom Supplier"
 
@@ -683,7 +694,7 @@ def update_proposal_item(
     proposal.unit_cost = payload.unit_cost
     proposal.yearly_quantities = payload.yearly_quantities
     proposal.total_qty = total_qty
-    proposal.target_offices_json = proposal.target_offices_json
+    proposal.target_offices_json = payload.target_offices_json
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.custom_specification = payload.custom_specification
 
@@ -904,7 +915,11 @@ async def upload_canvas_evidence(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """ Uploads standard market canvas quotation evidence to configured storage engines. """
+    """
+    Uploads standard market canvas quotation evidence.
+    Fix (Anomaly 6): Ensures uploads are locked for Submitted or Approved proposals.
+    Fix (Anomaly 14): Validates binary-level PDF signature magic bytes.
+    """
     try:
         proposal_uuid = uuid.UUID(proposal_id)
     except ValueError:
@@ -936,11 +951,26 @@ async def upload_canvas_evidence(
             detail="AuthZ Failed: You do not have permission to modify this record."
         )
 
+    # Fix (Anomaly 6): Block quotation uploads on locked workflows
+    status_to_check = proposal.status if proposal else sub_proposal.status
+    if status_to_check not in [ProposalStatus.DRAFT, ProposalStatus.RETURNED]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Upload locked: Associated proposal has already been locked for review."
+        )
+
+    # Fix (Anomaly 14): Read file bytes and validate magic bytes signature
+    file_bytes = await file.read()
+    if not validate_pdf_content(file_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Only PDF files are allowed."
+        )
+    await file.seek(0)
+
     safe_supplier = secure_filename(supplier_name) if supplier_name else "default_supplier"
     safe_filename = secure_filename(file.filename)
     key = storage_client.get_canvas_key(str(proposal_uuid), safe_supplier, safe_filename)
-    
-    file_bytes = await file.read()
     
     success = storage_client.upload_canvas_evidence(file_bytes, key)
     if not success:
@@ -985,7 +1015,10 @@ async def upload_unserviceable_evidence(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Uploads unserviceability reports (IIRUP) to substantiate equipment replacement justifications. """
+    """
+    Uploads unserviceability reports (IIRUP) to substantiate equipment replacement justifications.
+    Fix (Anomaly 14): Validates binary-level PDF signature magic bytes.
+    """
     try:
         inventory_uuid = uuid.UUID(inventory_id)
     except ValueError:
@@ -1005,7 +1038,15 @@ async def upload_unserviceable_evidence(
     if asset.status == AssetStatus.FUNCTIONAL:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Functional items do not require an unserviceable report.")
 
+    # Fix (Anomaly 14): Validate binary magic-bytes signature
     file_bytes = await file.read()
+    if not validate_pdf_content(file_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Only PDF files are allowed."
+        )
+    await file.seek(0)
+
     safe_filename = secure_filename(file.filename)
     file_url = storage_client.upload_unserviceable_report(
         file_data=file_bytes,
@@ -1096,7 +1137,10 @@ def get_proposal_comments(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """ Retrieves discussion threads and pinned feedback comments. """
+    """
+    Retrieves discussion threads and pinned feedback comments.
+    Fix (Anomaly 28): Restricts comments retrieval strictly to the resource owners.
+    """
     target = db.query(Proposal).filter(Proposal.id == proposal_id).first()
     if not target:
         target = db.query(SubscriptionProposal).filter(SubscriptionProposal.id == proposal_id).first()
@@ -1104,6 +1148,7 @@ def get_proposal_comments(
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target record not found.")
 
+    # Enforce strict ownership validations on comments access queries
     if user["role"] != "ROLE_MIS_ADMIN" and target.department_id != user["department_id"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1146,8 +1191,6 @@ def resolve_proposal_comment(
             comment_found = True
             break
 
-    if tribe_found := False:
-        pass
     if not comment_found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
 

@@ -35,6 +35,13 @@ class Settings:
     AWS_STORAGE_BUCKET_NAME: str = os.getenv("AWS_STORAGE_BUCKET_NAME", "cspc-issp-vault")
     AWS_S3_REGION_NAME: str = os.getenv("AWS_S3_REGION_NAME", "ap-southeast-1")
 
+    # Fix (Anomaly 13): List of allowed legacy/fallback buckets to prevent parsing blocks when bucket names are rotated
+    AWS_FALLBACK_BUCKETS: list[str] = [
+        b.strip()
+        for b in os.getenv("AWS_FALLBACK_BUCKETS", "cspc-issp-vault,cspc-issp-prod-vault").split(",")
+        if b.strip()
+    ]
+
     # Cryptographic keys and default passwords must be strictly defined via the environment
     SECRET_KEY: str = os.getenv("SECRET_KEY")
     GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -59,6 +66,10 @@ class Settings:
     # Local Directory Config
     BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     LOCAL_UPLOAD_DIR: str = os.getenv("LOCAL_UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
+
+    # Fix (Anomaly 22): Worker reliability options exposed as settings parameters
+    CELERY_TASK_REJECT_ON_WORKER_LOST: bool = os.getenv("CELERY_TASK_REJECT_ON_WORKER_LOST", "true").lower() in ("true", "1", "yes")
+    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", "100"))
 
 
 settings = Settings()
@@ -93,16 +104,22 @@ if settings.STORAGE_TYPE == "s3":
         logger.error("STORAGE CONFIGURATION FAILURE: AWS_STORAGE_BUCKET_NAME is not defined.")
         raise ValueError("Invalid storage configuration: AWS_STORAGE_BUCKET_NAME must be specified when STORAGE_TYPE='s3'.")
 
-# Check for Celery worker environment synchronization risks
+# Check for Celery worker environment database synchronization risks (Anomaly 18)
 is_celery_worker = "CELERY_TASK_NAMES" in os.environ or any("celery" in arg.lower() for arg in getattr(sys, "argv", []))
 if is_celery_worker:
     logger.info("Worker runtime detected. Verifying database connection sync parameters...")
-    if settings.DATABASE_URL == "postgresql://postgres:postgres@localhost:5432/issp_core":
+    if "sqlite" in settings.DATABASE_URL.lower():
+        logger.warning(
+            "Celery worker is running with a local SQLite database configuration. "
+            "Ensure the worker container shares the exact same physical DB file volume path "
+            "as the FastAPI web server to prevent transaction and state mismatch anomalies."
+        )
+    elif settings.DATABASE_URL == "postgresql://postgres:postgres@localhost:5432/issp_core":
         logger.warning(
             "Celery worker is running with the default PostgreSQL fallback URL. "
-            "If your FastAPI server is using a different local database (e.g. SQLite), "
-            "background tasks will fail to locate newly registered proposals due to database mismatch. "
-            "Please ensure the Celery worker's DATABASE_URL matches the web server's DATABASE_URL."
+            "If your FastAPI server is using a different database setup, "
+            "background tasks may fail to locate newly registered proposals due to database mismatch. "
+            "Verify that the worker's DATABASE_URL matches the core web server's environment configuration."
         )
 
 # ==========================================================

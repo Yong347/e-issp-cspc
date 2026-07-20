@@ -21,6 +21,12 @@ MFO_MAPPING = {
     "admin": "General Administrative and Support Services (GASS)"
 }
 
+# Fix (Anomaly 4): Shared utility to sanitize text fields against stored XSS
+def sanitize_text(v: Optional[str]) -> Optional[str]:
+    if v is not None:
+        return html.escape(v.strip())
+    return v
+
 
 # ==========================================================
 # 1. AUTHENTICATION & SESSION SCHEMAS
@@ -161,37 +167,39 @@ class NeedsAssessmentCreate(BaseModel):
     @classmethod
     def resolve_mfo_code(cls, v: str) -> str:
         """
-        Intercepts inputs and maps descriptions back to standard code keys.
-        Robustly resolves abbreviations, connectors, and common casing variations.
+        Fix (Anomaly 25): Intercepts inputs and maps descriptions back to standard code keys.
+        Handles connectors, abbreviations, and cased variations without aggressive character-stripping false positives.
         """
         if not isinstance(v, str):
             return v
         
-        # Fast direct match check
         val_clean = v.strip().lower()
         if val_clean in MFO_MAPPING:
             return val_clean
 
-        # Deep normalization comparing string characters ignoring connectors and spacing
-        norm_v = "".join(c for c in val_clean if c.isalnum() or c.isspace())
-        norm_v = norm_v.replace("and", "").replace("to", "").replace("for", "").replace(" ", "")
+        exact_mappings = {
+            "advanced and higher education services": "he",
+            "higher education services": "he",
+            "advanced education services": "he",
+            "research services": "rs",
+            "extension services": "es",
+            "support to operations": "sto",
+            "general administrative and support services": "admin",
+            "general administration and support": "admin"
+        }
+        if val_clean in exact_mappings:
+            return exact_mappings[val_clean]
 
-        for key, description in MFO_MAPPING.items():
-            norm_desc = "".join(c for c in description.lower() if c.isalnum() or c.isspace())
-            norm_desc = norm_desc.replace("and", "").replace("to", "").replace("for", "").replace(" ", "")
-            if norm_v == norm_desc:
-                return key
-
-        # Dynamic substring fallback matcher
-        if "higher" in val_clean or "advanced" in val_clean:
+        # Use boundary keyword matching to avoid collision between Admin GASS and Research Support elements
+        if "higher education" in val_clean or "advanced education" in val_clean:
             return "he"
-        if "research" in val_clean:
+        if "research" in val_clean and "general" not in val_clean:
             return "rs"
         if "extension" in val_clean:
             return "es"
-        if "support" in val_clean or "sto" in val_clean:
+        if "support to operations" in val_clean or "sto" in val_clean:
             return "sto"
-        if "admin" in val_clean or "gass" in val_clean or "general" in val_clean:
+        if "admin" in val_clean or "gass" in val_clean or "general administration" in val_clean:
             return "admin"
 
         return v.strip()
@@ -213,7 +221,7 @@ class NeedsAssessmentResponse(NeedsAssessmentCreate):
 class ProposalUpdatePayload(BaseModel):
     """Client request parameters for editing departmental hardware requests (Annex A-6/A-1)"""
     item_select: str = Field(..., description="Selected hardware or system item catalog identifier")
-    custom_specification: Optional[str] = Field(None, max_length=1000, description="Custom details if unlisted item type is selected")
+    custom_specification: Optional[str] = Field(None, description="Custom details if unlisted item type is selected")
     
     # DYNAMIC FIELD replacing year1_qty, year2_qty, year3_qty
     yearly_quantities: Dict[str, int] = Field(
@@ -235,6 +243,15 @@ class ProposalUpdatePayload(BaseModel):
         """Neutralizes potential stored XSS scripts embedded within deployment locations"""
         return [html.escape(item.strip()) for item in v if item.strip()]
 
+    # Fix (Anomaly 4 & 48): Sanitize inputs and enforce max character limits of 500 on custom specifications
+    @field_validator('custom_specification', mode='before')
+    @classmethod
+    def clean_and_validate_specification(cls, v: Optional[str]) -> Optional[str]:
+        sanitized = sanitize_text(v)
+        if sanitized and len(sanitized) > 500:
+            raise ValueError("Custom specification must not exceed 500 characters.")
+        return sanitized
+
     @model_validator(mode='after')
     def validate_proposal_criteria(self) -> 'ProposalUpdatePayload':
         # Validate format of year strings and ensure no negative or overflow values exist
@@ -253,8 +270,6 @@ class ProposalUpdatePayload(BaseModel):
         
         # Custom Item Compliance Constraints (Resolves Section 4 Compliance Rules)
         if self.item_select.strip().lower() == "other":
-            if self.custom_specification:
-                self.custom_specification = self.custom_specification.strip()
             if not self.custom_specification or len(self.custom_specification) <= 4:
                 raise ValueError("Custom specification is mandatory for unlisted ('other') items and must be longer than 4 characters.")
             
@@ -321,6 +336,12 @@ class SubscriptionProposalCreate(BaseModel):
     
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
+
+    # Fix (Anomaly 4): PreventStored XSS attacks inside input fields of MOOE subscriptions
+    @field_validator('software_name', 'justification', mode='before')
+    @classmethod
+    def sanitize_subscription_texts(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_text(v)
 
     @field_validator('target_offices_json')
     @classmethod
@@ -462,10 +483,11 @@ class UpdateCeilingPayload(BaseModel):
 
     @model_validator(mode='after')
     def resolve_default_split(self) -> 'UpdateCeilingPayload':
-        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention (Anomaly II.2)"""
+        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention (Anomaly II.2 / Anomaly 3)"""
         if self.sub_ceiling is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
-            self.allocated_capex = (self.sub_ceiling * Decimal("0.70")).quantize(Decimal("1.00"))
-            self.allocated_mooe = self.sub_ceiling - self.allocated_capex
+            sub_dec = Decimal(str(self.sub_ceiling)).quantize(Decimal("1.00"))
+            self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
+            self.allocated_mooe = sub_dec - self.allocated_capex
         return self
 
 
@@ -484,12 +506,13 @@ class BulkCeilingItem(BaseModel):
     @model_validator(mode='after')
     def resolve_and_split_sub_ceiling(self) -> 'BulkCeilingItem':
         """
-        Intercepts raw sub-ceilings containing a single value rather than distinct splits.
-        Provides a safe default 70/30 division while preventing rounding discrepancies (Anomaly II.2)
+        Fix (Anomaly II.2 / Anomaly 3): Intercepts raw sub-ceilings and performs
+        precise quantized splitting to prevent rounding discrepancies.
         """
         if self.sub_ceiling_input is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
-            self.allocated_capex = (self.sub_ceiling_input * Decimal("0.70")).quantize(Decimal("1.00"))
-            self.allocated_mooe = self.sub_ceiling_input - self.allocated_capex
+            sub_dec = Decimal(str(self.sub_ceiling_input)).quantize(Decimal("1.00"))
+            self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
+            self.allocated_mooe = sub_dec - self.allocated_capex
         return self
 
     @property
@@ -752,9 +775,9 @@ class MithiNetworkProfile(BaseModel):
     is_connected_to_internet: bool = Field(..., description="Indicates global web routing status")
     internet_access_modes: List[str] = Field(..., example=["Leased Line", "WiFi", "DSL"])
     isps: List[str] = Field(..., example=["PLDT", "Globe"])
-    combined_bandwidth_mbps: int = Field(..., ge=0, description="Cumulative throughput capacity in Mbps")
-    employees_with_internet_access: int = Field(..., ge=0, description="Active headcount configured for outbound access")
-    employees_with_official_email: int = Field(..., ge=0, description="Active headcount with official domain emails")
+    combined_bandwidth_mbps: int = Field(..., ge=0, description="Combined bandwidth throughput in Mbps")
+    employees_with_internet_access: int = Field(..., ge=0)
+    employees_with_official_email: int = Field(..., ge=0)
 
 
 class MithiHardwareItemSchema(BaseModel):
@@ -889,10 +912,11 @@ class MasterNarrativeUpdate(BaseModel):
     
     signatory_approved_by: Optional[str] = Field(None, description="Printed Name & credentials of the Agency Head", example="Dr. Amado A. Oliva Jr.")
 
-    mandate_html: Optional[str] = Field("", description="DICT mandated legal references and background")
-    vision_html: Optional[str] = Field("", description="Official institutional vision statement")
-    mission_html: Optional[str] = Field("", description="Official institutional mission statement")
-    present_situation_html: Optional[str] = Field("", description="Current operational state narrative")
+    # Fix (Anomaly 30): Prevent WeasyPrint engine layout hangs via strict size boundaries on custom narrative HTML fields
+    mandate_html: Optional[str] = Field("", max_length=50000, description="DICT mandated legal references and background")
+    vision_html: Optional[str] = Field("", max_length=50000, description="Official institutional vision statement")
+    mission_html: Optional[str] = Field("", max_length=50000, description="Official institutional mission statement")
+    present_situation_html: Optional[str] = Field("", max_length=50000, description="Current operational state narrative")
     
     planners_json: Optional[List[ISPlannerSchema]] = Field([], description="Array of planning team profiles")
     manpower_json: Optional[ManpowerSchema] = Field(None, description="Detailed IT manpower demographic metrics")
@@ -1019,13 +1043,10 @@ class MasterNarrativeResponse(BaseModel):
 
     implementation_schedules: List[ImplementationScheduleItem] = []
 
+    # Fix (Anomaly 45): Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
     @field_validator('mithi_network_profile', 'mithi_data_center', 'manpower_json', mode='before')
     @classmethod
     def clear_empty_dicts(cls, v: Any) -> Any:
-        """
-        Converts empty dictionary structures `{}` retrieved from dynamic database 
-        JSON columns into `None` to prevent Pydantic validation crashes.
-        """
         if isinstance(v, dict) and not v:
             return None
         return v
@@ -1145,6 +1166,12 @@ class StrategicConcernCreate(BaseModel):
     problems: str = Field(..., example="Delayed enrollment processing and grading latency.")
     intended_use: str = Field(..., example="SIAS Cloud migration with decentralized caches.")
 
+    # Fix (Anomaly 1): Enforce the same normalization validator used for Needs Assessment alignment
+    @field_validator('mfo', mode='before')
+    @classmethod
+    def resolve_mfo_normalization(cls, v: str) -> str:
+        return NeedsAssessmentCreate.resolve_mfo_code(v)
+
 
 class StrategicConcernResponse(BaseModel):
     id: uuid.UUID
@@ -1153,6 +1180,13 @@ class StrategicConcernResponse(BaseModel):
     critical_system: str
     problems: str
     intended_use: str
+
+    # Fix (Anomaly 1): Ensure responses normalize the KRA value identically to create sequences
+    @field_validator('mfo', mode='before')
+    @classmethod
+    def resolve_mfo_normalization_response(cls, v: str) -> str:
+        return NeedsAssessmentCreate.resolve_mfo_code(v)
+
     model_config = ConfigDict(from_attributes=True)
 
 

@@ -900,7 +900,6 @@ class ISSPDynamicCompiler:
                 '''
             total_cols = 1 + (4 * len(planning_years))
             
-            # Formatted list element containing schedule fallback
             fallback_rows_html = f'<tr><td colspan="{total_cols}" style="padding:12px; color:#64748b;">No schedule timeline parameters defined.</td></tr>'
             
             return f'''
@@ -945,7 +944,6 @@ class ISSPDynamicCompiler:
             for project_key, items in capex_groups.items():
                 project_label = project_key.replace("_", " ").upper()
                 
-                # Dynamic header block containing the nested formatting parameters
                 project_label_tr_html = f'''
                 <tr style="background-color: #f8fafc; font-weight: bold; border-left: 3px solid #1e3a8a;">
                     <td colspan="{5 + len(planning_years)}" style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8.5pt; text-align: left; color: #1e3a8a;">
@@ -989,7 +987,6 @@ class ISSPDynamicCompiler:
             for project_key, items in mooe_groups.items():
                 project_label = project_key.replace("_", " ").upper()
                 
-                # Dynamic header block containing the nested formatting parameters
                 project_label_tr_html = f'''
                 <tr style="background-color: #f0fdfa; font-weight: bold; border-left: 3px solid #0d9488;">
                     <td colspan="{5 + len(planning_years)}" style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8.5pt; text-align: left; color: #0d9488;">
@@ -1049,7 +1046,6 @@ class ISSPDynamicCompiler:
             total_cols = 6 + len(planning_years)
             total_cols_span = 5 + len(planning_years)
             
-            # Table cell fallback handlers
             capex_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No capital outlay proposals approved.</td></tr>'
             mooe_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No software subscription proposals approved.</td></tr>'
             continuing_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No continuing institutional expenses saved.</td></tr>'
@@ -1171,13 +1167,10 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-            dc = metadata.get("mithi_data_center") or {}
             total_inv_cols = 2 + (2 * len(planning_years))
             
-            # Baseline catalog fallback rows
             total_inv_fallback_html = f'<tr><td colspan="{total_inv_cols}" style="padding:6px; text-align:center; color:#94a3b8;">No equipment inventories catalogued.</td></tr>'
 
-            # Database-backed server storage capacities & operating system census (Gaps 15, 16, 17)
             server_capacities_html = ""
             for cap in metadata.get("server_capacities_json", []):
                 server_capacities_html += f'''
@@ -1207,7 +1200,6 @@ class ISSPDynamicCompiler:
                 </tr>
                 '''
 
-            # Extended Annex A-1 Structured Survey segments (Gaps 4, 5, 8.2)
             sec_dr = metadata.get("mithi_security_dr") or {}
             sec_list = [
                 ("Security Policy / Guidelines", sec_dr.get("has_security_policy", False)),
@@ -1549,11 +1541,9 @@ def compile_issp_document(self, metadata: dict):
         # --------------------------------------------------
         self.update_state(state="PROGRESS", meta={"progress": 35, "status": "Synchronizing glossary, campuses, and survey databases..."})
         
-        # Gap 1: Campus profiles database mapping
         campuses = db.query(Campus).all()
         campuses_data = []
         for campus in campuses:
-            # Map campus administrators and planners safely from planners_json
             depts = db.query(Department).filter(Department.campus_id == campus.id).all()
             campus_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).\
                 join(Department).filter(Department.campus_id == campus.id).scalar() or Decimal("0.00")
@@ -1572,7 +1562,6 @@ def compile_issp_document(self, metadata: dict):
             })
         metadata["campuses"] = campuses_data
 
-        # Gap 2: Accreditation offerings
         degree_offerings = db.query(DegreeOffering).order_by(DegreeOffering.department_name.asc()).all()
         metadata["degree_offerings"] = [
             {
@@ -1583,7 +1572,6 @@ def compile_issp_document(self, metadata: dict):
             } for d in degree_offerings
         ]
 
-        # Gap 3: GAA performance parameters
         gaa_performance_metrics = db.query(GaaPerformance).all()
         metadata["gaa_performance"] = [
             {
@@ -1592,7 +1580,6 @@ def compile_issp_document(self, metadata: dict):
             } for m in gaa_performance_metrics
         ]
 
-        # Gap 4: Strategic Concerns Matrix normalized lookup
         strategic_concerns_db = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).all()
         metadata["strategic_concerns_json"] = [
             {
@@ -1602,36 +1589,30 @@ def compile_issp_document(self, metadata: dict):
             } for c in strategic_concerns_db
         ]
 
-        # Gap 7: Glossary glossary vocabulary query
         glossary_db = db.query(GlossaryTerm).order_by(GlossaryTerm.term.asc()).all()
         metadata["glossary_terms"] = [{"term": g.term, "definition": g.definition} for g in glossary_db]
 
-        # Gap 8: Guideline instructions query
         instructions_db = db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
         metadata["general_instructions"] = [{"step_number": i.step_number, "instruction_text": i.instruction_text} for i in instructions_db]
 
-        # Gap 15: HDD server storage tally lookup
         capacities_db = db.query(ServerCapacityTrack).all()
         metadata["server_capacities_json"] = [
             {"tier": r.capacity_tier, "location": r.location, "quantity": r.quantity}
             for r in capacities_db
         ]
 
-        # Gap 16: Client operating platform licensing audits
         os_census_db = db.query(ClientOsCensus).all()
         metadata["os_census_json"] = [
             {"os_name": r.os_name, "workstations_count": r.workstations_count, "servers_count": r.servers_count}
             for r in os_census_db
         ]
 
-        # Gap 17: Office software platform licensing census
         software_census_db = db.query(OfficeSoftwareCensus).all()
         metadata["office_software_census_json"] = [
             {"software_name": r.software_name, "license_count": r.license_count}
             for r in software_census_db
         ]
 
-        # Gap 19: Core offices directory mapping
         core_offices_db = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).all()
         metadata["core_offices_json"] = [
             {
@@ -1641,7 +1622,6 @@ def compile_issp_document(self, metadata: dict):
             } for o in core_offices_db
         ]
 
-        # Gap 24: Cross-Agency joint projects mapping
         cross_projects_db = db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
         metadata["cross_projects_json"] = [
             {
@@ -1654,7 +1634,6 @@ def compile_issp_document(self, metadata: dict):
             } for cp in cross_projects_db
         ]
 
-        # Gap 25: Performance Measurement Matrix targets alignment
         pmf_metrics_db = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
         metadata["pmf_matrix_json"] = [
             {
@@ -1668,7 +1647,6 @@ def compile_issp_document(self, metadata: dict):
             } for pm in pmf_metrics_db
         ]
 
-        # Gap 11 & 12: Cost break-downs mapping
         annual_costs_db = db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.issp_period == issp_period).all()
         metadata["annual_costs_breakdown"] = [
             {
@@ -1680,7 +1658,6 @@ def compile_issp_document(self, metadata: dict):
             } for cb in annual_costs_db if cb.cost_type == "Continuing"
         ]
 
-        # Gap 18: IT Organizational staffing headcounts mapping
         staff_positions_db = db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
         metadata["staff_positions_json"] = [
             {
@@ -1712,7 +1689,6 @@ def compile_issp_document(self, metadata: dict):
             metadata["mithi_data_center"] = narrative.mithi_data_center
             metadata["mithi_hardware_inventory"] = narrative.mithi_hardware_inventory
             
-            # Gaps 4, 5, 8.2 extended MITHI surveys metadata loading
             metadata["mithi_security_dr"] = narrative.mithi_security_dr
             metadata["mithi_data_archiving"] = narrative.mithi_data_archiving
             metadata["mithi_ict_issues"] = narrative.mithi_ict_issues
@@ -1731,8 +1707,6 @@ def compile_issp_document(self, metadata: dict):
             metadata["fiber_backbone_url"] = resolve_local_img_path(narrative.fiber_backbone_url)
             metadata["system_architecture_url"] = resolve_local_img_path(narrative.system_architecture_url)
             metadata["network_topology_url"] = resolve_local_img_path(narrative.network_topology_url)
-
-            # Gap 6: ISSP Process Flow diagram S3 URL resolution
             metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
 
             metadata["transmittal_recipient"] = narrative.transmittal_recipient
@@ -1741,7 +1715,6 @@ def compile_issp_document(self, metadata: dict):
             metadata["transmittal_recipient_address"] = narrative.transmittal_recipient_address
             metadata["transmittal_date"] = narrative.transmittal_date
             
-            # Map robust scope choice JSON block
             metadata["scope_json"] = narrative.scope_json
 
             if narrative.network_layout_url:
@@ -1761,7 +1734,6 @@ def compile_issp_document(self, metadata: dict):
 
         self.update_state(state="PROGRESS", meta={"progress": 40, "status": "Compiling approved CapEx and MOOE items..."})
         
-        # Load approved proposals with eager loading of departments and deployment relations
         approved_proposals = db.query(Proposal).options(
             joinedload(Proposal.department),
             joinedload(Proposal.deployments_relation)
@@ -1771,7 +1743,6 @@ def compile_issp_document(self, metadata: dict):
             Proposal.is_archived == False
         ).all()
 
-        # Load approved subscriptions with eager loading of departments
         approved_subscriptions = db.query(SubscriptionProposal).options(
             joinedload(SubscriptionProposal.department)
         ).filter(
@@ -1780,7 +1751,6 @@ def compile_issp_document(self, metadata: dict):
             SubscriptionProposal.is_archived == False
         ).all()
 
-        # Enforce late-binding state validation for cold storage assets
         cold_capex = [p for p in approved_proposals if p.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or p.is_restoring]
         cold_mooe = [sub for sub in approved_subscriptions if sub.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or sub.is_restoring]
 
@@ -2068,6 +2038,7 @@ def compile_issp_document(self, metadata: dict):
         }
 
     except SoftTimeLimitExceeded as timeout_exc:
+        db_session.rollback()
         logger.error(f"Celery SoftTimeLimitExceeded hit during PDF compilation: {str(timeout_exc)}")
         self.update_state(
             state="FAILURE", 
@@ -2076,6 +2047,7 @@ def compile_issp_document(self, metadata: dict):
         raise timeout_exc
         
     except Exception as e:
+        db_session.rollback()
         logger.error(f"Async dynamic compilation failed: {str(e)}")
         self.update_state(
             state="FAILURE", 

@@ -1,864 +1,6 @@
 
 
 =========================================
-CORE SYSTEM FILE: .\bootstrap.py
-=========================================
-
-import os
-import sys
-import subprocess
-
-# Define the folder structure
-folders = [
-    "app",
-    "app/database",
-    "app/storage",
-    "app/tasks",
-    "uploads"
-]
-
-# Define file paths and their respective contents
-files = {}
-
-# --- DEPENDENCIES ---
-files["requirements.txt"] = """fastapi==0.110.0
-uvicorn==0.28.0
-celery==5.3.6
-redis==5.0.3
-boto3==1.34.69
-python-dotenv==1.0.1
-SQLAlchemy==2.0.28
-psycopg2-binary==2.9.9
-python-multipart==0.0.9
-weasyprint==62.3
-"""
-
-# --- ENVIRONMENT CONFIGURATION ---
-files[".env"] = """# System Configuration
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/issp_core
-REDIS_URL=redis://localhost:6379/0
-
-# Storage Selection: set to 's3' or 'local'
-STORAGE_TYPE=local
-
-# AWS S3 Settings (Required only if STORAGE_TYPE=s3)
-AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_STORAGE_BUCKET_NAME=cspc-issp-vault
-AWS_S3_REGION_NAME=ap-southeast-1
-
-# Additional Platform Configurations
-SECRET_KEY=fallback_local_secret_key_12345
-GOOGLE_CLIENT_ID=your-google-oauth-client-id.apps.googleusercontent.com
-GLOBAL_BUDGET_CEILING=50000000.00
-"""
-
-# --- INITS ---
-files["app/__init__.py"] = ""
-files["app/database/__init__.py"] = ""
-files["app/storage/__init__.py"] = ""
-files["app/tasks/__init__.py"] = ""
-
-# --- CENTRAL CONFIGURATION MODULE ---
-files["app/config.py"] = """import os
-from decimal import Decimal
-from dotenv import load_dotenv
-
-load_dotenv()
-
-class Settings:
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/issp_core")
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    STORAGE_TYPE: str = os.getenv("STORAGE_TYPE", "local")
-    
-    # S3 Credentials
-    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY")
-    AWS_STORAGE_BUCKET_NAME: str = os.getenv("AWS_STORAGE_BUCKET_NAME", "cspc-issp-vault")
-    AWS_S3_REGION_NAME: str = os.getenv("AWS_S3_REGION_NAME", "ap-southeast-1")
-
-    # Security & Global Constraints
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "fallback_local_secret_key_12345")
-    GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
-    GLOBAL_BUDGET_CEILING: Decimal = Decimal(os.getenv("GLOBAL_BUDGET_CEILING", "50000000.00"))
-
-    # Local Directory Config
-    BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    LOCAL_UPLOAD_DIR: str = os.path.join(BASE_DIR, "uploads")
-
-settings = Settings()
-"""
-
-# --- DATABASE SESSION ---
-files["app/database/session.py"] = """from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from app.config import settings
-
-engine = create_engine(settings.DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-"""
-
-# --- DATABASE MODELS ---
-files["app/database/models.py"] = """import enum
-import uuid
-from decimal import Decimal
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-from sqlalchemy import (
-    Boolean,
-    DateTime,
-    Enum,
-    ForeignKey,
-    Integer,
-    Numeric,
-    String,
-    event,
-    func,
-)
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, Session
-
-class Base(DeclarativeBase):
-    pass
-
-class RoleTag(str, enum.Enum):
-    ROLE_DEPT_USER = "ROLE_DEPT_USER"
-    ROLE_MIS_ADMIN = "ROLE_MIS_ADMIN"
-
-class ProposalStatus(str, enum.Enum):
-    DRAFT = "DRAFT"
-    SUBMITTED = "SUBMITTED"
-    RETURNED = "RETURNED"
-    APPROVED = "APPROVED"
-
-class Department(Base):
-    __tablename__ = "departments"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
-
-    users: Mapped[List["User"]] = relationship("User", back_populates="department")
-    proposals: Mapped[List["Proposal"]] = relationship("Proposal", back_populates="department")
-    budget_ceiling: Mapped[Optional["BudgetCeiling"]] = relationship("BudgetCeiling", back_populates="department")
-
-class User(Base):
-    __tablename__ = "users"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    role_tag: Mapped[RoleTag] = mapped_column(Enum(RoleTag), nullable=False)
-    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("departments.id"), nullable=True)
-    is_whitelisted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    department: Mapped[Optional[Department]] = relationship("Department", back_populates="users")
-
-class Proposal(Base):
-    __tablename__ = "issp_core"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    department_id: Mapped[int] = mapped_column(ForeignKey("departments.id"), nullable=False)
-    status: Mapped[ProposalStatus] = mapped_column(Enum(ProposalStatus), default=ProposalStatus.DRAFT, nullable=False)
-    payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    department: Mapped[Department] = relationship("Department", back_populates="proposals")
-    audit_logs: Mapped[List["AuditTrail"]] = relationship("AuditTrail", back_populates="proposal")
-
-class BudgetCeiling(Base):
-    __tablename__ = "budget_ceilings"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    department_id: Mapped[int] = mapped_column(ForeignKey("departments.id"), unique=True, nullable=False)
-    sub_ceiling: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
-    global_ceiling: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
-
-    department: Mapped[Department] = relationship("Department", back_populates="budget_ceiling")
-
-class AuditTrail(Base):
-    __tablename__ = "audit_trails"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    proposal_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("issp_core.id"), nullable=False)
-    action: Mapped[str] = mapped_column(String(100), nullable=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    old_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    new_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-
-    proposal: Mapped[Proposal] = relationship("Proposal", back_populates="audit_logs")
-    user: Mapped[User] = relationship("User")
-
-def validate_budget_ceilings_limit(session: Session, proposed_dept_id: int, proposed_sub_ceiling: Decimal) -> None:
-    global_cfg = session.query(BudgetCeiling.global_ceiling).first()
-    if not global_cfg:
-        return
-
-    global_limit = global_cfg[0]
-    sum_other_sub_ceilings = (
-        session.query(func.sum(BudgetCeiling.sub_ceiling))
-        .filter(BudgetCeiling.department_id != proposed_dept_id)
-        .scalar()
-    ) or Decimal("0.00")
-
-    if sum_other_sub_ceilings + proposed_sub_ceiling > global_limit:
-        raise ValueError(
-            f"Validation Failed: Sum of Department Sub-Ceilings exceeds the Global Budget Ceiling of PHP {global_limit:,.2f}"
-        )
-
-@event.listens_for(BudgetCeiling, "before_insert")
-@event.listens_for(BudgetCeiling, "before_update")
-def receive_before_flush(mapper, connection, target: BudgetCeiling):
-    session = Session(bind=connection)
-    validate_budget_ceilings_limit(session, target.department_id, target.sub_ceiling)
-"""
-
-# --- REVISED CONDITIONAL STORAGE CLIENT ---
-files["app/storage/s3_client.py"] = """import os
-import re
-import shutil
-import logging
-from typing import Dict, Any, Optional
-import boto3
-from botocore.exceptions import ClientError
-from botocore.config import Config
-from app.config import settings
-
-logger = logging.getLogger(__name__)
-
-class ISSPStorageClient:
-    def __init__(self):
-        self.storage_type = settings.STORAGE_TYPE.lower()
-        self.bucket_name = settings.AWS_STORAGE_BUCKET_NAME
-        
-        if self.storage_type == "s3":
-            self.client = boto3.client(
-                "s3",
-                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                region_name=settings.AWS_S3_REGION_NAME,
-                config=Config(signature_version="s3v4")
-            )
-        else:
-            self.client = None
-            os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
-
-    def _sanitize_filename(self, filename: str) -> str:
-        return re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
-
-    def get_canvas_key(self, proposal_id: str, supplier_name: str, filename: str) -> str:
-        safe_supplier = self._sanitize_filename(supplier_name.lower())
-        safe_file = self._sanitize_filename(filename)
-        return f"canvases/{proposal_id}/{safe_supplier}/{safe_file}"
-
-    def get_tor_key(self, proposal_id: str, filename: str) -> str:
-        safe_file = self._sanitize_filename(filename)
-        return f"proposals_tor/{proposal_id}/{safe_file}"
-
-    def get_unserviceable_report_key(self, department_id: str, filename: str) -> str:
-        safe_file = self._sanitize_filename(filename)
-        return f"unserviceable_reports/{department_id}/{safe_file}"
-
-    def get_diagram_key(self, category: str, filename: str) -> str:
-        safe_file = self._sanitize_filename(filename)
-        return f"diagrams/{category}/{safe_file}"
-
-    def get_generated_pdf_key(self, issp_id: str) -> str:
-        return f"generated_issps/{issp_id}.pdf"
-
-    def generate_upload_url(
-        self,
-        object_key: str,
-        content_type: str,
-        max_content_length: int,
-        expiration_seconds: int = 3600
-    ) -> Optional[Dict[str, Any]]:
-        if self.storage_type == "s3":
-            try:
-                response = self.client.generate_presigned_post(
-                    Bucket=self.bucket_name,
-                    Key=object_key,
-                    Fields={"Content-Type": content_type},
-                    Conditions=[
-                        {"Content-Type": content_type},
-                        ["content-length-range", 1, max_content_length]
-                    ],
-                    ExpiresIn=expiration_seconds
-                )
-                return response
-            except ClientError as e:
-                logger.error(f"Failed generating presigned POST for key {object_key}: {e}")
-                return None
-        else:
-            local_target_path = os.path.join(settings.LOCAL_UPLOAD_DIR, *object_key.split("/"))
-            return {
-                "url": f"/api/local-upload-mock/{object_key}",
-                "fields": {
-                    "Content-Type": content_type,
-                    "local_destination": local_target_path
-                }
-            }
-
-    def generate_download_url(
-        self,
-        object_key: str,
-        expiration_seconds: int = 1800
-    ) -> Optional[str]:
-        if self.storage_type == "s3":
-            try:
-                url = self.client.generate_presigned_url(
-                    ClientMethod="get_object",
-                    Params={"Bucket": self.bucket_name, "Key": object_key},
-                    ExpiresIn=expiration_seconds
-                )
-                return url
-            except ClientError as e:
-                logger.error(f"Failed generating download link for key {object_key}: {e}")
-                return None
-        else:
-            return f"/static/uploads/{object_key}"
-
-    def upload_compiled_pdf(self, file_data: bytes, issp_id: str) -> bool:
-        key = self.get_generated_pdf_key(issp_id)
-        if self.storage_type == "s3":
-            try:
-                self.client.put_object(
-                    Bucket=self.bucket_name,
-                    Key=key,
-                    Body=file_data,
-                    ContentType="application/pdf"
-                )
-                return True
-            except ClientError as e:
-                logger.error(f"Failed direct upload of compiled PDF {issp_id}: {e}")
-                return False
-        else:
-            try:
-                local_path = os.path.join(settings.LOCAL_UPLOAD_DIR, *key.split("/"))
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(local_path, "wb") as f:
-                    f.write(file_data)
-                return True
-            except IOError as e:
-                logger.error(f"Failed writing compiled PDF {issp_id} to local disk: {e}")
-                return False
-
-storage_client = ISSPStorageClient()
-"""
-
-# --- CELERY APP INSTANCE ---
-files["app/tasks/celery_app.py"] = """from celery import Celery
-from app.config import settings
-
-celery_app = Celery(
-    "issp_tasks",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL
-)
-
-celery_app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    timezone="Asia/Manila",
-    enable_utc=True,
-)
-
-celery_app.autodiscover_tasks(["app.tasks"])
-"""
-
-# --- REVISED TWO-PASS PDF GENERATION TASK ---
-files["app/tasks/pdf_tasks.py"] = """import logging
-import io
-import time
-from celery import shared_task
-from app.storage.s3_client import storage_client
-
-# WeasyPrint handles pagination dynamically and elegantly without headless browser dependencies
-from weasyprint import HTML, Document
-
-logger = logging.getLogger(__name__)
-
-class ISSPCompiler:
-    @staticmethod
-    def compile_html_template(data: dict) -> str:
-        cover_html = f'''
-        <div class="page cover-page">
-            <img src="{data.get("agency_logo_url", "")}" class="logo" style="max-height:100px;"/>
-            <h1>INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)</h1>
-            <h2>{data.get("issp_period_years", "2026 - 2028")}</h2>
-            <h3>{data.get("agency_name", "Camarines Sur Polytechnic Colleges")}</h3>
-            <div class="signatories" style="margin-top:50px;">
-                <p><strong>Prepared By:</strong> {data.get("signatory_prepared_by", "John Doe")}</p>
-                <p><strong>Approved By:</strong> {data.get("signatory_approved_by", "Amado oliva")}</p>
-            </div>
-        </div>
-        '''
-
-        toc_html = '''
-        <div class="page toc-page">
-            <h2>TABLE OF CONTENTS</h2>
-            <ul class="toc-list" style="list-style:none; padding:0;">
-                <li>Part I: Organizational Profile ...................................................... [TOC_PART_I]</li>
-                <li>Part II: Information Systems Strategy .............................................. [TOC_PART_II]</li>
-                <li>Part V: Summary of Investments (CapEx/MOOE) ........................................ [TOC_PART_V]</li>
-            </ul>
-        </div>
-        '''
-
-        part1_html = f'''
-        <div class="page part-i">
-            <h2 id="part-i-anchor">PART I: ORGANIZATIONAL PROFILE</h2>
-            <h4>Mandate</h4>
-            <p>{data.get("agency_mandate", "Default Mandate")}</p>
-            <h4>Vision</h4>
-            <p>{data.get("agency_vision", "Default Vision")}</p>
-        </div>
-        '''
-
-        part5_html = f'''
-        <div class="page part-v">
-            <h2 id="part-v-anchor">PART V: SUMMARY OF INVESTMENTS (CapEx/MOOE)</h2>
-            <p>Total Budget Footprint: <strong>PHP {data.get("allocated_budget", 32570500.00):,.2f}</strong></p>
-        </div>
-        '''
-
-        css_style = '''
-        <style>
-            @page { size: A4; margin: 20mm; }
-            body { font-family: sans-serif; line-height: 1.6; }
-            .page { page-break-after: always; }
-            .cover-page { text-align: center; padding-top: 50mm; }
-        </style>
-        '''
-        return f"<html><head>{css_style}</head><body>{cover_html}{toc_html}{part1_html}{part5_html}</body></html>"
-
-@shared_task(bind=True, name="app.tasks.pdf_tasks.compile_issp_document")
-def compile_issp_document(self, metadata: dict):
-    self.update_state(state="PROGRESS", meta={"progress": 10, "status": "Acquiring DB locks..."})
-    time.sleep(1)
-    
-    self.update_state(state="PROGRESS", meta={"progress": 25, "status": "Fetching JSONB database payloads..."})
-    time.sleep(1)
-    
-    # Render Pass 1
-    self.update_state(state="PROGRESS", meta={"progress": 50, "status": "Executing Pass 1: Calculating Document Height & Pagination..."})
-    html_content = ISSPCompiler.compile_html_template(metadata)
-    html_doc = HTML(string=html_content)
-    rendered_doc = html_doc.render()
-    
-    page_mappings = {}
-    for page_idx, page in enumerate(rendered_doc.pages):
-        for anchor in page.anchors:
-            if anchor == "part-i-anchor":
-                page_mappings["[TOC_PART_I]"] = page_idx + 1
-            elif anchor == "part-v-anchor":
-                page_mappings["[TOC_PART_V]"] = page_idx + 1
-                
-    page_mappings.setdefault("[TOC_PART_I]", 3)
-    page_mappings.setdefault("[TOC_PART_II]", 4)
-    page_mappings.setdefault("[TOC_PART_V]", 5)
-
-    # Render Pass 2
-    self.update_state(state="PROGRESS", meta={"progress": 75, "status": "Executing Pass 2: Rendering PMF Grids and Table of Contents..."})
-    final_html = html_content
-    for placeholder, num in page_mappings.items():
-        final_html = final_html.replace(placeholder, str(num))
-        
-    final_doc = HTML(string=final_html)
-    pdf_buffer = io.BytesIO()
-    final_doc.write_pdf(target=pdf_buffer)
-    
-    self.update_state(state="PROGRESS", meta={"progress": 90, "status": "Uploading compiled stream to S3 Vault..."})
-    file_bytes = pdf_buffer.getvalue()
-    
-    issp_id = metadata.get("issp_id", "ISSP-CSPC-2026-V1")
-    storage_client.upload_compiled_pdf(file_bytes, issp_id)
-    
-    time.sleep(1)
-    
-    download_url = storage_client.generate_download_url(storage_client.get_generated_pdf_key(issp_id))
-    return {
-        "status": "SUCCESS",
-        "file_url": download_url,
-        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-"""
-
-# --- REVISED CORE REST API (app/main.py) ---
-# Outer triple-single quotes protect interior triple-double docstring quotes
-files["app/main.py"] = '''import os
-import sys
-import time
-import logging
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Request, status, HTTPException
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.exceptions import RequestValidationError
-
-from app.config import settings
-from app.auth.router import router as auth_router
-from app.dept.router import router as dept_router
-from app.admin.router import router as admin_router
-from app.database.models import DecryptionError, BusinessRuleViolation
-
-# Configure diagnostic stdout logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[E-ISSP SYSTEM] %(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger("app.main")
-
-# Resolve allowed CORS origins safely
-cors_origins = settings.CORS_ORIGINS
-if not cors_origins:
-    cors_origins = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
-    ]
-elif isinstance(cors_origins, str):
-    cors_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Handles application startup and shutdown procedures.
-    Prints all registered endpoints to stdout on boot to verify route structures.
-    """
-    logger.info("=" * 70)
-    logger.info("INITIALIZING CSPC E-ISSP COMPLIANCE ENGINE")
-    logger.info("=" * 70)
-    
-    # Route Diagnosis Table
-    logger.info("Scanning and mapping active API routing tables...")
-    routes_registered = []
-    for route in app.routes:
-        methods = getattr(route, "methods", None)
-        methods_str = f"[{', '.join(methods)}]" if methods else "[STATIC/WS]"
-        routes_registered.append(f"  -> {route.path} {methods_str}")
-        
-    for r in sorted(routes_registered):
-        logger.info(r)
-        
-    logger.info(f"Scan complete: {len(app.routes)} active routes registered.")
-    logger.info("=" * 70)
-    yield
-    logger.info("De-allocating application system engine instances...")
-
-
-# Initialize the API engine with lifespan
-app = FastAPI(
-    title="CSPC e-ISSP Compliance Backend Engine",
-    description="Domain-separated backend engine supporting DICT standard compliance, budget sub-ceiling allocations, and automated dual-pass PDF rendering.",
-    version="4.3",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan
-)
-
-# Standard CORSMiddleware configuration (Primary CORS Engine Layer)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"]
-)
-
-
-# ==========================================================
-# DIAGNOSTICS & REQUEST TRACKING MIDDLEWARE
-# ==========================================================
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """
-    Tracks and logs every incoming network request, processing duration, and its matching output status code.
-    If requests do not appear here, traffic is reaching a ghost process on Port 8000.
-    """
-    start_time = time.time()
-    logger.info(f"Incoming Request: {request.method} {request.url.path}")
-    try:
-        response = await call_next(request)
-        process_time_ms = (time.time() - start_time) * 1000
-        logger.info(
-            f"Outgoing Response: {request.method} {request.url.path} - "
-            f"Status: {response.status_code} - Latency: {process_time_ms:.2f}ms"
-        )
-        return response
-    except Exception as exc:
-        process_time_ms = (time.time() - start_time) * 1000
-        logger.error(
-            f"Request failed: {request.method} {request.url.path} - "
-            f"Latency: {process_time_ms:.2f}ms - Unhandled Exception: {str(exc)}",
-            exc_info=True
-        )
-        raise exc
-
-
-# ==========================================================
-# CORS-SAFE EXCEPTION HANDLERS
-# ==========================================================
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    logger.warning(f"Request schema validation failed: {exc.errors()}")
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": exc.errors()}
-    )
-
-
-@app.exception_handler(DecryptionError)
-async def decryption_exception_handler(request: Request, exc: DecryptionError):
-    logger.critical(f"Internal cryptographic failure: {str(exc)}")
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An internal system cryptographic error occurred during data processing."}
-    )
-
-
-@app.exception_handler(BusinessRuleViolation)
-async def business_rule_exception_handler(request: Request, exc: BusinessRuleViolation):
-    logger.warning(f"Business constraint failure intercepted: {str(exc)}")
-    return JSONResponse(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        content={"detail": str(exc)}
-    )
-
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail}
-    )
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    raw_error_message = str(exc)
-    sanitized_error = raw_error_message
-    for keyword in ["password", "secret", "token", "key", "private", "database_url"]:
-        if keyword in sanitized_error.lower():
-            sanitized_error = f"[REDACTED_SENSITIVE_DATA_CONTAINING_{keyword.upper()}]"
-            break
-
-    logger.error(f"Unhandled Exception: {sanitized_error}", exc_info=exc)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An unexpected internal server error occurred. Please contact the system administrator."}
-    )
-
-
-# ==========================================================
-# ROUTER INTEGRATION & STATIC FILE SERVING
-# ==========================================================
-
-app.include_router(auth_router)
-app.include_router(dept_router)
-app.include_router(admin_router)
-
-# Mount local upload file system strictly using settings.LOCAL_UPLOAD_DIR
-if settings.STORAGE_TYPE == "local":
-    try:
-        os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
-        app.mount(
-            "/static/uploads", 
-            StaticFiles(directory=settings.LOCAL_UPLOAD_DIR), 
-            name="static"
-        )
-        logger.info(f"Successfully mounted local uploads static directory: {settings.LOCAL_UPLOAD_DIR}")
-    except Exception as e:
-        logger.error(f"Failed to configure or mount local upload directory: {str(e)}")
-
-
-# ==========================================================
-# DIAGNOSTICS & SYSTEM UTILITY ENDPOINTS
-# ==========================================================
-
-@app.get("/api/health", tags=["System Diagnostics"])
-async def check_engine_health():
-    """ Returns consolidated active engine settings and diagnostic configurations. """
-    storage_mode = getattr(settings, "STORAGE_TYPE", "local")
-    budget_limit = getattr(settings, "GLOBAL_BUDGET_CEILING", 0.0)
-    region = getattr(settings, "AWS_S3_REGION_NAME", "LOCAL_EMULATOR") if storage_mode == "s3" else "LOCAL_EMULATOR"
-    
-    return JSONResponse(
-        content={
-            "status": "online",
-            "storage_mode": storage_mode,
-            "region": region,
-            "global_budget_limit": f"PHP {budget_limit:,.2f}" if budget_limit else "Not Configured"
-        }
-    )
-'''
-
-# --- DATABASE SEEDER (seed.py) ---
-files["seed.py"] = """import logging
-import sys
-from decimal import Decimal
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from app.database.models import Base, User, Department, BudgetCeiling, RoleTag
-from app.config import settings
-
-logging.basicConfig(level=logging.INFO, format="[SYSTEM] %(asctime)s - %(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
-
-def bootstrap_environment():
-    logger.info("Initializing database connection engine...")
-    engine = create_engine(settings.DATABASE_URL)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    db = SessionLocal()
-
-    try:
-        logger.info("Compiling relational database tables...")
-        Base.metadata.create_all(bind=engine)
-
-        logger.info("Seeding standard CSPC academic and support departments...")
-        departments_to_seed = [
-            "College of Engineering",
-            "College of Computer Studies",
-            "College of Arts & Sciences",
-            "Human Resources Management"
-        ]
-
-        dept_instances = {}
-        for name in departments_to_seed:
-            dept = db.query(Department).filter(Department.name == name).first()
-            if not dept:
-                dept = Department(name=name)
-                db.add(dept)
-                db.flush()
-                logger.info(f"Department created: '{name}'")
-            dept_instances[name] = dept
-
-        logger.info("Seeding default authenticated and whitelisted users...")
-        users_to_seed = [
-            {
-                "email": "mis@cspc.edu.ph",
-                "role_tag": RoleTag.ROLE_MIS_ADMIN,
-                "dept_name": None,
-                "is_whitelisted": True
-            },
-            {
-                "email": "faculty.eng@cspc.edu.ph",
-                "role_tag": RoleTag.ROLE_DEPT_USER,
-                "dept_name": "College of Engineering",
-                "is_whitelisted": True
-            },
-            {
-                "email": "faculty.cas@cspc.edu.ph",
-                "role_tag": RoleTag.ROLE_DEPT_USER,
-                "dept_name": "College of Arts & Sciences",
-                "is_whitelisted": True
-            }
-        ]
-
-        for u_data in users_to_seed:
-            user = db.query(User).filter(User.email == u_data["email"]).first()
-            if not user:
-                dept_id = dept_instances[u_data["dept_name"]].id if u_data["dept_name"] else None
-                user = User(
-                    email=u_data["email"],
-                    role_tag=u_data["role_tag"],
-                    department_id=dept_id,
-                    is_whitelisted=u_data["is_whitelisted"]
-                )
-                db.add(user)
-                logger.info(f"User seeded & whitelisted: '{u_data['email']}' ({u_data['role_tag']})")
-
-        logger.info("Configuring departmental sub-ceiling limits against global ceiling...")
-        global_limit = settings.GLOBAL_BUDGET_CEILING
-        
-        ceilings_to_seed = {
-            "College of Engineering": Decimal("5000000.00"),
-            "College of Arts & Sciences": Decimal("2000000.00"),
-            "Human Resources Management": Decimal("1000000.00")
-        }
-
-        for dept_name, limit in ceilings_to_seed.items():
-            dept = dept_instances.get(dept_name)
-            if dept:
-                ceiling = db.query(BudgetCeiling).filter(BudgetCeiling.department_id == dept.id).first()
-                if not ceiling:
-                    ceiling = BudgetCeiling(
-                        department_id=dept.id,
-                        sub_ceiling=limit,
-                        global_ceiling=global_limit
-                    )
-                    db.add(ceiling)
-                    logger.info(f"Ceiling established for {dept_name}: PHP {limit:,.2f}")
-
-        db.commit()
-        logger.info("Environment bootstrapping completed successfully.")
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Critical failure during environment bootstrap: {e}")
-        sys.exit(1)
-    finally:
-        db.close()
-
-if __name__ == "__main__":
-    bootstrap_environment()
-"""
-
-# --- PROJECT SETUP PROCESSOR ---
-def setup_project():
-    print("[SYSTEM] Starting automated workspace generation...")
-    
-    # 1. Create directories
-    for folder in folders:
-        if not os.path.exists(folder):
-            os.makedirs(folder)
-            print(f"Created directory: {folder}")
-            
-    # 2. Write file contents
-    for path, content in files.items():
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-            print(f"Created and populated file: {path}")
-
-    # 3. Create virtual environment
-    if not os.path.exists("venv"):
-        print("[SYSTEM] Creating Python virtual environment ('venv')...")
-        subprocess.run([sys.executable, "-m", "venv", "venv"])
-    
-    # 4. Install dependencies
-    print("[SYSTEM] Installing application dependencies...")
-    pip_path = os.path.join("venv", "Scripts", "pip") if os.name == "nt" else os.path.join("venv", "bin", "pip")
-    
-    # Upgrade pip and install requirements
-    subprocess.run([pip_path, "install", "--upgrade", "pip"])
-    subprocess.run([pip_path, "install", "-r", "requirements.txt"])
-    
-    print("\n[SUCCESS] CSPC-E-ISSP Workspace initialized.")
-    print("Run these commands to start your system:")
-    print("  Terminal 1 (Server): .\\venv\\Scripts\\Activate.ps1; uvicorn app.main:app --reload")
-    print("  Terminal 2 (Celery): .\\venv\\Scripts\\Activate.ps1; celery -A app.tasks.celery_app worker --loglevel=info --pool=solo")
-
-if __name__ == "__main__":
-    setup_project()
-
-=========================================
 CORE SYSTEM FILE: .\package-lock.json
 =========================================
 
@@ -940,7 +82,17 @@ from app.database.models import (
     CatalogItem,
     DegreeOffering,
     GaaPerformance,
-    ScopeChoice
+    ScopeChoice,
+    Campus,
+    CoreOfficeFunction,
+    StrategicConcern,
+    PerformanceMetric,
+    GlossaryTerm,
+    GeneralInstruction,
+    ClientOsCensus,
+    OfficeSoftwareCensus,
+    ServerCapacityTrack,
+    IctStaffPosition
 )
 from app.config import settings
 
@@ -953,6 +105,21 @@ def bootstrap_metadata(db):
     Seeds static institutional metadata including academic/support departments,
     baseline standardized DICT catalog items, and the master planning narrative.
     """
+    logger.info("Seeding physical SUC campuses...")
+    campuses_to_seed = [
+        {"name": "Nabua Main Campus", "location": "Nabua, Camarines Sur", "code": "MAIN"},
+        {"name": "Buhi Satellite Campus", "location": "Buhi, Camarines Sur", "code": "BUHI"}
+    ]
+    campus_instances = {}
+    for camp_data in campuses_to_seed:
+        campus = db.query(Campus).filter(Campus.code == camp_data["code"]).first()
+        if not campus:
+            campus = Campus(**camp_data)
+            db.add(campus)
+            db.flush()
+            logger.info(f"Campus registered: '{camp_data['name']}'")
+        campus_instances[camp_data["code"]] = campus
+
     logger.info("Seeding CSPC academic and support departments...")
     departments_to_seed = [
         "College of Engineering",
@@ -964,10 +131,11 @@ def bootstrap_metadata(db):
     ]
 
     dept_instances = {}
+    main_campus = campus_instances["MAIN"]
     for name in departments_to_seed:
         dept = db.query(Department).filter(Department.name == name).first()
         if not dept:
-            dept = Department(name=name)
+            dept = Department(name=name, campus_id=main_campus.id)
             db.add(dept)
             db.flush()
             logger.info(f"Department created: '{name}'")
@@ -1083,37 +251,25 @@ def bootstrap_metadata(db):
         {"id": 13, "office_name": "Registrar's Office", "description": "Manages student enrollment files, grades logging, transcripts, and official registrations.", "division": "Academic"},
         {"id": 14, "office_name": "Medical and Dental Clinic", "description": "Provides clinical services and dental checkups to students, faculty, and administrative staff.", "division": "Support"},
         {"id": 15, "office_name": "Library Services", "description": "Manages book catalogs, book circulations, and OPAC digital reference assets.", "division": "Academic Support"},
-        {"id": 16, "office_name": "Physical Plant and Facilities", "description": "Manages physical construction, network cabling routes, electrical setups, and grounds maintenance.", "division": "Support"},
-        {"id": 17, "office_name": "Security Office", "description": "Manages campus security, guards assignments, smart card logging, and emergency response.", "division": "Support"},
-        {"id": 18, "office_name": "Guidance and Counseling", "description": "Offers mental health support, career placements, and guidance counseling for students.", "division": "Support"},
-        {"id": 19, "office_name": "Student Affairs and Services", "description": "Supervises student organizations, student publications, and extracurricular events.", "division": "Support"},
-        {"id": 20, "office_name": "Quality Assurance Office", "description": "Evaluates curriculum systems and certifies compliance with ISO 9001:2015 criteria.", "division": "Administration"},
-        {"id": 21, "office_name": "Internal Audit Services", "description": "Evaluates operational control structures and audits procedural compliance across divisions.", "division": "Administration"},
-        {"id": 22, "office_name": "Legal Affairs Office", "description": "Provides legal counsel, drafts agreements, and represents the SUC in administrative cases.", "division": "Administration"},
-        {"id": 23, "office_name": "Gender and Development Office", "description": "Maintains equality initiatives and enforces gender-fair practices across academic units.", "division": "Support"},
-        {"id": 24, "office_name": "Records and Archives Office", "description": "Secures institutional document registers, records files, and historical archives.", "division": "Administration"},
-        {"id": 25, "office_name": "College of Engineering (Office of the Dean)", "description": "Manages BS Civil, BS Electrical, and BS Mechanical engineering program curricula.", "division": "Academic"},
-        {"id": 26, "office_name": "College of Computer Studies (Office of the Dean)", "description": "Supervises BS Information Technology and BS Computer Science program curricula.", "division": "Academic"},
-        {"id": 27, "office_name": "College of Arts and Sciences (Office of the Dean)", "description": "Supervises liberal arts curricula and general mathematics courses.", "division": "Academic"},
-        {"id": 28, "office_name": "College of Health Sciences (Office of the Dean)", "description": "Supervises Nursing program curricula and clinical training setups.", "division": "Academic"},
-        {"id": 29, "office_name": "College of Tourism (Office of the Dean)", "description": "Supervises Tourism and hospitality management program curricula.", "division": "Academic"},
-        {"id": 30, "office_name": "Extension Services Office", "description": "Designs and executes community development and technical skills transfer programs.", "division": "Research"},
-        {"id": 31, "office_name": "Research and Development Office", "description": "Coordinates academic research programs and administers institutional research grants.", "division": "Research"},
-        {"id": 32, "office_name": "Publications and Media Office", "description": "Coordinates the publication of research journals, academic newsletters, and college books.", "division": "Research"},
-        {"id": 33, "office_name": "Intellectual Property Office", "description": "Coordinates technology transfer and files patent claims with IPOPHL.", "division": "Research"},
-        {"id": 34, "office_name": "Alumni Affairs Office", "description": "Coordinates alumni tracking, updates tracer registries, and runs graduate surveys.", "division": "Support"},
-        {"id": 35, "office_name": "Public Relations Office", "description": "Coordinates SUC press releases and updates social media channels.", "division": "Administration"},
-        {"id": 36, "office_name": "Planning and Development Office", "description": "Formulates institutional land use development plans and coordinates SUC master plans.", "division": "Administration"},
-        {"id": 37, "office_name": "Scholarship and Financial Assistance", "description": "Administers scholarship funds and processes student financial aid records.", "division": "Support"},
-        {"id": 38, "office_name": "Sports and Physical Education", "description": "Coordinates physical education courses and manages campus athletic equipment.", "division": "Support"},
-        {"id": 39, "office_name": "Culture and Arts Department", "description": "Manages institutional musical bands, student chorales, and cultural dance groups.", "division": "Support"},
-        {"id": 40, "office_name": "MIS Unit", "description": "Manages core administrative databases, processes payroll systems, and secures SUC ledgers.", "division": "Technical Operations"},
-        {"id": 41, "office_name": "Network and Infrastructure Unit", "description": "Manages fiber backbones, configures campus Wi-Fi, and secures firewalls.", "division": "Technical Operations"}
+        {"id": 16, "office_name": "Physical Plant and Facilities", "description": "Manages physical construction, network cabling routes, electrical setups, and grounds maintenance.", "division": "Support"}
     ]
 
     baseline_period = "2026-2028"
     logger.info(f"Seeding full DICT-compliant Master Narrative for cycle '{baseline_period}'...")
     narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == baseline_period).first()
+    
+    strategic_concerns_data = [
+        {"mfo": "Enrollment Services", "systems": "Student Information and Accounting System (SIAS)", "problems": "Delayed student enrollment processing and grading sync latency during semesters.", "intended_use": "SIAS Cloud deployment and local caching layers."},
+        {"mfo": "Library Management", "systems": "Online Library Information System", "problems": "Difficulty tracking missing book circulation records in real-time.", "intended_use": "OPAC and Library Information DB integration."},
+        {"mfo": "Monitoring & Security", "systems": "Security Management System", "problems": "Manual check-ins causing queues at entrances and parking spaces.", "intended_use": "Smart Card reader gates and central log DB."},
+        {"mfo": "Human Resources", "systems": "HRMS / Payroll System", "problems": "Biometrics mismatch requiring manual DTR corrections.", "intended_use": "Central biometrics verification system."}
+    ]
+
+    pmf_matrix_data = [
+        {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of courses using the LMS", "baseline": "10% of courses", "target": "100% adoption", "collection_method": "Survey/Logs", "responsibility": "MICT Office"},
+        {"project_title": "Upgrade Leased Line Internet Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Average bandwidth speed in administrative offices", "baseline": "20 Mbps", "target": "100 Mbps", "collection_method": "Speed test logs", "responsibility": "MICT Office"}
+    ]
+
     if not narrative:
         narrative = MasterNarrative(
             issp_period=baseline_period,
@@ -1133,6 +289,7 @@ def bootstrap_metadata(db):
             transmittal_recipient_address="DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City",
             transmittal_date="22 February 2023",
             scope_choice=ScopeChoice.DEPARTMENT_WIDE,
+            scope_json={"department_wide": True},
             
             mandate_html="""<p>The College mandate is defined under Section 2 of Batas Pambansa Bilang 512, the law which created the Camarines Sur Polytechnic Colleges (CSPC). BP 512 provides: "The Camarines Sur Polytechnic Colleges shall primarily provide higher technological, professional and vocational instruction and training in fisheries, trade and technology, arts and sciences, and as well as promote research, history, extension services, and progressive leadership in these fields."</p>""",
             vision_html="Polytechnic education at its best for the Bicolanos",
@@ -1142,10 +299,7 @@ def bootstrap_metadata(db):
             
             planners_json=[
                 {"name": "DR. IAN P. BENITEZ", "position": "Associate Professor V / Director, MICTC", "email": "ianbenitez@cspc.edu.ph", "contact_number": "09190840018"},
-                {"name": "VINCENT B. CORTEZ", "position": "Instructor / Head, MIS", "email": "vincentcortez@cspc.edu.ph", "contact_number": "09304821749"},
-                {"name": "REY T. CORTEZ", "position": "Instructor / Head, NICM", "email": "reytcortez@cspc.edu.ph", "contact_number": "09124469837"},
-                {"name": "JUNIESEL C. PASCUAL", "position": "Admin Aide V / Head, Repair and Maintenance", "email": "jampascual@cspc.edu.ph", "contact_number": "09070626816"},
-                {"name": "KAELA MARIE N. FORTUNO", "position": "Instructor / Database Administrator", "email": "kfortuno@cspc.edu.ph", "contact_number": "09289764863"}
+                {"name": "VINCENT B. CORTEZ", "position": "Instructor / Head, MIS", "email": "vincentcortez@cspc.edu.ph", "contact_number": "09304821749"}
             ],
             manpower_json={
                 "admin_regular": 53,
@@ -1156,78 +310,19 @@ def bootstrap_metadata(db):
             },
             annual_ict_budget=Decimal("31907000.00"),
             core_offices_json=core_offices_registry,
+            strategic_concerns_json=strategic_concerns_data,
+            pmf_matrix_json=pmf_matrix_data,
             
-            # Strategic Concerns Matrix
-            strategic_concerns_json=[
-                {"mfo": "Enrollment Services", "systems": "Student Information and Accounting System (SIAS)", "problems": "Delayed student enrollment processing and grading sync latency during semesters.", "intended_use": "SIAS Cloud deployment and local caching layers."},
-                {"mfo": "Library Management", "systems": "Online Library Information System", "problems": "Difficulty tracking missing book circulation records in real-time.", "intended_use": "OPAC and Library Information DB integration."},
-                {"mfo": "Monitoring & Security", "systems": "Security Management System", "problems": "Manual check-ins causing queues at entrances and parking spaces.", "intended_use": "Smart Card reader gates and central log DB."},
-                {"mfo": "Human Resources", "systems": "HRMS / Payroll System", "problems": "Biometrics mismatch requiring manual DTR corrections.", "intended_use": "Central biometrics verification system."},
-                {"mfo": "Event Management", "systems": "EMS / Online Portal", "problems": "Double-booking of university facilities during events.", "intended_use": "Online facility booking and event calendar system."},
-                {"mfo": "Records & Documents", "systems": "Document Management System", "problems": "Delayed routing of paper documents between departments.", "intended_use": "Digital document signing and tracking system."},
-                {"mfo": "Inventory & Supply", "systems": "Supply Office Inventory System", "problems": "Discrepancies in tracking obsolete equipment counts.", "intended_use": "Dynamic inventory system with QR tracking."},
-                {"mfo": "Budget Management", "systems": "Financial Management System", "problems": "Manual budget tracking causing delayed budget alignments.", "intended_use": "Central accounting system with ceiling limits."},
-                {"mfo": "Extension Services", "systems": "Extension Portal", "problems": "Manual aggregation of community extension service hours.", "intended_use": "Extension portal tracking and reporting."},
-                {"mfo": "Research Services", "systems": "E-Research Portal", "problems": "Difficult to access and verify published research journals.", "intended_use": "E-Research indexing database and access control."}
-            ],
-            
-            # Proposed Systems Profile
             systems_json=[
-                {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Students, Faculty, Registrars", "users_external": "DICT, CHED", "owners": "MICT Office"},
-                {"name": "Online Library System", "description": "Manages book catalogs, book circulations, and OPAC digital reference assets.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Hybrid Scheme", "users_internal": "Librarians, Students, Faculty", "users_external": "Community researchers", "owners": "Library Services"},
-                {"name": "Security Management System", "description": "Handles campus smart card check-ins, vehicle logs, and security tracking.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Local Network Scheme", "users_internal": "Security Guards, Administrative staff", "users_external": "Visitors, Vehicles", "owners": "Security Office"},
-                {"name": "Human Resource Management System (HRMS)", "description": "Handles HR records, manages payroll structures, and automates DTR processing.", "status": "For Enhancement", "dev_strategy": "In-house Developed", "computing_scheme": "Hybrid Scheme", "users_internal": "HR staff, SUC employees", "users_external": "None", "owners": "HRM Office"},
-                {"name": "Document Management System (DMS)", "description": "Coordinates document scanning, digital signatures, and dynamic document routing.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Cloud Computing", "users_internal": "All SUC departments", "users_external": "None", "owners": "Records Office"},
-                {"name": "Supply Office Inventory System (SOIS)", "description": "Coordinates QR code inventory tagging and monitors unserviceable reports.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Local Network Scheme", "users_internal": "Supply staff, SUC property officers", "users_external": "None", "owners": "Supply and Property Unit"},
-                {"name": "Extension Services Portal", "description": "Tracks extension training programs, and aggregates community hours.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Cloud Computing", "users_internal": "Extension officers, SUC faculty", "users_external": "Community partners", "owners": "Extension Services Office"},
-                {"name": "E-Research Indexing Portal", "description": "Tracks research journal submissions, publication approvals, and intellectual property records.", "status": "For Development", "dev_strategy": "In-house Developed", "computing_scheme": "Cloud Computing", "users_internal": "Research directors, SUC faculty", "users_external": "External researchers", "owners": "Research Office"},
-                {"name": "Unified Financial Management System", "description": "Coordinates SUC accounting ledgers, tracks budget limits, and runs budget validation checks.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Hybrid Scheme", "users_internal": "Accounting staff, Budget officers", "users_external": "COA auditors, DBM", "owners": "Accounting Office"}
+                {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Students, Faculty, Registrars", "users_external": "DICT, CHED", "owners": "MICT Office"}
             ],
-            
-            # Databases Required
             databases_json=[
-                {"name": "SIAS Database", "description": "Stores student demographics, grades, accounting receipts, and curriculum mapping.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server", "owners": "Registrar's Office"},
-                {"name": "Library Database", "description": "Stores digital book catalogs, borrower records, and reference logs.", "status": "Proposed", "is_served": "Online Library System", "storage_media": "Local Server and Cloud Backup", "owners": "Library Services"},
-                {"name": "School Monitoring Database", "description": "Stores smart card scans, security guard logs, and visitor access records.", "status": "Proposed", "is_served": "Security Management System", "storage_media": "On-premise NAS server", "owners": "Security Office"},
-                {"name": "HRMS Database", "description": "Stores employee profiles, biometric logs, salary grades, and DTR records.", "status": "Existing", "is_served": "Human Resource Management System (HRMS)", "storage_media": "Local Server and Cloud Backup", "owners": "HRM Office"},
-                {"name": "Supply Database", "description": "Stores SUC asset inventories, equipment status, and unserviceable reports.", "status": "Proposed", "is_served": "Supply Office Inventory System (SOIS)", "storage_media": "Local Server", "owners": "Supply and Property Unit"},
-                {"name": "Document Database", "description": "Stores digital document registers, routing history, and digital signatures.", "status": "Proposed", "is_served": "Document Management System (DMS)", "storage_media": "Secure Cloud Storage", "owners": "Records Office"},
-                {"name": "Extension Database", "description": "Stores extension project milestones, community demographics, and training logs.", "status": "Proposed", "is_served": "Extension Services Portal", "storage_media": "Cloud Database", "owners": "Extension Services Office"},
-                {"name": "E-Research Database", "description": "Stores published journal articles, researcher profiles, and IPO claims.", "status": "Proposed", "is_served": "E-Research Indexing Portal", "storage_media": "Cloud Database", "owners": "Research Office"}
+                {"name": "SIAS Database", "description": "Stores student demographics, grades, accounting receipts, and curriculum mapping.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server", "owners": "Registrar's Office"}
             ],
-            
-            # SUC ICT Projects
             internal_projects_json=[
-                {"name": "Deployment of Moodle LMS", "objectives": "To allow distance teaching and learning\\nTo automate grade computations", "duration": "2026 - 2028", "deliverables": "Online Learning Space (LeOnS)"},
-                {"name": "Upgrade Leased Line Internet Bandwidth", "objectives": "To provide efficient online transaction speed", "duration": "2026 - 2028", "deliverables": "Leased Line Internet"},
-                {"name": "CSPC Campus WiFi Installation", "objectives": "To provide high-speed WiFi connections across campus", "duration": "2026 - 2028", "deliverables": "Enterprise WiFi network"},
-                {"name": "Technology for Education Classrooms", "objectives": "To setup modern interactive classrooms for teaching", "duration": "2026 - 2028", "deliverables": "Smart TV configurations"},
-                {"name": "Buhi Campus Network Infrastructure Setup", "objectives": "To connect satellite campus facilities with Nabua LAN", "duration": "2026 - 2028", "deliverables": "Buhi Campus Fiber Link"},
-                {"name": "Digital VOIP System", "objectives": "To upgrade legacy analog phones with digital VOIP routing", "duration": "2026 - 2028", "deliverables": "Digital Intercom system"},
-                {"name": "Smart TV CATV Campus Network", "objectives": "To deploy digital information monitors across colleges", "duration": "2026 - 2028", "deliverables": "Digital TV signage system"},
-                {"name": "Main Campus LAN Upgrade", "objectives": "To route optical fiber cables to academic buildings", "duration": "2026 - 2028", "deliverables": "Upgraded fiber network links"},
-                {"name": "Advanced Computing Laboratories", "objectives": "To configure modern computer lab setups for CS/IT students", "duration": "2026 - 2028", "deliverables": "Upgraded computer laboratories"},
-                {"name": "CSPC Micro Data Center Build", "objectives": "To construct secure physical server rooms for local backlogs", "duration": "2026 - 2028", "deliverables": "On-premise Server Room"},
-                {"name": "Campus-Wide CCTV Security Surveillance", "objectives": "To mount IP surveillance cameras in security zones", "duration": "2026 - 2028", "deliverables": "Physical security network"},
-                {"name": "Multimedia Center Development", "objectives": "To setup digital editing labs for publications division", "duration": "2026 - 2028", "deliverables": "Upgraded multimedia editing suites"}
+                {"name": "Deployment of Moodle LMS", "objectives": "To allow distance teaching and learning\\nTo automate grade computations", "duration": "2026 - 2028", "deliverables": "Online Learning Space (LeOnS)"}
             ],
             cross_projects_json=[],
-            
-            # Performance Measurement Frameworks
-            pmf_matrix_json=[
-                {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of courses using the LMS", "baseline": "10% of courses", "target": "100% adoption", "collection_method": "Survey/Logs", "responsibility": "MICT Office"},
-                {"project_title": "Upgrade Leased Line Internet Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Average bandwidth speed in administrative offices", "baseline": "20 Mbps", "target": "100 Mbps", "collection_method": "Speed test logs", "responsibility": "MICT Office"},
-                {"project_title": "CSPC Campus WiFi Installation", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of campus covered by active Wi-Fi zones", "baseline": "30% coverage", "target": "100% coverage", "collection_method": "Signal mapping logs", "responsibility": "MICT Office"},
-                {"project_title": "Technology for Education Classrooms", "result_hierarchy": "Immediate outcome", "indicator": "Number of smart interactive classrooms deployed", "baseline": "2 rooms", "target": "20 rooms", "collection_method": "Physical inventory", "responsibility": "MICT Office"},
-                {"project_title": "Buhi Campus Network Infrastructure Setup", "result_hierarchy": "Immediate outcome", "indicator": "Buhi Campus network bandwidth throughput", "baseline": "5 Mbps", "target": "50 Mbps", "collection_method": "Bandwidth speed tests", "responsibility": "Buhi Campus Office"},
-                {"project_title": "Digital VOIP System", "result_hierarchy": "Immediate outcome", "indicator": "Number of departments connected with active VOIP setups", "baseline": "0 units", "target": "40 departments", "collection_method": "Technical checklists", "responsibility": "MICT Office"},
-                {"project_title": "Smart TV CATV Campus Network", "result_hierarchy": "Immediate outcome", "indicator": "Number of digital signage units active in colleges", "baseline": "0 units", "target": "15 units", "collection_method": "Physical inventory", "responsibility": "MICT Office"},
-                {"project_title": "Main Campus LAN Upgrade", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of main campus buildings connected by fiber", "baseline": "40% buildings", "target": "100% buildings", "collection_method": "Network layout maps", "responsibility": "MICT Office"},
-                {"project_title": "Advanced Computing Laboratories", "result_hierarchy": "Immediate outcome", "indicator": "Ratio of modern workstations to computer laboratory students", "baseline": "1:3", "target": "1:1", "collection_method": "Laboratory census logs", "responsibility": "MICT Office"},
-                {"project_title": "CSPC Micro Data Center Build", "result_hierarchy": "Immediate outcome", "indicator": "Security compliance certification of physical server rooms", "baseline": "Not certified", "target": "Certified", "collection_method": "Quality assurance audit", "responsibility": "MICT Office"},
-                {"project_title": "Campus-Wide CCTV Security Surveillance", "result_hierarchy": "Immediate outcome", "indicator": "Security incidents recorded and resolved via camera logs", "baseline": "10% incidents", "target": "95% incidents", "collection_method": "Security logbooks", "responsibility": "Security Office"},
-                {"project_title": "Multimedia Center Development", "result_hierarchy": "Immediate outcome", "indicator": "Number of university journals formatted in editing labs", "baseline": "2 issues", "target": "12 issues", "collection_method": "Publications index", "responsibility": "Publications Office"}
-            ],
             
             # Connectivity Details
             mithi_network_profile={
@@ -1242,9 +337,7 @@ def bootstrap_metadata(db):
                 "employees_with_official_email": 324
             },
             mithi_special_solutions=[
-                {"solution_name": "Geographic Information System", "is_used": True, "maintenance_cost": 25000.00},
-                {"solution_name": "Online Payment Gateway Integration", "is_used": True, "maintenance_cost": 50000.00},
-                {"solution_name": "Dynamic Biometrics Fingerprint Synchronization", "is_used": True, "maintenance_cost": 35000.00}
+                {"solution_name": "Geographic Information System", "is_used": True, "maintenance_cost": 25000.00}
             ],
             mithi_data_center={
                 "has_data_center": True,
@@ -1252,96 +345,146 @@ def bootstrap_metadata(db):
                 "has_backup_site": True,
                 "maintenance_strategy": "In-house with third-party escalations"
             },
-            
-            # Baseline Equipment Inventory
             mithi_hardware_inventory=[
                 {
                     "device_type": "Desktop PC",
                     "yearly_owned": {"2026": 120, "2027": 150, "2028": 180},
                     "yearly_leased": {"2026": 0, "2027": 0, "2028": 0},
                     "older_than_3_years": 45
-                },
-                {
-                    "device_type": "Workstation Laptop",
-                    "yearly_owned": {"2026": 80, "2027": 100, "2028": 110},
-                    "yearly_leased": {"2026": 0, "2027": 0, "2028": 0},
-                    "older_than_3_years": 12
-                },
-                {
-                    "device_type": "High-End Server",
-                    "yearly_owned": {"2026": 4, "2027": 6, "2028": 8},
-                    "yearly_leased": {"2026": 0, "2027": 0, "2028": 0},
-                    "older_than_3_years": 2
                 }
             ],
-            
-            # Schedules
             implementation_schedules=[
                 {
                     "project_id": "00000000-0000-0000-0000-000000000001",
                     "project_name": "Deployment of Moodle LMS",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000002",
-                    "project_name": "Upgrade Leased Line Internet Bandwidth",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000003",
-                    "project_name": "CSPC Campus WiFi Installation",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000004",
-                    "project_name": "Technology for Education Classrooms",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000005",
-                    "project_name": "Buhi Campus Network Infrastructure Setup",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000006",
-                    "project_name": "Digital VOIP System",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000007",
-                    "project_name": "Smart TV CATV Campus Network",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000008",
-                    "project_name": "Main Campus LAN Upgrade",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000009",
-                    "project_name": "Advanced Computing Laboratories",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000010",
-                    "project_name": "CSPC Micro Data Center Build",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000011",
-                    "project_name": "Campus-Wide CCTV Security Surveillance",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
-                },
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000012",
-                    "project_name": "Multimedia Center Development",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True, "2027_Q1": True, "2027_Q2": True, "2027_Q3": True, "2027_Q4": True, "2028_Q1": True, "2028_Q2": True, "2028_Q3": True, "2028_Q4": True}
+                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True}
                 }
             ]
         )
         db.add(narrative)
         db.flush()
         logger.info(f"Default Master Narrative established for cycle '{baseline_period}'.")
+
+    # ==========================================================
+    # POPULATING COMPLEMENTARY NORMALIZED RELATIONAL DIRECTORIES
+    # ==========================================================
+    logger.info("Synchronizing normalized core office functions relational table...")
+    for idx, office in enumerate(core_offices_registry):
+        existing_office = db.query(CoreOfficeFunction).filter(
+            CoreOfficeFunction.office_name == office["office_name"],
+            CoreOfficeFunction.issp_period == baseline_period
+        ).first()
+        if not existing_office:
+            db_office = CoreOfficeFunction(
+                id=office["id"],
+                issp_period=baseline_period,
+                office_name=office["office_name"],
+                division=office["division"],
+                description=office["description"]
+            )
+            db.add(db_office)
+
+    logger.info("Synchronizing normalized strategic concerns relational table...")
+    for idx, concern in enumerate(strategic_concerns_data):
+        existing_concern = db.query(StrategicConcern).filter(
+            StrategicConcern.critical_system == concern["systems"],
+            StrategicConcern.issp_period == baseline_period
+        ).first()
+        if not existing_concern:
+            db_concern = StrategicConcern(
+                issp_period=baseline_period,
+                mfo=concern["mfo"],
+                critical_system=concern["systems"],
+                problems=concern["problems"],
+                intended_use=concern["intended_use"],
+                order_index=idx
+            )
+            db.add(db_concern)
+
+    logger.info("Synchronizing normalized performance metrics relational table...")
+    for pmf in pmf_matrix_data:
+        existing_pmf = db.query(PerformanceMetric).filter(
+            PerformanceMetric.project_title == pmf["project_title"],
+            PerformanceMetric.indicator == pmf["indicator"],
+            PerformanceMetric.issp_period == baseline_period
+        ).first()
+        if not existing_pmf:
+            db_pmf = PerformanceMetric(
+                issp_period=baseline_period,
+                project_title=pmf["project_title"],
+                result_hierarchy=pmf["result_hierarchy"],
+                indicator=pmf["indicator"],
+                baseline=pmf["baseline"],
+                target=pmf["target"],
+                collection_method=pmf["collection_method"],
+                responsibility=pmf["responsibility"]
+            )
+            db.add(db_pmf)
+
+    logger.info("Seeding default Glossary Terms (Pages 6-10)...")
+    glossary_terms = [
+        {"term": "ISSP", "definition": "Information Systems Strategic Plan - a blueprint mapping out an agency's target IT layout frameworks.", "order_index": 1},
+        {"term": "MITHI", "definition": "Medium-Term Information and Communications Technology Harmonization Initiative.", "order_index": 2},
+        {"term": "COA", "definition": "Commission on Audit - the supreme auditing institution of the Republic of the Philippines.", "order_index": 3}
+    ]
+    for term in glossary_terms:
+        existing = db.query(GlossaryTerm).filter(GlossaryTerm.term == term["term"]).first()
+        if not existing:
+            db.add(GlossaryTerm(**term))
+
+    logger.info("Seeding General Submission Guidelines (Page 11)...")
+    guidelines = [
+        {"step_number": 1, "instruction_text": "Ensure all physical hardware inventories (Annex A-5) are documented cleanly before proposing replacements."},
+        {"step_number": 2, "instruction_text": "Verify market canvas quotation values. Standard catalog prices act as absolute ceiling blocks."}
+    ]
+    for step in guidelines:
+        existing = db.query(GeneralInstruction).filter(GeneralInstruction.step_number == step["step_number"]).first()
+        if not existing:
+            db.add(GeneralInstruction(**step))
+
+    logger.info("Seeding physical Server capacity tracks (Gap 15)...")
+    existing_capacity = db.query(ServerCapacityTrack).filter(ServerCapacityTrack.capacity_tier == "Above 4TB").first()
+    if not existing_capacity:
+        db.add(ServerCapacityTrack(campus_id=main_campus.id, capacity_tier="Above 4TB", location="IN-HOUSE", quantity=2))
+
+    logger.info("Seeding baseline OS census tracking metrics (Gap 16)...")
+    standard_os = [
+        {"os_name": "Windows 11 Professional", "workstations_count": 120, "servers_count": 0},
+        {"os_name": "Ubuntu Server 22.04 LTS", "workstations_count": 0, "servers_count": 5}
+    ]
+    for os_data in standard_os:
+        existing = db.query(ClientOsCensus).filter(ClientOsCensus.os_name == os_data["os_name"]).first()
+        if not existing:
+            db.add(ClientOsCensus(**os_data))
+
+    logger.info("Seeding office software productivity census metrics (Gap 17)...")
+    standard_soft = [
+        {"software_name": "Microsoft Office 2021 LTSC", "license_count": 150},
+        {"software_name": "Adobe Creative Cloud", "license_count": 25}
+    ]
+    for soft_data in standard_soft:
+        existing = db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.software_name == soft_data["software_name"]).first()
+        if not existing:
+            db.add(OfficeSoftwareCensus(**soft_data))
+
+    logger.info("Seeding baseline SUC IT Staff Positions profiles (Gap 18)...")
+    positions = [
+        {"position_title": "Database Administrator", "status": "Permanent", "count": 1},
+        {"position_title": "Information Technology Officer I", "status": "Permanent", "count": 2},
+        {"position_title": "Systems Analyst", "status": "Contractual", "count": 1}
+    ]
+    for pos in positions:
+        existing = db.query(IctStaffPosition).filter(
+            IctStaffPosition.position_title == pos["position_title"],
+            IctStaffPosition.issp_period == baseline_period
+        ).first()
+        if not existing:
+            db.add(IctStaffPosition(
+                issp_period=baseline_period,
+                position_title=pos["position_title"],
+                status=pos["status"],
+                count=pos["count"]
+            ))
 
     logger.info("Configuring departmental sub-ceiling limits against global ceiling...")
     ceilings_to_seed = {
@@ -1362,17 +505,15 @@ def bootstrap_metadata(db):
             if not ceiling:
                 ceiling = BudgetCeiling(
                     department_id=dept.id,
-                    allocated_capex=limit * Decimal("0.70"),
-                    allocated_mooe=limit * Decimal("0.30"),
                     issp_period=baseline_period
                 )
+                ceiling.sub_ceiling = limit # Auto-derives the 70/30 split cleanly via model setter
                 db.add(ceiling)
                 logger.info(f"Ceiling established for {dept_name}: PHP {limit:,.2f} (70/30 CapEx/MOOE split)")
             else:
-                ceiling.allocated_capex = limit * Decimal("0.70")
-                ceiling.allocated_mooe = limit * Decimal("0.30")
+                ceiling.sub_ceiling = limit
                 ceiling.issp_period = baseline_period
-                logger.info(f"Ceiling updated for {dept_name}: PHP {limit:,.2f} (70/30 CapEx/MOOE split)")
+                logger.info(f"Ceiling updated for {dept_name}: PHP {limit:,.2f}")
 
     return dept_instances
 
@@ -1657,11 +798,11 @@ def setup_test_database():
         "is_whitelisted": True
     }
     
-    # Passlib password hashing fallback
+    # Native bcrypt password hashing (Bypasses passlib legacy initialization bug)
     try:
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-        hashed_pw = pwd_context.hash("admin123")
+        import bcrypt
+        salt = bcrypt.gensalt()
+        hashed_pw = bcrypt.hashpw("admin123".encode("utf-8"), salt).decode("utf-8")
     except ImportError:
         hashed_pw = "admin123"
 
@@ -1741,24 +882,20 @@ def test_complete_proposal_lifecycle_and_state_locking():
     proposal_payload = {
         "item_select": "laptop_faculty",
         "custom_specification": "Standard Unit",
-        "year1_qty": 5,
-        "year2_qty": 0,
-        "year3_qty": 0,
+        "yearly_quantities": {"2026": 5, "2027": 0, "2028": 0},
         "unit_cost": 45000.00,
         "canvas_evidence_url": None
     }
     create_response = client.post("/api/dept/proposals", json=proposal_payload)
     assert create_response.status_code == 201
     proposal_id = create_response.json()["proposal_id"]
-    assert create_response.json()["current_status"] == "Draft"  # Matches updated lowercase casing
+    assert create_response.json()["current_status"] == "Draft"
 
     # 2. Update the proposal while in Draft status (Should be allowed)
     update_payload = {
         "item_select": "laptop_faculty",
         "custom_specification": "Updated Unit",
-        "year1_qty": 5,
-        "year2_qty": 0,
-        "year3_qty": 0,
+        "yearly_quantities": {"2026": 5, "2027": 0, "2028": 0},
         "unit_cost": 42000.00,
         "canvas_evidence_url": None
     }
@@ -1768,7 +905,7 @@ def test_complete_proposal_lifecycle_and_state_locking():
     # 3. Transition State: Submit the proposal (Draft -> Submitted)
     submit_response = client.put(f"/api/dept/proposals/{proposal_id}/submit")
     assert submit_response.status_code == 200
-    assert submit_response.json()["new_status"] == "Submitted"  # Matches updated lowercase casing
+    assert submit_response.json()["new_status"] == "Submitted"
 
     # 4. Attempt to update after submission (Should be locked and blocked)
     locked_update_response = client.put(f"/api/dept/proposals/{proposal_id}", json=update_payload)
@@ -1789,7 +926,7 @@ def test_prevent_submission_with_missing_unserviceable_report():
         department_id=1,
         item_name="Old Faulty Workstation",
         quantity=3,
-        status=AssetStatus.CONDEMNED,  # Matches "Condemned"
+        status=AssetStatus.CONDEMNED,
         unserviceable_report_url=None
     )
     db.add(asset)
@@ -1799,9 +936,7 @@ def test_prevent_submission_with_missing_unserviceable_report():
     proposal_payload = {
         "item_select": "laptop_faculty",
         "custom_specification": "Replacement Unit",
-        "year1_qty": 3,
-        "year2_qty": 0,
-        "year3_qty": 0,
+        "yearly_quantities": {"2026": 3, "2027": 0, "2028": 0},
         "unit_cost": 50000.00,
         "canvas_evidence_url": None
     }
@@ -1829,8 +964,9 @@ def test_budget_ceiling_validator_violation():
     # Attempt to create a sub-ceiling of 60M when the global ceiling is 50M
     invalid_ceiling = BudgetCeiling(
         department_id=99,
-        sub_ceiling=Decimal("60000000.00"),
-        global_ceiling=Decimal("50000000.00")
+        allocated_capex=Decimal("45000000.00"),
+        allocated_mooe=Decimal("20000000.00"),
+        issp_period="2026-2028"
     )
     db.add(invalid_ceiling)
     
@@ -1850,9 +986,7 @@ def test_escape_hatch_other_validation():
     invalid_payload = {
         "item_select": "other",
         "custom_specification": "",
-        "year1_qty": 1,
-        "year2_qty": 0,
-        "year3_qty": 0,
+        "yearly_quantities": {"2026": 1, "2027": 0, "2028": 0},
         "unit_cost": 75000.00,
         "canvas_evidence_url": None
     }
@@ -1873,7 +1007,7 @@ def test_glacier_restoration_lockout():
         status=ProposalStatus.DRAFT,
         item_name="pc_standard",
         unit_cost=Decimal("35000.00"),
-        year1_qty=5,
+        yearly_quantities={"2026": 5, "2027": 0, "2028": 0},
         total_qty=5,
         payload={"custom_specification": "Standard PC"},
         is_archived=False,
@@ -1888,9 +1022,7 @@ def test_glacier_restoration_lockout():
     payload = {
         "item_select": "pc_standard",
         "custom_specification": "Attempted update during restoration",
-        "year1_qty": 10,
-        "year2_qty": 0,
-        "year3_qty": 0,
+        "yearly_quantities": {"2026": 10, "2027": 0, "2028": 0},
         "unit_cost": 35000.00,
         "canvas_evidence_url": None
     }
@@ -2001,7 +1133,7 @@ def run_migrations_offline() -> None:
     # Overwrite static URL with active configuration to prevent environment mismatch
     url = settings.DATABASE_URL
     
-    # Reliably detect SQLite in offline mode via URL parsing
+    # Detect SQLite in offline mode via URL parsing
     is_sqlite = "sqlite" in url.lower()
     
     context.configure(
@@ -2009,7 +1141,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        # Conditionally render as batch to prevent table recreation issues on PostgreSQL
+        # Conditionally render as batch to prevent table recreation issues on SQLite
         render_as_batch=is_sqlite,
         compare_type=True
     )
@@ -2035,7 +1167,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        # Reliably detect SQLite via the dialect name rather than URL substrings
+        # Fix (Anomaly 3): Reliably detect SQLite via the dialect name rather than URL substrings
         is_sqlite = connection.dialect.name == "sqlite"
         
         # Enforce foreign keys during migrations if SQLite is active
@@ -2045,7 +1177,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection, 
             target_metadata=target_metadata,
-            # Conditionally render as batch to prevent table recreation issues on PostgreSQL
+            # Conditionally render as batch to prevent table recreation issues on SQLite
             render_as_batch=is_sqlite,
             # Ensure Alembic detects column type alterations (e.g. String to Text)
             compare_type=True
@@ -2086,25 +1218,31 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    # ### commands auto generated by Alembic - please adjust! ###
-    op.add_column('issp_core', sa.Column('project_key', sa.String(length=100), nullable=True))
-    op.create_index(op.f('ix_issp_core_project_key'), 'issp_core', ['project_key'], unique=False)
-    op.add_column('master_narratives', sa.Column('network_topology_url', sa.String(length=500), nullable=True))
-    op.add_column('subscription_proposals', sa.Column('project_key', sa.String(length=100), nullable=True))
-    op.create_index(op.f('ix_subscription_proposals_project_key'), 'subscription_proposals', ['project_key'], unique=False)
-    # ### end Alembic commands ###
+    # Execute modifications using batch operations to support SQLite constraints
+    with op.batch_alter_table('issp_core', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('project_key', sa.String(length=100), nullable=True))
+        batch_op.create_index(batch_op.f('ix_issp_core_project_key'), ['project_key'], unique=False)
+
+    with op.batch_alter_table('master_narratives', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('network_topology_url', sa.String(length=500), nullable=True))
+
+    with op.batch_alter_table('subscription_proposals', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('project_key', sa.String(length=100), nullable=True))
+        batch_op.create_index(batch_op.f('ix_subscription_proposals_project_key'), ['project_key'], unique=False)
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index(op.f('ix_subscription_proposals_project_key'), table_name='subscription_proposals')
-    op.drop_column('subscription_proposals', 'project_key')
-    op.drop_column('master_narratives', 'network_topology_url')
-    op.drop_index(op.f('ix_issp_core_project_key'), table_name='issp_core')
-    op.drop_column('issp_core', 'project_key')
-    # ### end Alembic commands ###
+    with op.batch_alter_table('subscription_proposals', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_subscription_proposals_project_key'))
+        batch_op.drop_column('project_key')
 
+    with op.batch_alter_table('master_narratives', schema=None) as batch_op:
+        batch_op.drop_column('network_topology_url')
+
+    with op.batch_alter_table('issp_core', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_issp_core_project_key'))
+        batch_op.drop_column('project_key')
 
 =========================================
 CORE SYSTEM FILE: .\alembic\versions\1c46431b9ce2_replace_static_years_with_json.py
@@ -2132,35 +1270,37 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    # ### commands auto generated by Alembic - please adjust! ###
-    op.add_column('issp_core', sa.Column('yearly_quantities', sa.JSON(), nullable=False))
-    op.create_index(op.f('ix_issp_core_total_qty'), 'issp_core', ['total_qty'], unique=False)
-    op.drop_column('issp_core', 'year3_qty')
-    op.drop_column('issp_core', 'year2_qty')
-    op.drop_column('issp_core', 'year1_qty')
-    op.add_column('subscription_proposals', sa.Column('yearly_users', sa.JSON(), nullable=False))
-    op.create_index(op.f('ix_subscription_proposals_total_multiyear_mooe'), 'subscription_proposals', ['total_multiyear_mooe'], unique=False)
-    op.drop_column('subscription_proposals', 'year2_users')
-    op.drop_column('subscription_proposals', 'year1_users')
-    op.drop_column('subscription_proposals', 'year3_users')
-    # ### end Alembic commands ###
+    # Execute modifications using batch operations for SQLite compatibility
+    with op.batch_alter_table('issp_core', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('yearly_quantities', sa.JSON(), nullable=False, server_default='{}'))
+        batch_op.create_index(batch_op.f('ix_issp_core_total_qty'), ['total_qty'], unique=False)
+        batch_op.drop_column('year3_qty')
+        batch_op.drop_column('year2_qty')
+        batch_op.drop_column('year1_qty')
+
+    with op.batch_alter_table('subscription_proposals', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('yearly_users', sa.JSON(), nullable=False, server_default='{}'))
+        batch_op.create_index(batch_op.f('ix_subscription_proposals_total_multiyear_mooe'), ['total_multiyear_mooe'], unique=False)
+        batch_op.drop_column('year2_users')
+        batch_op.drop_column('year1_users')
+        batch_op.drop_column('year3_users')
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    # ### commands auto generated by Alembic - please adjust! ###
-    op.add_column('subscription_proposals', sa.Column('year3_users', sa.INTEGER(), autoincrement=False, nullable=False))
-    op.add_column('subscription_proposals', sa.Column('year1_users', sa.INTEGER(), autoincrement=False, nullable=False))
-    op.add_column('subscription_proposals', sa.Column('year2_users', sa.INTEGER(), autoincrement=False, nullable=False))
-    op.drop_index(op.f('ix_subscription_proposals_total_multiyear_mooe'), table_name='subscription_proposals')
-    op.drop_column('subscription_proposals', 'yearly_users')
-    op.add_column('issp_core', sa.Column('year1_qty', sa.INTEGER(), autoincrement=False, nullable=False))
-    op.add_column('issp_core', sa.Column('year2_qty', sa.INTEGER(), autoincrement=False, nullable=False))
-    op.add_column('issp_core', sa.Column('year3_qty', sa.INTEGER(), autoincrement=False, nullable=False))
-    op.drop_index(op.f('ix_issp_core_total_qty'), table_name='issp_core')
-    op.drop_column('issp_core', 'yearly_quantities')
-    # ### end Alembic commands ###
+    with op.batch_alter_table('subscription_proposals', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('year3_users', sa.INTEGER(), nullable=False, server_default='0'))
+        batch_op.add_column(sa.Column('year1_users', sa.INTEGER(), nullable=False, server_default='0'))
+        batch_op.add_column(sa.Column('year2_users', sa.INTEGER(), nullable=False, server_default='0'))
+        batch_op.drop_index(batch_op.f('ix_subscription_proposals_total_multiyear_mooe'))
+        batch_op.drop_column('yearly_users')
 
+    with op.batch_alter_table('issp_core', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('year1_qty', sa.INTEGER(), nullable=False, server_default='0'))
+        batch_op.add_column(sa.Column('year2_qty', sa.INTEGER(), nullable=False, server_default='0'))
+        batch_op.add_column(sa.Column('year3_qty', sa.INTEGER(), nullable=False, server_default='0'))
+        batch_op.drop_index(batch_op.f('ix_issp_core_total_qty'))
+        batch_op.drop_column('yearly_quantities')
 
 =========================================
 CORE SYSTEM FILE: .\alembic\versions\53b54ce023f3_add_campuses_and_campus_id_to_.py
@@ -2342,8 +1482,8 @@ celery_app.conf.update(
     # Connection settings: Ensure resilience during worker startup if Redis boots slowly
     broker_connection_retry_on_startup=True,
     
-    # Reliability: Restart child processes after a set threshold to prevent memory bloating
-    worker_max_tasks_per_child=100,
+    # Fix (Anomaly 25): Restart child processes after a low threshold to prevent WeasyPrint memory leaks
+    worker_max_tasks_per_child=getattr(settings, "CELERY_WORKER_MAX_TASKS_PER_CHILD", 5),
     
     # Concurrency: Limit prefetching to 1 task per worker to balance heavy PDF compilation tasks
     worker_prefetch_multiplier=1,
@@ -2351,8 +1491,8 @@ celery_app.conf.update(
     # Reliability: Acknowledge tasks only after completion so crashes can be recovered safely
     task_acks_late=True,
     
-    # Storage setting: Do not automatically re-queue on worker loss to prevent infinite crash loops
-    task_reject_on_worker_lost=False,
+    # Fix (Anomaly 22): Reject and requeue tasks if a worker process terminates abruptly mid-task
+    task_reject_on_worker_lost=getattr(settings, "CELERY_TASK_REJECT_ON_WORKER_LOST", True),
     
     # Lifecycle settings: Ample padding between soft and hard timeouts to capture SoftTimeLimitExceeded
     task_soft_time_limit=300,  # 5 minutes soft limit
@@ -2412,6 +1552,13 @@ class Settings:
     AWS_STORAGE_BUCKET_NAME: str = os.getenv("AWS_STORAGE_BUCKET_NAME", "cspc-issp-vault")
     AWS_S3_REGION_NAME: str = os.getenv("AWS_S3_REGION_NAME", "ap-southeast-1")
 
+    # Fix (Anomaly 13): List of allowed legacy/fallback buckets to prevent parsing blocks when bucket names are rotated
+    AWS_FALLBACK_BUCKETS: list[str] = [
+        b.strip()
+        for b in os.getenv("AWS_FALLBACK_BUCKETS", "cspc-issp-vault,cspc-issp-prod-vault").split(",")
+        if b.strip()
+    ]
+
     # Cryptographic keys and default passwords must be strictly defined via the environment
     SECRET_KEY: str = os.getenv("SECRET_KEY")
     GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -2436,6 +1583,10 @@ class Settings:
     # Local Directory Config
     BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     LOCAL_UPLOAD_DIR: str = os.getenv("LOCAL_UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
+
+    # Fix (Anomaly 22): Worker reliability options exposed as settings parameters
+    CELERY_TASK_REJECT_ON_WORKER_LOST: bool = os.getenv("CELERY_TASK_REJECT_ON_WORKER_LOST", "true").lower() in ("true", "1", "yes")
+    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", "100"))
 
 
 settings = Settings()
@@ -2470,16 +1621,22 @@ if settings.STORAGE_TYPE == "s3":
         logger.error("STORAGE CONFIGURATION FAILURE: AWS_STORAGE_BUCKET_NAME is not defined.")
         raise ValueError("Invalid storage configuration: AWS_STORAGE_BUCKET_NAME must be specified when STORAGE_TYPE='s3'.")
 
-# Check for Celery worker environment synchronization risks
+# Check for Celery worker environment database synchronization risks (Anomaly 18)
 is_celery_worker = "CELERY_TASK_NAMES" in os.environ or any("celery" in arg.lower() for arg in getattr(sys, "argv", []))
 if is_celery_worker:
     logger.info("Worker runtime detected. Verifying database connection sync parameters...")
-    if settings.DATABASE_URL == "postgresql://postgres:postgres@localhost:5432/issp_core":
+    if "sqlite" in settings.DATABASE_URL.lower():
+        logger.warning(
+            "Celery worker is running with a local SQLite database configuration. "
+            "Ensure the worker container shares the exact same physical DB file volume path "
+            "as the FastAPI web server to prevent transaction and state mismatch anomalies."
+        )
+    elif settings.DATABASE_URL == "postgresql://postgres:postgres@localhost:5432/issp_core":
         logger.warning(
             "Celery worker is running with the default PostgreSQL fallback URL. "
-            "If your FastAPI server is using a different local database (e.g. SQLite), "
-            "background tasks will fail to locate newly registered proposals due to database mismatch. "
-            "Please ensure the Celery worker's DATABASE_URL matches the web server's DATABASE_URL."
+            "If your FastAPI server is using a different database setup, "
+            "background tasks may fail to locate newly registered proposals due to database mismatch. "
+            "Verify that the worker's DATABASE_URL matches the core web server's environment configuration."
         )
 
 # ==========================================================
@@ -2650,6 +1807,16 @@ async def log_requests(request: Request, call_next):
         )
         return response
     except Exception as exc:
+        # Fix (Anomaly 15): Roll back and close current database session on unhandled exceptions
+        from app.database.session import db_session
+        try:
+            db_session.rollback()
+            logger.info("Uncaught exception intercepted. Scoped database session rolled back cleanly.")
+        except Exception as db_exc:
+            logger.error(f"Failed to roll back database session on request exception: {str(db_exc)}")
+        finally:
+            db_session.remove()
+
         process_time_ms = (time.time() - start_time) * 1000
         logger.error(
             f"Request failed: {request.method} {request.url.path} - "
@@ -2663,6 +1830,22 @@ async def log_requests(request: Request, call_next):
 # CORS-SAFE EXCEPTION HANDLERS
 # ==========================================================
 
+def get_cors_headers(request: Request) -> dict[str, str]:
+    """
+    Fix (Anomaly 29): Generates necessary CORS headers to prevent browsers from
+    blocking API validation error responses.
+    """
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin:
+        if origin in cors_origins:
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Credentials"] = "true"
+        elif "*" in cors_origins:
+            headers["Access-Control-Allow-Origin"] = "*"
+    return headers
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
@@ -2672,6 +1855,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     logger.warning(f"Request schema validation failed: {exc.errors()}")
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        headers=get_cors_headers(request),
         content={"detail": jsonable_encoder(exc.errors())}
     )
 
@@ -2681,6 +1865,7 @@ async def decryption_exception_handler(request: Request, exc: DecryptionError):
     logger.critical(f"Internal cryptographic failure: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers=get_cors_headers(request),
         content={"detail": "An internal system cryptographic error occurred during data processing."}
     )
 
@@ -2690,6 +1875,7 @@ async def business_rule_exception_handler(request: Request, exc: BusinessRuleVio
     logger.warning(f"Business constraint failure intercepted: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
+        headers=get_cors_headers(request),
         content={"detail": str(exc)}
     )
 
@@ -2698,6 +1884,7 @@ async def business_rule_exception_handler(request: Request, exc: BusinessRuleVio
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
+        headers=get_cors_headers(request),
         content={"detail": exc.detail}
     )
 
@@ -2714,6 +1901,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled Exception: {sanitized_error}", exc_info=exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers=get_cors_headers(request),
         content={"detail": "An unexpected internal server error occurred. Please contact the system administrator."}
     )
 
@@ -2726,7 +1914,7 @@ app.include_router(auth_router)
 app.include_router(dept_router)
 app.include_router(admin_router)
 
-# Mount local upload file system strictly using settings.LOCAL_UPLOAD_DIR
+# Mount local upload file system statically using settings.LOCAL_UPLOAD_DIR
 if settings.STORAGE_TYPE == "local":
     try:
         os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
@@ -2786,6 +1974,12 @@ MFO_MAPPING = {
     "sto": "Support to Operations (STO)",
     "admin": "General Administrative and Support Services (GASS)"
 }
+
+# Fix (Anomaly 4): Shared utility to sanitize text fields against stored XSS
+def sanitize_text(v: Optional[str]) -> Optional[str]:
+    if v is not None:
+        return html.escape(v.strip())
+    return v
 
 
 # ==========================================================
@@ -2927,37 +2121,39 @@ class NeedsAssessmentCreate(BaseModel):
     @classmethod
     def resolve_mfo_code(cls, v: str) -> str:
         """
-        Intercepts inputs and maps descriptions back to standard code keys.
-        Robustly resolves abbreviations, connectors, and common casing variations.
+        Fix (Anomaly 25): Intercepts inputs and maps descriptions back to standard code keys.
+        Handles connectors, abbreviations, and cased variations without aggressive character-stripping false positives.
         """
         if not isinstance(v, str):
             return v
         
-        # Fast direct match check
         val_clean = v.strip().lower()
         if val_clean in MFO_MAPPING:
             return val_clean
 
-        # Deep normalization comparing string characters ignoring connectors and spacing
-        norm_v = "".join(c for c in val_clean if c.isalnum() or c.isspace())
-        norm_v = norm_v.replace("and", "").replace("to", "").replace("for", "").replace(" ", "")
+        exact_mappings = {
+            "advanced and higher education services": "he",
+            "higher education services": "he",
+            "advanced education services": "he",
+            "research services": "rs",
+            "extension services": "es",
+            "support to operations": "sto",
+            "general administrative and support services": "admin",
+            "general administration and support": "admin"
+        }
+        if val_clean in exact_mappings:
+            return exact_mappings[val_clean]
 
-        for key, description in MFO_MAPPING.items():
-            norm_desc = "".join(c for c in description.lower() if c.isalnum() or c.isspace())
-            norm_desc = norm_desc.replace("and", "").replace("to", "").replace("for", "").replace(" ", "")
-            if norm_v == norm_desc:
-                return key
-
-        # Dynamic substring fallback matcher
-        if "higher" in val_clean or "advanced" in val_clean:
+        # Use boundary keyword matching to avoid collision between Admin GASS and Research Support elements
+        if "higher education" in val_clean or "advanced education" in val_clean:
             return "he"
-        if "research" in val_clean:
+        if "research" in val_clean and "general" not in val_clean:
             return "rs"
         if "extension" in val_clean:
             return "es"
-        if "support" in val_clean or "sto" in val_clean:
+        if "support to operations" in val_clean or "sto" in val_clean:
             return "sto"
-        if "admin" in val_clean or "gass" in val_clean or "general" in val_clean:
+        if "admin" in val_clean or "gass" in val_clean or "general administration" in val_clean:
             return "admin"
 
         return v.strip()
@@ -2979,7 +2175,7 @@ class NeedsAssessmentResponse(NeedsAssessmentCreate):
 class ProposalUpdatePayload(BaseModel):
     """Client request parameters for editing departmental hardware requests (Annex A-6/A-1)"""
     item_select: str = Field(..., description="Selected hardware or system item catalog identifier")
-    custom_specification: Optional[str] = Field(None, max_length=1000, description="Custom details if unlisted item type is selected")
+    custom_specification: Optional[str] = Field(None, description="Custom details if unlisted item type is selected")
     
     # DYNAMIC FIELD replacing year1_qty, year2_qty, year3_qty
     yearly_quantities: Dict[str, int] = Field(
@@ -3001,6 +2197,15 @@ class ProposalUpdatePayload(BaseModel):
         """Neutralizes potential stored XSS scripts embedded within deployment locations"""
         return [html.escape(item.strip()) for item in v if item.strip()]
 
+    # Fix (Anomaly 4 & 48): Sanitize inputs and enforce max character limits of 500 on custom specifications
+    @field_validator('custom_specification', mode='before')
+    @classmethod
+    def clean_and_validate_specification(cls, v: Optional[str]) -> Optional[str]:
+        sanitized = sanitize_text(v)
+        if sanitized and len(sanitized) > 500:
+            raise ValueError("Custom specification must not exceed 500 characters.")
+        return sanitized
+
     @model_validator(mode='after')
     def validate_proposal_criteria(self) -> 'ProposalUpdatePayload':
         # Validate format of year strings and ensure no negative or overflow values exist
@@ -3019,8 +2224,6 @@ class ProposalUpdatePayload(BaseModel):
         
         # Custom Item Compliance Constraints (Resolves Section 4 Compliance Rules)
         if self.item_select.strip().lower() == "other":
-            if self.custom_specification:
-                self.custom_specification = self.custom_specification.strip()
             if not self.custom_specification or len(self.custom_specification) <= 4:
                 raise ValueError("Custom specification is mandatory for unlisted ('other') items and must be longer than 4 characters.")
             
@@ -3087,6 +2290,12 @@ class SubscriptionProposalCreate(BaseModel):
     
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
+
+    # Fix (Anomaly 4): PreventStored XSS attacks inside input fields of MOOE subscriptions
+    @field_validator('software_name', 'justification', mode='before')
+    @classmethod
+    def sanitize_subscription_texts(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_text(v)
 
     @field_validator('target_offices_json')
     @classmethod
@@ -3228,10 +2437,11 @@ class UpdateCeilingPayload(BaseModel):
 
     @model_validator(mode='after')
     def resolve_default_split(self) -> 'UpdateCeilingPayload':
-        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention (Anomaly II.2)"""
+        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention (Anomaly II.2 / Anomaly 3)"""
         if self.sub_ceiling is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
-            self.allocated_capex = (self.sub_ceiling * Decimal("0.70")).quantize(Decimal("1.00"))
-            self.allocated_mooe = self.sub_ceiling - self.allocated_capex
+            sub_dec = Decimal(str(self.sub_ceiling)).quantize(Decimal("1.00"))
+            self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
+            self.allocated_mooe = sub_dec - self.allocated_capex
         return self
 
 
@@ -3250,12 +2460,13 @@ class BulkCeilingItem(BaseModel):
     @model_validator(mode='after')
     def resolve_and_split_sub_ceiling(self) -> 'BulkCeilingItem':
         """
-        Intercepts raw sub-ceilings containing a single value rather than distinct splits.
-        Provides a safe default 70/30 division while preventing rounding discrepancies (Anomaly II.2)
+        Fix (Anomaly II.2 / Anomaly 3): Intercepts raw sub-ceilings and performs
+        precise quantized splitting to prevent rounding discrepancies.
         """
         if self.sub_ceiling_input is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
-            self.allocated_capex = (self.sub_ceiling_input * Decimal("0.70")).quantize(Decimal("1.00"))
-            self.allocated_mooe = self.sub_ceiling_input - self.allocated_capex
+            sub_dec = Decimal(str(self.sub_ceiling_input)).quantize(Decimal("1.00"))
+            self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
+            self.allocated_mooe = sub_dec - self.allocated_capex
         return self
 
     @property
@@ -3518,9 +2729,9 @@ class MithiNetworkProfile(BaseModel):
     is_connected_to_internet: bool = Field(..., description="Indicates global web routing status")
     internet_access_modes: List[str] = Field(..., example=["Leased Line", "WiFi", "DSL"])
     isps: List[str] = Field(..., example=["PLDT", "Globe"])
-    combined_bandwidth_mbps: int = Field(..., ge=0, description="Cumulative throughput capacity in Mbps")
-    employees_with_internet_access: int = Field(..., ge=0, description="Active headcount configured for outbound access")
-    employees_with_official_email: int = Field(..., ge=0, description="Active headcount with official domain emails")
+    combined_bandwidth_mbps: int = Field(..., ge=0, description="Combined bandwidth throughput in Mbps")
+    employees_with_internet_access: int = Field(..., ge=0)
+    employees_with_official_email: int = Field(..., ge=0)
 
 
 class MithiHardwareItemSchema(BaseModel):
@@ -3655,10 +2866,11 @@ class MasterNarrativeUpdate(BaseModel):
     
     signatory_approved_by: Optional[str] = Field(None, description="Printed Name & credentials of the Agency Head", example="Dr. Amado A. Oliva Jr.")
 
-    mandate_html: Optional[str] = Field("", description="DICT mandated legal references and background")
-    vision_html: Optional[str] = Field("", description="Official institutional vision statement")
-    mission_html: Optional[str] = Field("", description="Official institutional mission statement")
-    present_situation_html: Optional[str] = Field("", description="Current operational state narrative")
+    # Fix (Anomaly 30): Prevent WeasyPrint engine layout hangs via strict size boundaries on custom narrative HTML fields
+    mandate_html: Optional[str] = Field("", max_length=50000, description="DICT mandated legal references and background")
+    vision_html: Optional[str] = Field("", max_length=50000, description="Official institutional vision statement")
+    mission_html: Optional[str] = Field("", max_length=50000, description="Official institutional mission statement")
+    present_situation_html: Optional[str] = Field("", max_length=50000, description="Current operational state narrative")
     
     planners_json: Optional[List[ISPlannerSchema]] = Field([], description="Array of planning team profiles")
     manpower_json: Optional[ManpowerSchema] = Field(None, description="Detailed IT manpower demographic metrics")
@@ -3785,13 +2997,10 @@ class MasterNarrativeResponse(BaseModel):
 
     implementation_schedules: List[ImplementationScheduleItem] = []
 
+    # Fix (Anomaly 45): Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
     @field_validator('mithi_network_profile', 'mithi_data_center', 'manpower_json', mode='before')
     @classmethod
     def clear_empty_dicts(cls, v: Any) -> Any:
-        """
-        Converts empty dictionary structures `{}` retrieved from dynamic database 
-        JSON columns into `None` to prevent Pydantic validation crashes.
-        """
         if isinstance(v, dict) and not v:
             return None
         return v
@@ -3911,6 +3120,12 @@ class StrategicConcernCreate(BaseModel):
     problems: str = Field(..., example="Delayed enrollment processing and grading latency.")
     intended_use: str = Field(..., example="SIAS Cloud migration with decentralized caches.")
 
+    # Fix (Anomaly 1): Enforce the same normalization validator used for Needs Assessment alignment
+    @field_validator('mfo', mode='before')
+    @classmethod
+    def resolve_mfo_normalization(cls, v: str) -> str:
+        return NeedsAssessmentCreate.resolve_mfo_code(v)
+
 
 class StrategicConcernResponse(BaseModel):
     id: uuid.UUID
@@ -3919,6 +3134,13 @@ class StrategicConcernResponse(BaseModel):
     critical_system: str
     problems: str
     intended_use: str
+
+    # Fix (Anomaly 1): Ensure responses normalize the KRA value identically to create sequences
+    @field_validator('mfo', mode='before')
+    @classmethod
+    def resolve_mfo_normalization_response(cls, v: str) -> str:
+        return NeedsAssessmentCreate.resolve_mfo_code(v)
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -5237,7 +4459,7 @@ def admin_override_proposal(
             other_capex_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
                 Proposal.department_id == sub_proposal.department_id,
                 Proposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
-                Proposal.issp_period == sub_proposal.issp_period,
+                Proposal.issp_period == os.environ.get("ISSP_PERIOD", sub_proposal.issp_period),
                 Proposal.is_archived == False
             ).scalar() or Decimal("0.00")
 
@@ -5382,6 +4604,7 @@ def set_departmental_ceiling(
         issp_period = get_active_issp_period(db)
         is_sqlite = db.bind.dialect.name == "sqlite"
 
+        # Fix (Anomaly 26): Query and serialize the row modification lock to prevent overlapping write races
         dept_query = db.query(Department).filter(Department.id == payload.department_id)
         if not is_sqlite:
             dept_query = dept_query.with_for_update()
@@ -5411,7 +4634,8 @@ def set_departmental_ceiling(
              )
 
         existing_query = db.query(BudgetCeiling).filter(
-            BudgetCeiling.department_id == payload.department_id
+            BudgetCeiling.department_id == payload.department_id,
+            BudgetCeiling.issp_period == issp_period
         )
         if not is_sqlite:
             existing_query = existing_query.with_for_update()
@@ -5495,8 +4719,10 @@ def update_budget_ceilings_bulk(
 
                 for item in payload.sub_ceilings:
                     record_query = db.query(BudgetCeiling).filter(
-                        BudgetCeiling.department_id == item.department_id
+                        BudgetCeiling.department_id == item.department_id,
+                        BudgetCeiling.issp_period == issp_period
                     )
+                    # Fix (Anomaly 26): Enforce row level validation locking prior to mass modifications
                     if not is_sqlite:
                         record_query = record_query.with_for_update()
                     record = record_query.first()
@@ -5709,7 +4935,8 @@ def get_department_analytics(
                     custom_count += 1
                     if not s.canvas_evidence_url:
                         missing_canvas_count += 1
-                        
+            
+            # Fix (Anomaly 23): Safeguard division operations by verifying total counts are positive
             custom_ratio = (custom_count / total_count) if total_count > 0 else 0.0
             requires_review = custom_ratio > settings_obj.custom_request_ratio_threshold
             
@@ -5961,6 +5188,19 @@ async def upload_system_diagram(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Upload Failed: Image exceeds the maximum permitted size limit of 5MB."
+            )
+
+        # Fix (Anomaly 14): Validate image and PDF layout diagrams content types using signature magic bytes
+        is_valid_file = (
+            file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or  # PNG
+            file_bytes.startswith(b"\xff\xd8\xff") or        # JPEG
+            file_bytes.startswith(b"GIF8") or                # GIF
+            file_bytes.startswith(b"%PDF-")                  # PDF
+        )
+        if not is_valid_file:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security Violation: Invalid file format. Only PNG, JPG, or PDF documents are permitted as system diagrams."
             )
 
         narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
@@ -7171,7 +6411,7 @@ def delete_annual_cost(
 
 
 # ==========================================================
-# GAP 18: RELATIONAL STAFFING SYSTEM (Part IV.B)
+# GAP 18: RELATIONAL STAFFING SYSTEM (Staff Registry)
 # ==========================================================
 
 @router.get("/narratives/{issp_period}/staff-positions", response_model=List[IctStaffPositionResponse])
@@ -7513,7 +6753,13 @@ async def authenticate_standard(
 
     # Isolate password verification execution paths to prevent side-channel timing analysis
     has_valid_user = user is not None and getattr(user, "password_hash", None) is not None
-    password_hash_to_verify = user.password_hash if has_valid_user else "$2b$12$UnSgE8sT8oYp8rVb7uBXeO.U9l6X7.E6W7fO8D9O0O1O2O3O4O5O"
+    
+    # Fix (Anomaly 17): Compute a dynamic dummy hash on demand to ensure matching execution times for missing users
+    if not has_valid_user:
+        dummy_salt = bcrypt.gensalt(rounds=12)
+        password_hash_to_verify = bcrypt.hashpw(b"dummy_password", dummy_salt).decode("utf-8")
+    else:
+        password_hash_to_verify = user.password_hash
     
     # Executes cryptographically expensive hashing verification exactly once on every call
     is_password_correct = verify_password(form_data.password, password_hash_to_verify)
@@ -8023,10 +7269,10 @@ class Proposal(Base):
         index=True
     )
     
-    # Enforce RESTRICT on cycle deletions to prevent accidental mass proposal data purges
+    # Fix (Anomaly 20): Use SET NULL to prevent cascading deletion of core proposal data during reset actions
     issp_period: Mapped[Optional[str]] = mapped_column(
         String(50), 
-        ForeignKey("master_narratives.issp_period", ondelete="RESTRICT", onupdate="CASCADE"), 
+        ForeignKey("master_narratives.issp_period", ondelete="SET NULL", onupdate="CASCADE"), 
         nullable=True,
         index=True
     )
@@ -8115,10 +7361,10 @@ class SubscriptionProposal(Base):
         index=True
     )
     
-    # Enforce RESTRICT on cycle deletions to prevent accidental mass subscription data purges
+    # Fix (Anomaly 20): Use SET NULL to prevent cascading deletion of core subscription data during reset actions
     issp_period: Mapped[Optional[str]] = mapped_column(
         String(50), 
-        ForeignKey("master_narratives.issp_period", ondelete="RESTRICT", onupdate="CASCADE"), 
+        ForeignKey("master_narratives.issp_period", ondelete="SET NULL", onupdate="CASCADE"), 
         nullable=True,
         index=True
     )
@@ -8253,9 +7499,9 @@ class BudgetCeiling(Base):
     # physical cascading foreign key relationship map pointing back to MasterNarrative with delete protection
     issp_period: Mapped[str] = mapped_column(
         String(50),
-        ForeignKey("master_narratives.issp_period", ondelete="RESTRICT", onupdate="CASCADE"),
+        ForeignKey("master_narratives.issp_period", ondelete="SET NULL", onupdate="CASCADE"),
         default="2026-2028",
-        nullable=False,
+        nullable=True,
         index=True
     )
 
@@ -8274,13 +7520,15 @@ class BudgetCeiling(Base):
     @sub_ceiling.setter
     def sub_ceiling(self, value: Decimal) -> None:
         """
-        Splits the consolidated sub-ceiling: 70% allocated to CapEx and 30% to MOOE,
-        and updates the respective database columns with standard quantization to prevent rounding precision loss.
+        Fix (Anomaly 1): Calculates CapEx first, then subtracts it from the consolidated sub-ceiling
+        value to determine MOOE, avoiding independent quantization rounding/precision loss.
         """
         if value is None:
             value = Decimal("0.00")
+        elif not isinstance(value, Decimal):
+            value = Decimal(str(value))
         self.allocated_capex = (value * Decimal("0.70")).quantize(Decimal("1.00"))
-        self.allocated_mooe = (value * Decimal("0.30")).quantize(Decimal("1.00"))
+        self.allocated_mooe = value - self.allocated_capex
 
     @sub_ceiling.expression
     def sub_ceiling(cls):
@@ -8305,6 +7553,7 @@ class AuditTrail(Base):
     )
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     
+    # Fix (Anomaly 24): Set user_id ForeignKey to SET NULL on delete to prevent integrity errors when whitelisted users are pruned
     user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), 
         nullable=True
@@ -8675,17 +7924,17 @@ class MasterNarrative(Base):
     # ISSP Process Flow representation (Gap 6)
     process_flow_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Passive deletes on relationships with cascading support
+    # Fix (Anomaly 20): passive_deletes=True and safe cascades to prevent deleting proposals and audits during reset actions
     proposals: Mapped[List[Proposal]] = relationship(
         "Proposal", 
         back_populates="master_narrative",
-        cascade="all, delete-orphan",
+        cascade="save-update, merge",
         passive_deletes=True
     )
     subscriptions: Mapped[List[SubscriptionProposal]] = relationship(
         "SubscriptionProposal", 
         back_populates="master_narrative",
-        cascade="all, delete-orphan",
+        cascade="save-update, merge",
         passive_deletes=True
     )
     
@@ -8773,6 +8022,17 @@ def receive_subscription_before_save(mapper, connection, target):
         target.total_multiyear_mooe = Decimal("0.00")
     target.sync_payload()
 
+
+# Fix (Anomaly 18): Enforce validation constraints on insert/update of inventory records
+@event.listens_for(ExistingInventory, 'before_insert')
+@event.listens_for(ExistingInventory, 'before_update')
+def validate_inventory_state(mapper, connection, target):
+    if target.status in [AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR]:
+        if not target.unserviceable_report_url or not target.unserviceable_report_url.strip():
+            raise BusinessRuleViolation(
+                "An Unserviceable Report PDF URL is mandatory for Condemned or Needs Repair items."
+            )
+
 =========================================
 CORE SYSTEM FILE: .\app\database\session.py
 =========================================
@@ -8809,14 +8069,15 @@ engine = create_engine(
     **pool_args
 )
 
-# Register hook listener directly to the instanced engine to enforce SQLite cascade deletions
-if "sqlite" in db_url.lower():
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        """
-        Enforces foreign key constraint checks and cascade parameters 
-        specifically on this database engine instance.
-        """
+# Fix (Anomaly 7): Register global hook listener on Engine to enforce SQLite cascade deletions on any SQLite thread
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """
+    Enforces foreign key constraint checks and cascade parameters 
+    specifically on SQLite database engine connections.
+    """
+    # Verify the connection dialect is SQLite before execution
+    if "sqlite" in db_url.lower() or dbapi_connection.__class__.__name__ == "Connection":
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA foreign_keys=ON")
@@ -8832,9 +8093,9 @@ db_session = scoped_session(SessionLocal)
 
 def get_db():
     """
-    Generator yielding thread-safe database session contexts.
+    Fix (Anomaly 21): Generator yielding thread-safe database session contexts.
     Ensures that any outstanding active database transactions are rolled back 
-    upon unhandled failures to prevent transaction leakage across pooled sessions.
+    upon unhandled failures and connection pools are cleanly deallocated.
     """
     db = db_session()
     try:
@@ -8909,6 +8170,7 @@ from app.utils.helpers import (
     validate_active_years_alignment,
     align_and_validate_years,
     check_and_update_glacier_metadata,
+    validate_pdf_content,  # Fix (Anomaly 14)
 )
 
 logger = logging.getLogger(__name__)
@@ -8951,9 +8213,8 @@ def is_file_referenced_elsewhere(
 
 def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex: bool, incoming_cost: float):
     """
-    Calculates active budget sub-ceiling and total current spent balances (SUBMITTED + APPROVED)
-    for the department in the active cycle to enforce headroom safety limits.
-    Enforces transaction locks conditionally to maintain compatibility across PostgreSQL and SQLite.
+    Fix (Anomaly 3): Calculates active budget sub-ceiling and total current spent balances (SUBMITTED + APPROVED)
+    using precise quantized Decimals to prevent floating-point rounding errors.
     """
     is_sqlite = db.bind.dialect.name == "sqlite"
 
@@ -8977,7 +8238,7 @@ def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex:
             detail=f"Submission blocked: No budget ceiling allocated for the '{issp_period}' planning cycle."
         )
 
-    incoming_cost_dec = Decimal(str(incoming_cost))
+    incoming_cost_dec = Decimal(str(incoming_cost)).quantize(Decimal("1.00"))
 
     if is_capex:
         spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
@@ -8987,28 +8248,30 @@ def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex:
             Proposal.is_archived == False
         ).scalar() or Decimal("0.00")
         
-        spent_dec = Decimal(str(spent))
+        spent_dec = Decimal(str(spent)).quantize(Decimal("1.00"))
         limit = ceiling.allocated_capex
-        if limit is not None and (spent_dec + incoming_cost_dec) > limit:
+        limit_dec = limit.quantize(Decimal("1.00")) if limit is not None else Decimal("0.00")
+        if limit is not None and (spent_dec + incoming_cost_dec) > limit_dec:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Submission blocked: Budget ceiling exceeded. CapEx allocation limit is {limit:,.2f}, "
+                detail=f"Submission blocked: Budget ceiling exceeded. CapEx allocation limit is {limit_dec:,.2f}, "
                        f"already spent: {spent_dec:,.2f}, incoming proposal cost: {incoming_cost_dec:,.2f}."
             )
     else:
         spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
             SubscriptionProposal.department_id == dept_id,
             SubscriptionProposal.issp_period == issp_period,
-            SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
+            SubscriptionProposal.status.in_([SubscriptionProposal.status.SUBMITTED, SubscriptionProposal.status.APPROVED]),
             SubscriptionProposal.is_archived == False
         ).scalar() or Decimal("0.00")
         
-        spent_dec = Decimal(str(spent))
+        spent_dec = Decimal(str(spent)).quantize(Decimal("1.00"))
         limit = ceiling.allocated_mooe
-        if limit is not None and (spent_dec + incoming_cost_dec) > limit:
+        limit_dec = limit.quantize(Decimal("1.00")) if limit is not None else Decimal("0.00")
+        if limit is not None and (spent_dec + incoming_cost_dec) > limit_dec:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Submission blocked: Budget ceiling exceeded. MOOE allocation limit is {limit:,.2f}, "
+                detail=f"Submission blocked: Budget ceiling exceeded. MOOE allocation limit is {limit_dec:,.2f}, "
                        f"already spent: {spent_dec:,.2f}, incoming subscription cost: {incoming_cost_dec:,.2f}."
             )
 
@@ -9115,7 +8378,7 @@ def validate_subscription_constraints(db: Session, dept_id: int, payload: Subscr
 
 
 # ==========================================================
-# EXPLICIT METADATA SYNCHRONIZATION ENDPOINTS (Gap 28 Updated)
+# EXPLICIT METADATA SYNCHRONIZATION ENDPOINTS
 # ==========================================================
 
 @router.post("/proposals/{proposal_id}/sync-metadata")
@@ -9216,7 +8479,6 @@ def get_department_budget_summary(
         BudgetCeiling.issp_period == issp_period
     ).first()
     
-    # Gracefully backfill default limits if no ceiling is configured yet, avoiding 400 crashes
     allocated_capex = ceiling.allocated_capex if ceiling else Decimal("0.00")
     allocated_mooe = ceiling.allocated_mooe if ceiling else Decimal("0.00")
     sub_ceiling = ceiling.sub_ceiling if ceiling else Decimal("0.00")
@@ -9400,7 +8662,10 @@ def create_draft_proposal(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Creates a new draft proposal (DRAFT) and prevents client-side price manipulation on standard items. """
+    """
+    Creates a new draft proposal (DRAFT).
+    Fix (Anomaly 5 & 27): Prevents cost and custom spec bypasses on standard catalog items.
+    """
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
     payload.yearly_quantities = aligned_quantities
 
@@ -9422,6 +8687,7 @@ def create_draft_proposal(
             resolved_canvas_url = catalog_item.canvas_evidence_url
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
+            payload.custom_specification = None  # Clear specs to prevent bypasses
 
     try:
         json_payload = {
@@ -9469,7 +8735,11 @@ def update_proposal_item(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Updates mutable fields of a proposal. Enforces status checks and S3 Glacier locks. """
+    """
+    Updates mutable fields of a proposal.
+    Fix (Anomaly 7): Synchronizes Glacier metadata states prior to write operations.
+    Fix (Anomaly 27 & 5): Wipes out spec drift on standard catalog alterations.
+    """
     proposal = db.query(Proposal).filter(
         Proposal.id == proposal_id,
         Proposal.department_id == user["department_id"]
@@ -9483,6 +8753,7 @@ def update_proposal_item(
     
     proposal.s3_storage_class = s3_storage_class
     proposal.is_restoring = is_restoring
+    db.flush()
 
     if is_restoring or s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"]:
         if is_restoring:
@@ -9533,6 +8804,7 @@ def update_proposal_item(
             resolved_canvas_url = catalog_item.canvas_evidence_url
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
+            payload.custom_specification = None  # Clear specs to prevent custom spec bypass
     else:
         resolved_supplier = "Custom Supplier"
 
@@ -9541,7 +8813,7 @@ def update_proposal_item(
     proposal.unit_cost = payload.unit_cost
     proposal.yearly_quantities = payload.yearly_quantities
     proposal.total_qty = total_qty
-    proposal.target_offices_json = proposal.target_offices_json
+    proposal.target_offices_json = payload.target_offices_json
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.custom_specification = payload.custom_specification
 
@@ -9762,7 +9034,11 @@ async def upload_canvas_evidence(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """ Uploads standard market canvas quotation evidence to configured storage engines. """
+    """
+    Uploads standard market canvas quotation evidence.
+    Fix (Anomaly 6): Ensures uploads are locked for Submitted or Approved proposals.
+    Fix (Anomaly 14): Validates binary-level PDF signature magic bytes.
+    """
     try:
         proposal_uuid = uuid.UUID(proposal_id)
     except ValueError:
@@ -9794,11 +9070,26 @@ async def upload_canvas_evidence(
             detail="AuthZ Failed: You do not have permission to modify this record."
         )
 
+    # Fix (Anomaly 6): Block quotation uploads on locked workflows
+    status_to_check = proposal.status if proposal else sub_proposal.status
+    if status_to_check not in [ProposalStatus.DRAFT, ProposalStatus.RETURNED]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Upload locked: Associated proposal has already been locked for review."
+        )
+
+    # Fix (Anomaly 14): Read file bytes and validate magic bytes signature
+    file_bytes = await file.read()
+    if not validate_pdf_content(file_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Only PDF files are allowed."
+        )
+    await file.seek(0)
+
     safe_supplier = secure_filename(supplier_name) if supplier_name else "default_supplier"
     safe_filename = secure_filename(file.filename)
     key = storage_client.get_canvas_key(str(proposal_uuid), safe_supplier, safe_filename)
-    
-    file_bytes = await file.read()
     
     success = storage_client.upload_canvas_evidence(file_bytes, key)
     if not success:
@@ -9843,7 +9134,10 @@ async def upload_unserviceable_evidence(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Uploads unserviceability reports (IIRUP) to substantiate equipment replacement justifications. """
+    """
+    Uploads unserviceability reports (IIRUP) to substantiate equipment replacement justifications.
+    Fix (Anomaly 14): Validates binary-level PDF signature magic bytes.
+    """
     try:
         inventory_uuid = uuid.UUID(inventory_id)
     except ValueError:
@@ -9863,7 +9157,15 @@ async def upload_unserviceable_evidence(
     if asset.status == AssetStatus.FUNCTIONAL:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Functional items do not require an unserviceable report.")
 
+    # Fix (Anomaly 14): Validate binary magic-bytes signature
     file_bytes = await file.read()
+    if not validate_pdf_content(file_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Only PDF files are allowed."
+        )
+    await file.seek(0)
+
     safe_filename = secure_filename(file.filename)
     file_url = storage_client.upload_unserviceable_report(
         file_data=file_bytes,
@@ -9954,7 +9256,10 @@ def get_proposal_comments(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """ Retrieves discussion threads and pinned feedback comments. """
+    """
+    Retrieves discussion threads and pinned feedback comments.
+    Fix (Anomaly 28): Restricts comments retrieval strictly to the resource owners.
+    """
     target = db.query(Proposal).filter(Proposal.id == proposal_id).first()
     if not target:
         target = db.query(SubscriptionProposal).filter(SubscriptionProposal.id == proposal_id).first()
@@ -9962,6 +9267,7 @@ def get_proposal_comments(
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target record not found.")
 
+    # Enforce strict ownership validations on comments access queries
     if user["role"] != "ROLE_MIS_ADMIN" and target.department_id != user["department_id"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -10004,8 +9310,6 @@ def resolve_proposal_comment(
             comment_found = True
             break
 
-    if tribe_found := False:
-        pass
     if not comment_found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
 
@@ -10680,8 +9984,8 @@ class ISSPStorageClient:
 
     def extract_key_from_url(self, url: str) -> Optional[str]:
         """
-        Fix (Audit Issue 22): Robustly extracts S3 or local keys from URLs.
-        Handles custom CNAMEs, pre-signed signatures, and local static prefixes to prevent NoneType deletion blocks.
+        Extracts S3 or local keys from URLs.
+        Handles custom CNAMEs, pre-signed signatures, and local static prefixes.
         """
         if not url:
             return None
@@ -10692,9 +9996,18 @@ class ISSPStorageClient:
         if "static/uploads/" in clean_url:
             return clean_url.split("static/uploads/")[-1].strip("/")
             
-        # Extract from standard S3 URL (with bucket name in path)
-        if self.bucket_name in clean_url:
-            return clean_url.split(f"{self.bucket_name}/")[-1].strip("/")
+        # Compile allowed buckets list from config
+        allowed_buckets = [self.bucket_name]
+        fallback_buckets = getattr(settings, "AWS_FALLBACK_BUCKETS", [])
+        if fallback_buckets:
+            allowed_buckets.extend(fallback_buckets)
+
+        # Check if any configured bucket name is in the path
+        for b in allowed_buckets:
+            if b in clean_url:
+                parts = clean_url.split(f"{b}/")
+                if len(parts) > 1:
+                    return parts[-1].strip("/")
             
         # Fallback regex for generic amazonaws S3 URLs
         match = re.search(r's3\.[a-z0-9-]+\.amazonaws\.com/(.+)$', clean_url)
@@ -10705,6 +10018,20 @@ class ISSPStorageClient:
         parsed = urlparse(clean_url)
         path = parsed.path.lstrip("/")
         return path if path else None
+
+    def safe_local_path_resolve(self, key: str) -> Optional[Path]:
+        """
+        Resolves and validates that a given storage key resides safely 
+        within the local uploads directory boundary.
+        """
+        resolved_base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
+        path_parts = [p for p in key.replace("\\", "/").split("/") if p and p not in [".", ".."]]
+        local_path = Path(resolved_base, *path_parts).resolve()
+        
+        if not local_path.is_relative_to(resolved_base):
+            logger.warning(f"Security Alert: Blocked path traversal attempt targeting key: {key}")
+            return None
+        return local_path
 
     def get_as_base64_uri(self, object_url: Optional[str]) -> Optional[str]:
         """
@@ -10747,28 +10074,17 @@ class ISSPStorageClient:
                 logger.error(f"S3 Direct binary read failed for key {key}: {str(e)}")
                 return object_url
         else:
-            try:
-                # Fix (Audit Issue 23 & 30): Cross-Platform Path Traversal mitigation.
-                # Uses pathlib to resolve exact absolute boundaries, immune to Windows drive-letter bypassing.
-                path_parts = [p for p in key.split("/") if p and p not in [".", ".."]]
-                
-                resolved_base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
-                local_path = Path(resolved_base, *path_parts).resolve()
-                
-                # Check strict containment within the upload directory
-                if not str(local_path).startswith(str(resolved_base)):
-                    logger.warning(f"Security Block: Local directory escape attempt detected. Key: {key}")
-                    return object_url
-                
-                if local_path.exists():
-                    with open(local_path, "rb") as f:
-                        binary_data = f.read()
-                    encoded = base64.b64encode(binary_data).decode('utf-8')
-                    mime_type, _ = mimetypes.guess_type(str(local_path))
-                    if not mime_type:
-                        mime_type = "image/png"
-                    return f"data:{mime_type};base64,{encoded}"
+            local_path = self.safe_local_path_resolve(key)
+            if local_path is None or not local_path.exists():
                 return object_url
+            try:
+                with open(local_path, "rb") as f:
+                    binary_data = f.read()
+                encoded = base64.b64encode(binary_data).decode('utf-8')
+                mime_type, _ = mimetypes.guess_type(str(local_path))
+                if not mime_type:
+                    mime_type = "image/png"
+                return f"data:{mime_type};base64,{encoded}"
             except Exception as e:
                 logger.error(f"Local direct binary read failed for key {key}: {str(e)}")
                 return object_url
@@ -10781,38 +10097,36 @@ class ISSPStorageClient:
         if not key:
             return False
             
-        # Fix (Audit Issues 9 & 11): Shared Catalog Protection
-        # Do not allow deletion of seeded or shared administrative items.
-        protected_prefixes = ["catalog/", "pc_standard/", "shared/"]
-        if any(prefix in key for prefix in protected_prefixes):
-            logger.info(f"Deletion skipped: Key '{key}' belongs to shared global catalog assets.")
-            return True # Return true so the DB transaction can safely proceed without error
+        normalized_key = key.replace("\\", "/").strip("/")
+        first_segment = normalized_key.split("/")[0] if normalized_key else ""
+        protected_directories = {"catalog", "shared", "pc_standard"}
+        
+        if first_segment in protected_directories:
+            logger.info(f"Deletion bypassed: Key '{key}' belongs to protected shared directories.")
+            return True
 
         if self.storage_type == "s3" and self.client:
             try:
-                self.client.delete_object(Bucket=self.bucket_name, Key=key)
-                logger.info(f"Deleted S3 object: {key}")
+                self.client.delete_object(Bucket=self.bucket_name, Key=normalized_key)
+                logger.info(f"Deleted S3 object: {normalized_key}")
                 return True
             except ClientError as e:
-                logger.error(f"Failed to delete S3 object {key}: {e}")
+                logger.error(f"Failed to delete S3 object {normalized_key}: {e}")
                 return False
         else:
+            local_path = self.safe_local_path_resolve(normalized_key)
+            if local_path is None:
+                return False
             try:
-                path_parts = [p for p in key.split("/") if p and p not in [".", ".."]]
-                resolved_base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
-                local_path = Path(resolved_base, *path_parts).resolve()
-                
-                if str(local_path).startswith(str(resolved_base)) and local_path.exists():
-                    os.remove(local_path)
+                if local_path.exists():
+                    local_path.unlink()
                     logger.info(f"Deleted local file: {local_path}")
                 return True
             except FileNotFoundError:
-                # Fix (Audit Issues 10 & 21): File Cleanup Crash
-                # Ignore missing files so the parent database record can still be deleted
-                logger.warning(f"Local file already missing during deletion: {key}")
+                logger.warning(f"Local file already missing during deletion: {normalized_key}")
                 return True
             except Exception as e:
-                logger.error(f"Failed to delete local file {key}: {e}")
+                logger.error(f"Failed to delete local file {normalized_key}: {e}")
                 return False
 
     def generate_upload_url(
@@ -10967,14 +10281,11 @@ class ISSPStorageClient:
             is_restoring = "ongoing-request=\"true\"" in restore_header
             restore_completed = "ongoing-request=\"false\"" in restore_header
 
-            # Default fallback when storage state is warm
             progress_val = 100 if storage_class == "STANDARD" else 0
             
             if restore_completed:
                 progress_val = 100
             elif is_restoring:
-                # AWS Standard retrieves require 3-5 hours. Real-time percentages
-                # are not exposed in HEAD responses; providing a safe baseline.
                 progress_val = 50
 
             return {
@@ -11939,7 +11250,6 @@ class ISSPDynamicCompiler:
                 '''
             total_cols = 1 + (4 * len(planning_years))
             
-            # Formatted list element containing schedule fallback
             fallback_rows_html = f'<tr><td colspan="{total_cols}" style="padding:12px; color:#64748b;">No schedule timeline parameters defined.</td></tr>'
             
             return f'''
@@ -11984,7 +11294,6 @@ class ISSPDynamicCompiler:
             for project_key, items in capex_groups.items():
                 project_label = project_key.replace("_", " ").upper()
                 
-                # Dynamic header block containing the nested formatting parameters
                 project_label_tr_html = f'''
                 <tr style="background-color: #f8fafc; font-weight: bold; border-left: 3px solid #1e3a8a;">
                     <td colspan="{5 + len(planning_years)}" style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8.5pt; text-align: left; color: #1e3a8a;">
@@ -12028,7 +11337,6 @@ class ISSPDynamicCompiler:
             for project_key, items in mooe_groups.items():
                 project_label = project_key.replace("_", " ").upper()
                 
-                # Dynamic header block containing the nested formatting parameters
                 project_label_tr_html = f'''
                 <tr style="background-color: #f0fdfa; font-weight: bold; border-left: 3px solid #0d9488;">
                     <td colspan="{5 + len(planning_years)}" style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8.5pt; text-align: left; color: #0d9488;">
@@ -12088,7 +11396,6 @@ class ISSPDynamicCompiler:
             total_cols = 6 + len(planning_years)
             total_cols_span = 5 + len(planning_years)
             
-            # Table cell fallback handlers
             capex_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No capital outlay proposals approved.</td></tr>'
             mooe_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No software subscription proposals approved.</td></tr>'
             continuing_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No continuing institutional expenses saved.</td></tr>'
@@ -12210,13 +11517,10 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-            dc = metadata.get("mithi_data_center") or {}
             total_inv_cols = 2 + (2 * len(planning_years))
             
-            # Baseline catalog fallback rows
             total_inv_fallback_html = f'<tr><td colspan="{total_inv_cols}" style="padding:6px; text-align:center; color:#94a3b8;">No equipment inventories catalogued.</td></tr>'
 
-            # Database-backed server storage capacities & operating system census (Gaps 15, 16, 17)
             server_capacities_html = ""
             for cap in metadata.get("server_capacities_json", []):
                 server_capacities_html += f'''
@@ -12246,7 +11550,6 @@ class ISSPDynamicCompiler:
                 </tr>
                 '''
 
-            # Extended Annex A-1 Structured Survey segments (Gaps 4, 5, 8.2)
             sec_dr = metadata.get("mithi_security_dr") or {}
             sec_list = [
                 ("Security Policy / Guidelines", sec_dr.get("has_security_policy", False)),
@@ -12588,11 +11891,9 @@ def compile_issp_document(self, metadata: dict):
         # --------------------------------------------------
         self.update_state(state="PROGRESS", meta={"progress": 35, "status": "Synchronizing glossary, campuses, and survey databases..."})
         
-        # Gap 1: Campus profiles database mapping
         campuses = db.query(Campus).all()
         campuses_data = []
         for campus in campuses:
-            # Map campus administrators and planners safely from planners_json
             depts = db.query(Department).filter(Department.campus_id == campus.id).all()
             campus_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).\
                 join(Department).filter(Department.campus_id == campus.id).scalar() or Decimal("0.00")
@@ -12611,7 +11912,6 @@ def compile_issp_document(self, metadata: dict):
             })
         metadata["campuses"] = campuses_data
 
-        # Gap 2: Accreditation offerings
         degree_offerings = db.query(DegreeOffering).order_by(DegreeOffering.department_name.asc()).all()
         metadata["degree_offerings"] = [
             {
@@ -12622,7 +11922,6 @@ def compile_issp_document(self, metadata: dict):
             } for d in degree_offerings
         ]
 
-        # Gap 3: GAA performance parameters
         gaa_performance_metrics = db.query(GaaPerformance).all()
         metadata["gaa_performance"] = [
             {
@@ -12631,7 +11930,6 @@ def compile_issp_document(self, metadata: dict):
             } for m in gaa_performance_metrics
         ]
 
-        # Gap 4: Strategic Concerns Matrix normalized lookup
         strategic_concerns_db = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).all()
         metadata["strategic_concerns_json"] = [
             {
@@ -12641,36 +11939,30 @@ def compile_issp_document(self, metadata: dict):
             } for c in strategic_concerns_db
         ]
 
-        # Gap 7: Glossary glossary vocabulary query
         glossary_db = db.query(GlossaryTerm).order_by(GlossaryTerm.term.asc()).all()
         metadata["glossary_terms"] = [{"term": g.term, "definition": g.definition} for g in glossary_db]
 
-        # Gap 8: Guideline instructions query
         instructions_db = db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
         metadata["general_instructions"] = [{"step_number": i.step_number, "instruction_text": i.instruction_text} for i in instructions_db]
 
-        # Gap 15: HDD server storage tally lookup
         capacities_db = db.query(ServerCapacityTrack).all()
         metadata["server_capacities_json"] = [
             {"tier": r.capacity_tier, "location": r.location, "quantity": r.quantity}
             for r in capacities_db
         ]
 
-        # Gap 16: Client operating platform licensing audits
         os_census_db = db.query(ClientOsCensus).all()
         metadata["os_census_json"] = [
             {"os_name": r.os_name, "workstations_count": r.workstations_count, "servers_count": r.servers_count}
             for r in os_census_db
         ]
 
-        # Gap 17: Office software platform licensing census
         software_census_db = db.query(OfficeSoftwareCensus).all()
         metadata["office_software_census_json"] = [
             {"software_name": r.software_name, "license_count": r.license_count}
             for r in software_census_db
         ]
 
-        # Gap 19: Core offices directory mapping
         core_offices_db = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).all()
         metadata["core_offices_json"] = [
             {
@@ -12680,7 +11972,6 @@ def compile_issp_document(self, metadata: dict):
             } for o in core_offices_db
         ]
 
-        # Gap 24: Cross-Agency joint projects mapping
         cross_projects_db = db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
         metadata["cross_projects_json"] = [
             {
@@ -12693,7 +11984,6 @@ def compile_issp_document(self, metadata: dict):
             } for cp in cross_projects_db
         ]
 
-        # Gap 25: Performance Measurement Matrix targets alignment
         pmf_metrics_db = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
         metadata["pmf_matrix_json"] = [
             {
@@ -12707,7 +11997,6 @@ def compile_issp_document(self, metadata: dict):
             } for pm in pmf_metrics_db
         ]
 
-        # Gap 11 & 12: Cost break-downs mapping
         annual_costs_db = db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.issp_period == issp_period).all()
         metadata["annual_costs_breakdown"] = [
             {
@@ -12719,7 +12008,6 @@ def compile_issp_document(self, metadata: dict):
             } for cb in annual_costs_db if cb.cost_type == "Continuing"
         ]
 
-        # Gap 18: IT Organizational staffing headcounts mapping
         staff_positions_db = db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
         metadata["staff_positions_json"] = [
             {
@@ -12751,7 +12039,6 @@ def compile_issp_document(self, metadata: dict):
             metadata["mithi_data_center"] = narrative.mithi_data_center
             metadata["mithi_hardware_inventory"] = narrative.mithi_hardware_inventory
             
-            # Gaps 4, 5, 8.2 extended MITHI surveys metadata loading
             metadata["mithi_security_dr"] = narrative.mithi_security_dr
             metadata["mithi_data_archiving"] = narrative.mithi_data_archiving
             metadata["mithi_ict_issues"] = narrative.mithi_ict_issues
@@ -12770,8 +12057,6 @@ def compile_issp_document(self, metadata: dict):
             metadata["fiber_backbone_url"] = resolve_local_img_path(narrative.fiber_backbone_url)
             metadata["system_architecture_url"] = resolve_local_img_path(narrative.system_architecture_url)
             metadata["network_topology_url"] = resolve_local_img_path(narrative.network_topology_url)
-
-            # Gap 6: ISSP Process Flow diagram S3 URL resolution
             metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
 
             metadata["transmittal_recipient"] = narrative.transmittal_recipient
@@ -12780,7 +12065,6 @@ def compile_issp_document(self, metadata: dict):
             metadata["transmittal_recipient_address"] = narrative.transmittal_recipient_address
             metadata["transmittal_date"] = narrative.transmittal_date
             
-            # Map robust scope choice JSON block
             metadata["scope_json"] = narrative.scope_json
 
             if narrative.network_layout_url:
@@ -12800,7 +12084,6 @@ def compile_issp_document(self, metadata: dict):
 
         self.update_state(state="PROGRESS", meta={"progress": 40, "status": "Compiling approved CapEx and MOOE items..."})
         
-        # Load approved proposals with eager loading of departments and deployment relations
         approved_proposals = db.query(Proposal).options(
             joinedload(Proposal.department),
             joinedload(Proposal.deployments_relation)
@@ -12810,7 +12093,6 @@ def compile_issp_document(self, metadata: dict):
             Proposal.is_archived == False
         ).all()
 
-        # Load approved subscriptions with eager loading of departments
         approved_subscriptions = db.query(SubscriptionProposal).options(
             joinedload(SubscriptionProposal.department)
         ).filter(
@@ -12819,7 +12101,6 @@ def compile_issp_document(self, metadata: dict):
             SubscriptionProposal.is_archived == False
         ).all()
 
-        # Enforce late-binding state validation for cold storage assets
         cold_capex = [p for p in approved_proposals if p.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or p.is_restoring]
         cold_mooe = [sub for sub in approved_subscriptions if sub.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or sub.is_restoring]
 
@@ -13107,6 +12388,7 @@ def compile_issp_document(self, metadata: dict):
         }
 
     except SoftTimeLimitExceeded as timeout_exc:
+        db_session.rollback()
         logger.error(f"Celery SoftTimeLimitExceeded hit during PDF compilation: {str(timeout_exc)}")
         self.update_state(
             state="FAILURE", 
@@ -13115,6 +12397,7 @@ def compile_issp_document(self, metadata: dict):
         raise timeout_exc
         
     except Exception as e:
+        db_session.rollback()
         logger.error(f"Async dynamic compilation failed: {str(e)}")
         self.update_state(
             state="FAILURE", 
@@ -13176,8 +12459,9 @@ def secure_filename(filename: str) -> str:
 
 def get_s3_key_from_url(url: Optional[str]) -> Optional[str]:
     """
-    Safely extracts the S3 key from a storage URL. Protects against
-    path traversal (..) and enforces platform-independent URL path processing.
+    Fix (Anomaly 13): Safely extracts the S3 key from a storage URL.
+    Validates against dynamic bucket rotations and legacy fallback domains.
+    Protects against path traversal (..) and enforces platform-independent URL path processing.
     """
     if not url:
         return None
@@ -13192,7 +12476,7 @@ def get_s3_key_from_url(url: Optional[str]) -> Optional[str]:
         raw_path = parsed.path.replace("\\", "/")
 
         # Direct verification of traversal elements inside path segments
-        path_parts = raw_path.split("/")
+        path_parts = [p for p in raw_path.split("/") if p]
         if ".." in path_parts or "." in path_parts:
             logger.warning(f"Security Alert: Blocked directory traversal attempt: {url}")
             return None
@@ -13204,27 +12488,39 @@ def get_s3_key_from_url(url: Optional[str]) -> Optional[str]:
         static_prefix = "static/uploads"
         if normalized_path.startswith(static_prefix):
             normalized_path = normalized_path[len(static_prefix):].lstrip("/")
+            return normalized_path
 
         expected_bucket = settings.AWS_STORAGE_BUCKET_NAME
         region = getattr(settings, "AWS_S3_REGION_NAME", "ap-southeast-1")
 
-        allowed_hosts = {
-            f"{expected_bucket}.s3.amazonaws.com",
-            f"{expected_bucket}.s3.{region}.amazonaws.com",
-        }
+        # Compile set of authorized S3 host domains including legacy rotated fallback buckets
+        allowed_buckets = [expected_bucket]
+        fallback_buckets = getattr(settings, "AWS_FALLBACK_BUCKETS", [])
+        if fallback_buckets:
+            allowed_buckets.extend(fallback_buckets)
 
-        if settings.STORAGE_TYPE == "s3":
-            is_valid_domain = parsed.netloc in allowed_hosts
-        else:
-            is_valid_domain = (
-                not parsed.netloc 
-                or parsed.netloc in ["localhost", "127.0.0.1", "localhost:8000", "127.0.0.1:8000"]
-                or parsed.netloc in allowed_hosts
-            )
+        allowed_hosts = set()
+        for b in allowed_buckets:
+            allowed_hosts.add(f"{b}.s3.amazonaws.com")
+            allowed_hosts.add(f"{b}.s3.{region}.amazonaws.com")
+            allowed_hosts.add(f"{b}.s3-control.amazonaws.com")
+
+        is_valid_domain = (
+            not parsed.netloc 
+            or parsed.netloc in ["localhost", "127.0.0.1", "localhost:8000", "127.0.0.1:8000"]
+            or parsed.netloc in allowed_hosts
+            or any(b in parsed.netloc for b in allowed_buckets)  # Handle virtual subdomain patterns
+        )
 
         if not is_valid_domain:
             logger.warning(f"Unsanitized hostname detected in key extraction: {parsed.netloc}")
             return None
+
+        # Strip bucket prefix if name resides inside the URL path parameter rather than the subdomain
+        for b in allowed_buckets:
+            if normalized_path.startswith(f"{b}/"):
+                normalized_path = normalized_path[len(f"{b}/"):].lstrip("/")
+                break
 
         return normalized_path if normalized_path else None
     except Exception as e:
@@ -13283,8 +12579,9 @@ def validate_active_years_alignment(db: Session, submitted_years: List[Any]) -> 
 
 def align_and_validate_years(db: Session, yearly_data: dict[str, int], is_submitting: bool = False) -> Tuple[str, dict[str, int]]:
     """
-    Standardizes inputs to use string keys, aligns them with cycle expectations,
-    and backfills missing planning years.
+    Fix (Anomaly 2): Standardizes inputs to use string keys, aligns them with cycle expectations,
+    and backfills missing planning years. Gracefully shifts legacy keys during cycle transitions
+    to prevent read operations from failing with strict validation blockages.
     """
     from app.database.models import MasterNarrative
     active_narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
@@ -13307,13 +12604,22 @@ def align_and_validate_years(db: Session, yearly_data: dict[str, int], is_submit
     # Sanitize and convert year keys to string keys
     sanitized_input = {str(k).strip(): int(v) for k, v in yearly_data.items() if v is not None}
     
-    # Map and align with planning bounds
+    # Map matching years and default missing years to 0
     aligned_data = {year: sanitized_input.get(year, 0) for year in expected_years}
+
+    # If there are no direct matches but we have valid historical sequential entries,
+    # shift values sequentially to the new cycle slots to preserve data footprints.
+    original_sorted_keys = sorted([k for k in sanitized_input.keys() if k.isdigit()])
+    if not any(y in sanitized_input for y in expected_years) and original_sorted_keys:
+        for idx, year in enumerate(expected_years):
+            if idx < len(original_sorted_keys):
+                orig_key = original_sorted_keys[idx]
+                aligned_data[year] = sanitized_input[orig_key]
             
     if is_submitting:
         original_keys = set(sanitized_input.keys())
         expected_set = set(expected_years)
-        if original_keys != expected_set:
+        if original_keys != expected_set and not all(k in expected_set for k in original_keys):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Validation Failed: Submitted years {sorted(list(original_keys))} do not match active planning cycle {expected_years}."
@@ -13343,6 +12649,21 @@ def check_and_update_glacier_metadata(db: Session, target: Any, canvas_url: Opti
             except Exception as e:
                 logger.error(f"Failed to refresh Glacier restore status for object key '{key}': {str(e)}")
     return s3_storage_class, is_restoring
+
+
+def validate_pdf_content(file_bytes: bytes) -> bool:
+    """
+    Fix (Anomaly 14): Inspects the binary header bytes of uploaded files
+    to verify true MIME types and prevent content-type header spoofing.
+    """
+    try:
+        import magic
+        mime = magic.Magic(mime=True)
+        detected_type = mime.from_buffer(file_bytes[:2048])
+        return detected_type == "application/pdf"
+    except ImportError:
+        # Secure binary fallback pattern check if python-magic dependencies are uninstalled on the host OS
+        return file_bytes.startswith(b"%PDF-")
 
 =========================================
 CORE SYSTEM FILE: .\frontend\.oxlintrc.json

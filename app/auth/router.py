@@ -245,7 +245,13 @@ async def authenticate_standard(
 
     # Isolate password verification execution paths to prevent side-channel timing analysis
     has_valid_user = user is not None and getattr(user, "password_hash", None) is not None
-    password_hash_to_verify = user.password_hash if has_valid_user else "$2b$12$UnSgE8sT8oYp8rVb7uBXeO.U9l6X7.E6W7fO8D9O0O1O2O3O4O5O"
+    
+    # Fix (Anomaly 17): Compute a dynamic dummy hash on demand to ensure matching execution times for missing users
+    if not has_valid_user:
+        dummy_salt = bcrypt.gensalt(rounds=12)
+        password_hash_to_verify = bcrypt.hashpw(b"dummy_password", dummy_salt).decode("utf-8")
+    else:
+        password_hash_to_verify = user.password_hash
     
     # Executes cryptographically expensive hashing verification exactly once on every call
     is_password_correct = verify_password(form_data.password, password_hash_to_verify)

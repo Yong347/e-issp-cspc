@@ -117,6 +117,16 @@ async def log_requests(request: Request, call_next):
         )
         return response
     except Exception as exc:
+        # Fix (Anomaly 15): Roll back and close current database session on unhandled exceptions
+        from app.database.session import db_session
+        try:
+            db_session.rollback()
+            logger.info("Uncaught exception intercepted. Scoped database session rolled back cleanly.")
+        except Exception as db_exc:
+            logger.error(f"Failed to roll back database session on request exception: {str(db_exc)}")
+        finally:
+            db_session.remove()
+
         process_time_ms = (time.time() - start_time) * 1000
         logger.error(
             f"Request failed: {request.method} {request.url.path} - "
@@ -130,6 +140,22 @@ async def log_requests(request: Request, call_next):
 # CORS-SAFE EXCEPTION HANDLERS
 # ==========================================================
 
+def get_cors_headers(request: Request) -> dict[str, str]:
+    """
+    Fix (Anomaly 29): Generates necessary CORS headers to prevent browsers from
+    blocking API validation error responses.
+    """
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin:
+        if origin in cors_origins:
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Credentials"] = "true"
+        elif "*" in cors_origins:
+            headers["Access-Control-Allow-Origin"] = "*"
+    return headers
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
@@ -139,6 +165,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     logger.warning(f"Request schema validation failed: {exc.errors()}")
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        headers=get_cors_headers(request),
         content={"detail": jsonable_encoder(exc.errors())}
     )
 
@@ -148,6 +175,7 @@ async def decryption_exception_handler(request: Request, exc: DecryptionError):
     logger.critical(f"Internal cryptographic failure: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers=get_cors_headers(request),
         content={"detail": "An internal system cryptographic error occurred during data processing."}
     )
 
@@ -157,6 +185,7 @@ async def business_rule_exception_handler(request: Request, exc: BusinessRuleVio
     logger.warning(f"Business constraint failure intercepted: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
+        headers=get_cors_headers(request),
         content={"detail": str(exc)}
     )
 
@@ -165,6 +194,7 @@ async def business_rule_exception_handler(request: Request, exc: BusinessRuleVio
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
+        headers=get_cors_headers(request),
         content={"detail": exc.detail}
     )
 
@@ -181,6 +211,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled Exception: {sanitized_error}", exc_info=exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers=get_cors_headers(request),
         content={"detail": "An unexpected internal server error occurred. Please contact the system administrator."}
     )
 
@@ -193,7 +224,7 @@ app.include_router(auth_router)
 app.include_router(dept_router)
 app.include_router(admin_router)
 
-# Mount local upload file system strictly using settings.LOCAL_UPLOAD_DIR
+# Mount local upload file system statically using settings.LOCAL_UPLOAD_DIR
 if settings.STORAGE_TYPE == "local":
     try:
         os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)

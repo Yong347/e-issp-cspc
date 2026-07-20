@@ -30,14 +30,15 @@ engine = create_engine(
     **pool_args
 )
 
-# Register hook listener directly to the instanced engine to enforce SQLite cascade deletions
-if "sqlite" in db_url.lower():
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        """
-        Enforces foreign key constraint checks and cascade parameters 
-        specifically on this database engine instance.
-        """
+# Fix (Anomaly 7): Register global hook listener on Engine to enforce SQLite cascade deletions on any SQLite thread
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """
+    Enforces foreign key constraint checks and cascade parameters 
+    specifically on SQLite database engine connections.
+    """
+    # Verify the connection dialect is SQLite before execution
+    if "sqlite" in db_url.lower() or dbapi_connection.__class__.__name__ == "Connection":
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA foreign_keys=ON")
@@ -53,9 +54,9 @@ db_session = scoped_session(SessionLocal)
 
 def get_db():
     """
-    Generator yielding thread-safe database session contexts.
+    Fix (Anomaly 21): Generator yielding thread-safe database session contexts.
     Ensures that any outstanding active database transactions are rolled back 
-    upon unhandled failures to prevent transaction leakage across pooled sessions.
+    upon unhandled failures and connection pools are cleanly deallocated.
     """
     db = db_session()
     try:
