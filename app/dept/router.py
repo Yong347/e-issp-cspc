@@ -213,24 +213,20 @@ def validate_proposal_constraints(db: Session, dept_id: int, payload: ProposalUp
                 detail="The total quantity requested across all planning years must be strictly greater than 0 on submission."
             )
         
-        unserviceable_count = db.query(func.sum(ExistingInventory.quantity)).filter(
-            ExistingInventory.department_id == dept_id,
-            func.lower(ExistingInventory.item_name) == func.lower(target_item_name),
-            ExistingInventory.status.in_([AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR])
-        ).scalar() or 0
+        # Use the explicit payload.is_expansion boolean flag to restrict validation patterns
+        if not payload.is_expansion:
+            unserviceable_count = db.query(func.sum(ExistingInventory.quantity)).filter(
+                ExistingInventory.department_id == dept_id,
+                func.lower(ExistingInventory.item_name) == func.lower(target_item_name),
+                ExistingInventory.status.in_([AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR])
+            ).scalar() or 0
 
-        target_offices = payload.target_offices_json or []
-        is_expansion_project = any(
-            any(keyword in str(office).lower() for keyword in ["laboratory", "lab", "campus", "center", "academic", "instructional", "classroom", "library"])
-            for office in target_offices if office
-        )
-
-        if not is_expansion_project and total_requested > (unserviceable_count + 2):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Requested quantity ({total_requested}) exceeds justified replacement thresholds of unserviceable units ({unserviceable_count}) for '{target_item_name}'. "
-                       f"Please specify target laboratories or centers in your deployment fields for expansion proposals."
-            )
+            if total_requested > (unserviceable_count + 2):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Requested quantity ({total_requested}) exceeds justified replacement thresholds of unserviceable units ({unserviceable_count}) for '{target_item_name}'. "
+                           f"For new layouts, check the 'Is Expansion Project' option and specify your target room."
+                )
 
 
 def validate_subscription_constraints(db: Session, dept_id: int, payload: SubscriptionProposalCreate, is_submitting: bool = False):
@@ -588,7 +584,8 @@ def create_draft_proposal(
             payload=json_payload,
             target_offices_json=payload.target_offices_json,
             canvas_evidence_url=resolved_canvas_url,
-            custom_specification=payload.custom_specification
+            custom_specification=payload.custom_specification,
+            is_expansion=payload.is_expansion
         )
         db_proposal.s3_storage_class = "STANDARD"
         db_proposal.is_restoring = False
@@ -668,7 +665,8 @@ def update_proposal_item(
         "total_qty": proposal.total_qty,
         "yearly_quantities": proposal.yearly_quantities,
         "custom_specification": proposal.custom_specification,
-        "target_offices_json": proposal.target_offices_json
+        "target_offices_json": proposal.target_offices_json,
+        "is_expansion": proposal.is_expansion
     }
 
     resolved_item_name = payload.item_select
@@ -697,6 +695,7 @@ def update_proposal_item(
     proposal.target_offices_json = payload.target_offices_json
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.custom_specification = payload.custom_specification
+    proposal.is_expansion = payload.is_expansion
 
     old_payload = dict(proposal.payload) if proposal.payload else {}
     old_payload["supplier_name"] = resolved_supplier
@@ -713,7 +712,8 @@ def update_proposal_item(
         "total_qty": proposal.total_qty,
         "yearly_quantities": payload.yearly_quantities,
         "custom_specification": payload.custom_specification,
-        "target_offices_json": proposal.target_offices_json
+        "target_offices_json": proposal.target_offices_json,
+        "is_expansion": payload.is_expansion
     }
 
     audit = AuditTrail(
@@ -853,7 +853,8 @@ def submit_proposal(
         yearly_quantities=proposal.yearly_quantities,
         unit_cost=proposal.unit_cost,
         canvas_evidence_url=proposal.canvas_evidence_url,
-        target_offices_json=proposal.target_offices_json
+        target_offices_json=proposal.target_offices_json,
+        is_expansion=proposal.is_expansion
     )
     validate_proposal_constraints(db, user["department_id"], payload_to_verify, is_submitting=True)
 
@@ -1282,6 +1283,7 @@ def create_mooe_subscription(
         status=ProposalStatus.DRAFT,
         canvas_evidence_url=payload.canvas_evidence_url,
         target_offices_json=payload.target_offices_json,
+        is_expansion=payload.is_expansion,
         payload={"comments": []}
     )
     db_entry.is_restoring = False
@@ -1402,6 +1404,7 @@ def update_mooe_subscription(
     sub.total_multiyear_mooe = total_cost
     sub.canvas_evidence_url = payload.canvas_evidence_url
     sub.target_offices_json = payload.target_offices_json
+    sub.is_expansion = payload.is_expansion
 
     try:
         db.commit()
@@ -1531,7 +1534,8 @@ def submit_mooe_subscription(
         yearly_users=sub.yearly_users,
         annual_cost_per_user=sub.annual_cost_per_user,
         canvas_evidence_url=sub.canvas_evidence_url,
-        target_offices_json=sub.target_offices_json
+        target_offices_json=sub.target_offices_json,
+        is_expansion=sub.is_expansion
     )
     validate_subscription_constraints(db, user["department_id"], payload_to_verify, is_submitting=True)
 

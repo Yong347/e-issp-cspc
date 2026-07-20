@@ -235,6 +235,7 @@ class ProposalUpdatePayload(BaseModel):
     
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
+    is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
     @field_validator('target_offices_json')
     @classmethod
@@ -277,10 +278,10 @@ class ProposalUpdatePayload(BaseModel):
             for keyword in blocked_keywords:
                 if keyword in spec_lower:
                     raise ValueError(f"Compliance Violation: Blocked keyword '{keyword}' detected in custom specifications.")
-            
-            # NOTE: Unconditional canvas_evidence_url validation has been removed from 
-            # here so drafts can be created prior to file upload. Verification checks 
-            # are executed in 'validate_proposal_constraints' upon submission.
+        
+        # Enforce target office selection when the expansion project option is selected
+        if self.is_expansion and not self.target_offices_json:
+            raise ValueError("At least one target office location must be selected for an expansion project.")
 
         return self
 
@@ -302,6 +303,7 @@ class ProposalResponse(BaseModel):
     target_offices_json: List[str] = []
     s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks AWS S3 storage lifecycle tier")
     is_restoring: bool = Field(False, description="True if a cold archival retrieval is currently processing")
+    is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
     @field_validator('s3_storage_class', mode='before')
     @classmethod
@@ -336,6 +338,7 @@ class SubscriptionProposalCreate(BaseModel):
     
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
+    is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
     # Prevent Stored XSS attacks inside input fields of MOOE subscriptions
     @field_validator('software_name', 'justification', mode='before')
@@ -371,7 +374,11 @@ class SubscriptionProposalCreate(BaseModel):
         for keyword in blocked_keywords:
             if keyword in name_lower:
                 raise ValueError(f"Compliance Violation: Blocked keyword '{keyword}' detected in software name.")
-                
+        
+        # Enforce target office selection when the expansion project option is selected
+        if self.is_expansion and not self.target_offices_json:
+            raise ValueError("At least one target office location must be selected for an expansion project.")
+
         return self
 
 

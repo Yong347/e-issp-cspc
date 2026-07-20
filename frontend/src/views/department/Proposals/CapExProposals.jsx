@@ -46,6 +46,8 @@ export default function CapExProposals() {
   const [unitCost, setUnitCost] = useState("");
   const [yearlyQuantities, setYearlyQuantities] = useState({});
   const [targetOffices, setTargetOffices] = useState("");
+  const [isExpansion, setIsExpansion] = useState(false);
+  const [officesRegistry, setOfficesRegistry] = useState([]);
   
   // Unified Creation File Upload State (for unlisted/custom requests)
   const [supplierName, setSupplierName] = useState("");
@@ -91,6 +93,25 @@ export default function CapExProposals() {
       console.error("Failed to query budget headroom summary:", err);
     }
   };
+
+  // Fetch the office directory inside useEffect
+  useEffect(() => {
+    const fetchOffices = async () => {
+      try {
+        const res = await fetch(`${rawUrl}/api/dept/offices-list`, {
+          headers: { Authorization: `Bearer ${user.token}` }
+        });
+        if (res.ok) {
+          setOfficesRegistry(await res.json());
+        }
+      } catch (e) {
+        console.error("Failed to load authorized offices:", e);
+      }
+    };
+    if (user?.token) {
+      fetchOffices();
+    }
+  }, [user]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -209,9 +230,7 @@ export default function CapExProposals() {
     }
     
     setCreatingProposal(true);
-    const parsedOffices = targetOffices
-      ? targetOffices.split(",").map(o => o.trim()).filter(o => o.length > 0)
-      : [];
+    const parsedOffices = targetOffices ? [targetOffices] : [];
       
     const payload = {
       item_select: itemSelect,
@@ -219,6 +238,7 @@ export default function CapExProposals() {
       yearly_quantities: yearlyQuantities,
       unit_cost: parseFloat(unitCost) || 0.0,
       target_offices_json: parsedOffices,
+      is_expansion: isExpansion,
       canvas_evidence_url: null
     };
 
@@ -235,6 +255,7 @@ export default function CapExProposals() {
       setSuccess("Proposal draft created and canvas quotation linked successfully.");
       setCustomSpec("");
       setTargetOffices("");
+      setIsExpansion(false);
       setSupplierName("");
       setCanvasFile(null);
       
@@ -541,18 +562,38 @@ export default function CapExProposals() {
               ))}
             </div>
 
+            {/* Expansion Checkbox */}
+            <div className="flex items-center gap-2 p-3 bg-slate-950/50 rounded-lg border border-slate-850">
+              <input
+                type="checkbox"
+                id="is_expansion"
+                checked={isExpansion}
+                onChange={(e) => setIsExpansion(e.target.checked)}
+                className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
+              />
+              <label htmlFor="is_expansion" className="text-[10px] font-bold text-slate-300 uppercase tracking-wider cursor-pointer select-none">
+                Is this an expansion project?
+              </label>
+            </div>
+
+            {/* Target Deployments Registry Selector Dropdown */}
             <div>
               <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-                Target Deployments (Offices/Labs, CSV List)
+                Target Deployment Office / Room {isExpansion && <span className="text-red-500">*</span>}
               </label>
-              <input
-                type="text"
-                required
+              <select
                 value={targetOffices}
                 onChange={(e) => setTargetOffices(e.target.value)}
-                placeholder="e.g. Dean's Office, Lab 403"
-                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
-              />
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-slate-100 outline-none focus:ring-1 focus:ring-blue-600"
+                required={isExpansion}
+              >
+                <option value="">-- Select Deployment Location --</option>
+                {officesRegistry.map((off) => (
+                  <option key={off.id} value={off.office_name}>
+                    {off.office_name} ({off.division})
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Dynamic Room Over Budget Headroom Warnings (Gap 30) */}
@@ -661,6 +702,11 @@ export default function CapExProposals() {
                                 <div className="text-[10px] text-amber-500 mt-0.5">Custom: {p.custom_specification}</div>
                               ) : (
                                 <div className="text-[10px] text-slate-500 mt-0.5">Standard Spec</div>
+                              )}
+                              {p.is_expansion && (
+                                <span className="text-[9px] px-1.5 py-0.2 mt-1 inline-block bg-blue-955/40 border border-blue-900 text-blue-400 font-bold uppercase tracking-wider rounded">
+                                  Expansion
+                                </span>
                               )}
                             </td>
                             <td className="py-3.5 px-2">

@@ -22,6 +22,7 @@ from sqlalchemy import (
     JSON,  # Dialect-agnostic JSON compiles to JSONB on PostgreSQL / JSON on SQLite
     func,
     event,
+    text,
 )
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -289,7 +290,7 @@ class ScopeChoice(str, enum.Enum):
 
 
 # ==========================================================
-# CAMPUS REGISTRIES (Gap 1)
+# CAMPUS REGISTRIES
 # ==========================================================
 
 class Campus(Base):
@@ -420,7 +421,7 @@ class ExistingInventory(Base):
     status: Mapped[AssetStatus] = mapped_column(Enum(AssetStatus), default=AssetStatus.FUNCTIONAL, nullable=False)
     unserviceable_report_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     
-    # Gap 18: Track device lifecycle acquisition date
+    # Track device lifecycle acquisition date
     date_acquired: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     department: Mapped[Department] = relationship("Department", back_populates="inventory")
@@ -489,7 +490,7 @@ class Proposal(Base):
         back_populates="proposals"
     )
     
-    # Gap 13: Relational deployment mapping configurations
+    # Relational deployment mapping configurations
     deployments_relation: Mapped[List["ProposalDeployment"]] = relationship(
         "ProposalDeployment", 
         back_populates="proposal", 
@@ -500,6 +501,13 @@ class Proposal(Base):
         "AuditTrail", 
         foreign_keys="AuditTrail.proposal_id", 
         back_populates="proposal"
+    )
+
+    is_expansion: Mapped[bool] = mapped_column(
+        Boolean, 
+        default=False, 
+        server_default=text("false"), 
+        nullable=False
     )
 
     def sync_payload(self) -> None:
@@ -515,6 +523,7 @@ class Proposal(Base):
         self.payload["item_key"] = self.item_key
         self.payload["unit_cost"] = str(self.unit_cost)
         self.payload["project_key"] = self.project_key
+        self.payload["is_expansion"] = self.is_expansion
 
 
 class SubscriptionProposal(Base):
@@ -586,6 +595,13 @@ class SubscriptionProposal(Base):
         back_populates="subscription"
     )
 
+    is_expansion: Mapped[bool] = mapped_column(
+        Boolean, 
+        default=False, 
+        server_default=text("false"), 
+        nullable=False
+    )
+
     def sync_payload(self) -> None:
         """
         Forces software subscription inputs to synchronize into the encrypted JSON
@@ -599,10 +615,11 @@ class SubscriptionProposal(Base):
         self.payload["subscription_type"] = self.subscription_type
         self.payload["annual_cost_per_user"] = str(self.annual_cost_per_user)
         self.payload["project_key"] = self.project_key
+        self.payload["is_expansion"] = self.is_expansion
 
 
 # ==========================================================
-# DEPLOYMENT ALLOCATIONS MATRIX (Gap 13)
+# DEPLOYMENT ALLOCATIONS MATRIX
 # ==========================================================
 
 class ProposalDeployment(Base):
@@ -768,7 +785,7 @@ class GaaPerformance(Base):
 
 
 # ==========================================================
-# DICT GLOSSARY & INSTRUCTIONS REGISTRY (Gaps 7 & 8)
+# DICT GLOSSARY & INSTRUCTIONS REGISTRY
 # ==========================================================
 
 class GlossaryTerm(Base):
@@ -795,7 +812,7 @@ class GeneralInstruction(Base):
 
 
 # ==========================================================
-# DICT MITHI INVENTORIES & OS REGISTRIES (Gaps 15, 16, 17)
+# DICT MITHI INVENTORIES & OS REGISTRIES
 # ==========================================================
 
 class ServerCapacityTrack(Base):
@@ -862,7 +879,7 @@ class IctStaffPosition(Base):
 
 
 # ==========================================================
-# CORE REGISTRIES & COLLABORATIVE MATRIX (Gaps 4, 11, 19, 24, 25)
+# CORE REGISTRIES & COLLABORATIVE MATRIX
 # ==========================================================
 
 class StrategicConcern(Base):

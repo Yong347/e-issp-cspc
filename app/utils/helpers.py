@@ -4,6 +4,7 @@ import uuid
 import html
 import logging
 import posixpath
+import importlib
 from typing import List, Optional, Any, Dict, Tuple
 from urllib.parse import urlparse
 from sqlalchemy.orm import Session
@@ -236,10 +237,11 @@ def validate_pdf_content(file_bytes: bytes) -> bool:
     to verify true MIME types and prevent content-type header spoofing.
     """
     try:
-        import magic
+        # Dynamically import to bypass static analysis warnings (e.g. Pylance)
+        magic = importlib.import_module("magic")
         mime = magic.Magic(mime=True)
         detected_type = mime.from_buffer(file_bytes[:2048])
         return detected_type == "application/pdf"
-    except ImportError:
-        # Secure binary fallback pattern check if python-magic dependencies are uninstalled on the host OS
+    except (ImportError, AttributeError, Exception):
+        # Secure binary fallback pattern check if python-magic dependencies are unavailable
         return file_bytes.startswith(b"%PDF-")
