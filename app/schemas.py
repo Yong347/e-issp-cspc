@@ -21,7 +21,7 @@ MFO_MAPPING = {
     "admin": "General Administrative and Support Services (GASS)"
 }
 
-# Fix (Anomaly 4): Shared utility to sanitize text fields against stored XSS
+# Shared utility to sanitize text fields against stored XSS
 def sanitize_text(v: Optional[str]) -> Optional[str]:
     if v is not None:
         return html.escape(v.strip())
@@ -167,7 +167,7 @@ class NeedsAssessmentCreate(BaseModel):
     @classmethod
     def resolve_mfo_code(cls, v: str) -> str:
         """
-        Fix (Anomaly 25): Intercepts inputs and maps descriptions back to standard code keys.
+        Intercepts inputs and maps descriptions back to standard code keys.
         Handles connectors, abbreviations, and cased variations without aggressive character-stripping false positives.
         """
         if not isinstance(v, str):
@@ -190,7 +190,6 @@ class NeedsAssessmentCreate(BaseModel):
         if val_clean in exact_mappings:
             return exact_mappings[val_clean]
 
-        # Use boundary keyword matching to avoid collision between Admin GASS and Research Support elements
         if "higher education" in val_clean or "advanced education" in val_clean:
             return "he"
         if "research" in val_clean and "general" not in val_clean:
@@ -243,7 +242,7 @@ class ProposalUpdatePayload(BaseModel):
         """Neutralizes potential stored XSS scripts embedded within deployment locations"""
         return [html.escape(item.strip()) for item in v if item.strip()]
 
-    # Fix (Anomaly 4 & 48): Sanitize inputs and enforce max character limits of 500 on custom specifications
+    # Sanitize inputs and enforce max character limits of 500 on custom specifications
     @field_validator('custom_specification', mode='before')
     @classmethod
     def clean_and_validate_specification(cls, v: Optional[str]) -> Optional[str]:
@@ -279,9 +278,10 @@ class ProposalUpdatePayload(BaseModel):
                 if keyword in spec_lower:
                     raise ValueError(f"Compliance Violation: Blocked keyword '{keyword}' detected in custom specifications.")
             
-            if not self.canvas_evidence_url or not self.canvas_evidence_url.strip():
-                raise ValueError("Market canvas proof or supplier quotation is mandatory for custom/unlisted equipment requests.")
-                
+            # NOTE: Unconditional canvas_evidence_url validation has been removed from 
+            # here so drafts can be created prior to file upload. Verification checks 
+            # are executed in 'validate_proposal_constraints' upon submission.
+
         return self
 
 
@@ -337,7 +337,7 @@ class SubscriptionProposalCreate(BaseModel):
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
 
-    # Fix (Anomaly 4): PreventStored XSS attacks inside input fields of MOOE subscriptions
+    # Prevent Stored XSS attacks inside input fields of MOOE subscriptions
     @field_validator('software_name', 'justification', mode='before')
     @classmethod
     def sanitize_subscription_texts(cls, v: Optional[str]) -> Optional[str]:
@@ -398,7 +398,7 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
-# --- Segmented & Polymorphic Admin Overrides ---
+# --- Polymorphic Admin Overrides ---
 
 class AdminHardwareOverride(BaseModel):
     """Specific overrides reserved strictly for CapEx/Hardware entries"""
@@ -483,7 +483,7 @@ class UpdateCeilingPayload(BaseModel):
 
     @model_validator(mode='after')
     def resolve_default_split(self) -> 'UpdateCeilingPayload':
-        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention (Anomaly II.2 / Anomaly 3)"""
+        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention"""
         if self.sub_ceiling is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
             sub_dec = Decimal(str(self.sub_ceiling)).quantize(Decimal("1.00"))
             self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
@@ -505,10 +505,7 @@ class BulkCeilingItem(BaseModel):
 
     @model_validator(mode='after')
     def resolve_and_split_sub_ceiling(self) -> 'BulkCeilingItem':
-        """
-        Fix (Anomaly II.2 / Anomaly 3): Intercepts raw sub-ceilings and performs
-        precise quantized splitting to prevent rounding discrepancies.
-        """
+        """Calculates precise 70/30 splitting to prevent rounding discrepancies"""
         if self.sub_ceiling_input is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
             sub_dec = Decimal(str(self.sub_ceiling_input)).quantize(Decimal("1.00"))
             self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
@@ -528,10 +525,7 @@ class BulkCeilingValidationPayload(BaseModel):
 
     @model_validator(mode='after')
     def validate_ceiling_constraint(self) -> 'BulkCeilingValidationPayload':
-        """
-        Validates mathematical constraints and intercepts duplicate entries for 
-        individual departments to protect mathematical ceiling integrity.
-        """
+        """Validates mathematical constraints and intercepts duplicate entries"""
         seen_depts = set()
         total_subs = Decimal("0.00")
         for item in self.sub_ceilings:
@@ -784,7 +778,7 @@ class MithiHardwareItemSchema(BaseModel):
     """DICT Annex A-1: Section 1.1 Computing Devices and Peripherals by Type (Dynamic N-Year layout)"""
     device_type: str = Field(..., example="Desktop PC", description="Hardware or equipment classification type")
     
-    # REFACTORED to maps to support dynamic multi-year tracking
+    # Maps to support dynamic multi-year tracking
     yearly_owned: Dict[str, int] = Field(default_factory=dict, description="Map of calendar year strings to owned quantities")
     yearly_leased: Dict[str, int] = Field(default_factory=dict, description="Map of calendar year strings to leased quantities")
     older_than_3_years: int = Field(0, ge=0, description="Total units older than 3 years")
@@ -912,7 +906,7 @@ class MasterNarrativeUpdate(BaseModel):
     
     signatory_approved_by: Optional[str] = Field(None, description="Printed Name & credentials of the Agency Head", example="Dr. Amado A. Oliva Jr.")
 
-    # Fix (Anomaly 30): Prevent WeasyPrint engine layout hangs via strict size boundaries on custom narrative HTML fields
+    # Size boundaries to prevent WeasyPrint engine layout hangs on custom HTML narratives
     mandate_html: Optional[str] = Field("", max_length=50000, description="DICT mandated legal references and background")
     vision_html: Optional[str] = Field("", max_length=50000, description="Official institutional vision statement")
     mission_html: Optional[str] = Field("", max_length=50000, description="Official institutional mission statement")
@@ -1043,7 +1037,7 @@ class MasterNarrativeResponse(BaseModel):
 
     implementation_schedules: List[ImplementationScheduleItem] = []
 
-    # Fix (Anomaly 45): Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
+    # Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
     @field_validator('mithi_network_profile', 'mithi_data_center', 'manpower_json', mode='before')
     @classmethod
     def clear_empty_dicts(cls, v: Any) -> Any:
@@ -1166,7 +1160,6 @@ class StrategicConcernCreate(BaseModel):
     problems: str = Field(..., example="Delayed enrollment processing and grading latency.")
     intended_use: str = Field(..., example="SIAS Cloud migration with decentralized caches.")
 
-    # Fix (Anomaly 1): Enforce the same normalization validator used for Needs Assessment alignment
     @field_validator('mfo', mode='before')
     @classmethod
     def resolve_mfo_normalization(cls, v: str) -> str:
@@ -1181,7 +1174,6 @@ class StrategicConcernResponse(BaseModel):
     problems: str
     intended_use: str
 
-    # Fix (Anomaly 1): Ensure responses normalize the KRA value identically to create sequences
     @field_validator('mfo', mode='before')
     @classmethod
     def resolve_mfo_normalization_response(cls, v: str) -> str:
@@ -1371,60 +1363,3 @@ class DeploymentResponse(BaseModel):
 class MilestoneUpdatePayload(BaseModel):
     project_id: uuid.UUID
     milestones: Dict[str, bool] = Field(..., example={"2026_Q1": True, "2026_Q2": True, "2026_Q3": False, "2026_Q4": False})
-
-
-# ==========================================================
-# 17. MITHI EXTENDED SURVEY SCHEMAS (Section 4, 5, 8.2)
-# ==========================================================
-
-class MithiSecurityDrSchema(BaseModel):
-    """MITHI Survey (Annex A-1) - Section 4 Security, Disaster Recovery & Backup Checklist"""
-    has_security_policy: bool = Field(False, description="Presence of active security policy guidelines")
-    has_dr_plan: bool = Field(False, description="Presence of disaster recovery plans")
-    has_back_up_power: bool = Field(False, description="Back-up power unit presence (e.g., Generator, UPS)")
-    has_digital_signatures: bool = Field(False, description="Deployment of certified digital signatures")
-    has_encryption: bool = Field(False, description="Active encryption frameworks for critical SUC databases")
-    has_offsite_backup: bool = Field(False, description="Active off-site backup pipelines")
-    has_hardware_firewall: bool = Field(False, description="Hardware firewall network implementations")
-    has_physical_access_control: bool = Field(False, description="Physical access restrictions to server rooms")
-    has_software_firewall: bool = Field(False, description="Active endpoint security software firewalls")
-    has_secure_servers: bool = Field(False, description="Secure operating servers deployment status")
-
-
-class MithiDataArchivingSchema(BaseModel):
-    """MITHI Survey (Annex A-1) - Section 5 Data Archiving Configurations"""
-    has_archiving_system: bool = Field(False, description="Presence of institutional data archiving systems")
-    archiving_mode: str = Field("Manual", description="Archiving mode: Manual, Electronic, Both")
-    archiving_medium: List[str] = Field(default_factory=list, description="Storage media: Optical, Hard Disk, Tape, etc.")
-    archived_information: List[str] = Field(default_factory=list, description="Classifications: Publications, Letters, etc.")
-
-
-class MithiIctIssuesSchema(BaseModel):
-    """MITHI Survey (Annex A-1) - Section 8.2 ICT Implementation Bottlenecks"""
-    has_budget_issues: bool = Field(False, description="Insufficient budget constraints")
-    has_procurement_issues: bool = Field(False, description="Government standard procurement bottlenecks")
-    has_reluctant_stakeholders: bool = Field(False, description="Resistance to digital systems transition")
-    has_management_support_issues: bool = Field(False, description="Lack of institutional executive support")
-    has_personnel_recruitment_issues: bool = Field(False, description="Difficulty recruiting or retaining IT personnel")
-    has_employee_skills_issues: bool = Field(False, description="Low level of ICT literacy among SUC employees")
-    has_bandwidth_issues: bool = Field(False, description="Unavailability of required network bandwidth")
-    has_contract_management_issues: bool = Field(False, description="Difficulties in contracts and vendor management")
-
-
-# ==========================================================
-# 18. PART IV.B RELATIONAL STAFFING SCHEMAS
-# ==========================================================
-
-class IctStaffPositionCreate(BaseModel):
-    """Administrative creation schema for institutional IT staffing models"""
-    position_title: str = Field(..., example="Database Administrator", description="Official position title")
-    status: str = Field(..., example="Permanent", description="Permanent, Contractual, or Casual")
-    count: int = Field(1, ge=0, description="Total headcount for this position")
-
-
-class IctStaffPositionResponse(IctStaffPositionCreate):
-    """Relational database response mapping details for IT personnel"""
-    id: uuid.UUID
-    issp_period: str
-
-    model_config = ConfigDict(from_attributes=True)
