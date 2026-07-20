@@ -1975,7 +1975,7 @@ MFO_MAPPING = {
     "admin": "General Administrative and Support Services (GASS)"
 }
 
-# Fix (Anomaly 4): Shared utility to sanitize text fields against stored XSS
+# Shared utility to sanitize text fields against stored XSS
 def sanitize_text(v: Optional[str]) -> Optional[str]:
     if v is not None:
         return html.escape(v.strip())
@@ -2121,7 +2121,7 @@ class NeedsAssessmentCreate(BaseModel):
     @classmethod
     def resolve_mfo_code(cls, v: str) -> str:
         """
-        Fix (Anomaly 25): Intercepts inputs and maps descriptions back to standard code keys.
+        Intercepts inputs and maps descriptions back to standard code keys.
         Handles connectors, abbreviations, and cased variations without aggressive character-stripping false positives.
         """
         if not isinstance(v, str):
@@ -2144,7 +2144,6 @@ class NeedsAssessmentCreate(BaseModel):
         if val_clean in exact_mappings:
             return exact_mappings[val_clean]
 
-        # Use boundary keyword matching to avoid collision between Admin GASS and Research Support elements
         if "higher education" in val_clean or "advanced education" in val_clean:
             return "he"
         if "research" in val_clean and "general" not in val_clean:
@@ -2190,6 +2189,7 @@ class ProposalUpdatePayload(BaseModel):
     
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
+    is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
     @field_validator('target_offices_json')
     @classmethod
@@ -2197,7 +2197,7 @@ class ProposalUpdatePayload(BaseModel):
         """Neutralizes potential stored XSS scripts embedded within deployment locations"""
         return [html.escape(item.strip()) for item in v if item.strip()]
 
-    # Fix (Anomaly 4 & 48): Sanitize inputs and enforce max character limits of 500 on custom specifications
+    # Sanitize inputs and enforce max character limits of 500 on custom specifications
     @field_validator('custom_specification', mode='before')
     @classmethod
     def clean_and_validate_specification(cls, v: Optional[str]) -> Optional[str]:
@@ -2232,10 +2232,11 @@ class ProposalUpdatePayload(BaseModel):
             for keyword in blocked_keywords:
                 if keyword in spec_lower:
                     raise ValueError(f"Compliance Violation: Blocked keyword '{keyword}' detected in custom specifications.")
-            
-            if not self.canvas_evidence_url or not self.canvas_evidence_url.strip():
-                raise ValueError("Market canvas proof or supplier quotation is mandatory for custom/unlisted equipment requests.")
-                
+        
+        # Enforce target office selection when the expansion project option is selected
+        if self.is_expansion and not self.target_offices_json:
+            raise ValueError("At least one target office location must be selected for an expansion project.")
+
         return self
 
 
@@ -2256,6 +2257,7 @@ class ProposalResponse(BaseModel):
     target_offices_json: List[str] = []
     s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks AWS S3 storage lifecycle tier")
     is_restoring: bool = Field(False, description="True if a cold archival retrieval is currently processing")
+    is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
     @field_validator('s3_storage_class', mode='before')
     @classmethod
@@ -2290,8 +2292,9 @@ class SubscriptionProposalCreate(BaseModel):
     
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
+    is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
-    # Fix (Anomaly 4): PreventStored XSS attacks inside input fields of MOOE subscriptions
+    # Prevent Stored XSS attacks inside input fields of MOOE subscriptions
     @field_validator('software_name', 'justification', mode='before')
     @classmethod
     def sanitize_subscription_texts(cls, v: Optional[str]) -> Optional[str]:
@@ -2325,7 +2328,11 @@ class SubscriptionProposalCreate(BaseModel):
         for keyword in blocked_keywords:
             if keyword in name_lower:
                 raise ValueError(f"Compliance Violation: Blocked keyword '{keyword}' detected in software name.")
-                
+        
+        # Enforce target office selection when the expansion project option is selected
+        if self.is_expansion and not self.target_offices_json:
+            raise ValueError("At least one target office location must be selected for an expansion project.")
+
         return self
 
 
@@ -2352,7 +2359,7 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
-# --- Segmented & Polymorphic Admin Overrides ---
+# --- Polymorphic Admin Overrides ---
 
 class AdminHardwareOverride(BaseModel):
     """Specific overrides reserved strictly for CapEx/Hardware entries"""
@@ -2437,7 +2444,7 @@ class UpdateCeilingPayload(BaseModel):
 
     @model_validator(mode='after')
     def resolve_default_split(self) -> 'UpdateCeilingPayload':
-        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention (Anomaly II.2 / Anomaly 3)"""
+        """Performs a standard 70/30 division on consolidated budget inputs while ensuring exact sum retention"""
         if self.sub_ceiling is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
             sub_dec = Decimal(str(self.sub_ceiling)).quantize(Decimal("1.00"))
             self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
@@ -2459,10 +2466,7 @@ class BulkCeilingItem(BaseModel):
 
     @model_validator(mode='after')
     def resolve_and_split_sub_ceiling(self) -> 'BulkCeilingItem':
-        """
-        Fix (Anomaly II.2 / Anomaly 3): Intercepts raw sub-ceilings and performs
-        precise quantized splitting to prevent rounding discrepancies.
-        """
+        """Calculates precise 70/30 splitting to prevent rounding discrepancies"""
         if self.sub_ceiling_input is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
             sub_dec = Decimal(str(self.sub_ceiling_input)).quantize(Decimal("1.00"))
             self.allocated_capex = (sub_dec * Decimal("0.70")).quantize(Decimal("1.00"))
@@ -2482,10 +2486,7 @@ class BulkCeilingValidationPayload(BaseModel):
 
     @model_validator(mode='after')
     def validate_ceiling_constraint(self) -> 'BulkCeilingValidationPayload':
-        """
-        Validates mathematical constraints and intercepts duplicate entries for 
-        individual departments to protect mathematical ceiling integrity.
-        """
+        """Validates mathematical constraints and intercepts duplicate entries"""
         seen_depts = set()
         total_subs = Decimal("0.00")
         for item in self.sub_ceilings:
@@ -2738,7 +2739,7 @@ class MithiHardwareItemSchema(BaseModel):
     """DICT Annex A-1: Section 1.1 Computing Devices and Peripherals by Type (Dynamic N-Year layout)"""
     device_type: str = Field(..., example="Desktop PC", description="Hardware or equipment classification type")
     
-    # REFACTORED to maps to support dynamic multi-year tracking
+    # Maps to support dynamic multi-year tracking
     yearly_owned: Dict[str, int] = Field(default_factory=dict, description="Map of calendar year strings to owned quantities")
     yearly_leased: Dict[str, int] = Field(default_factory=dict, description="Map of calendar year strings to leased quantities")
     older_than_3_years: int = Field(0, ge=0, description="Total units older than 3 years")
@@ -2866,7 +2867,7 @@ class MasterNarrativeUpdate(BaseModel):
     
     signatory_approved_by: Optional[str] = Field(None, description="Printed Name & credentials of the Agency Head", example="Dr. Amado A. Oliva Jr.")
 
-    # Fix (Anomaly 30): Prevent WeasyPrint engine layout hangs via strict size boundaries on custom narrative HTML fields
+    # Size boundaries to prevent WeasyPrint engine layout hangs on custom HTML narratives
     mandate_html: Optional[str] = Field("", max_length=50000, description="DICT mandated legal references and background")
     vision_html: Optional[str] = Field("", max_length=50000, description="Official institutional vision statement")
     mission_html: Optional[str] = Field("", max_length=50000, description="Official institutional mission statement")
@@ -2997,7 +2998,7 @@ class MasterNarrativeResponse(BaseModel):
 
     implementation_schedules: List[ImplementationScheduleItem] = []
 
-    # Fix (Anomaly 45): Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
+    # Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
     @field_validator('mithi_network_profile', 'mithi_data_center', 'manpower_json', mode='before')
     @classmethod
     def clear_empty_dicts(cls, v: Any) -> Any:
@@ -3120,7 +3121,6 @@ class StrategicConcernCreate(BaseModel):
     problems: str = Field(..., example="Delayed enrollment processing and grading latency.")
     intended_use: str = Field(..., example="SIAS Cloud migration with decentralized caches.")
 
-    # Fix (Anomaly 1): Enforce the same normalization validator used for Needs Assessment alignment
     @field_validator('mfo', mode='before')
     @classmethod
     def resolve_mfo_normalization(cls, v: str) -> str:
@@ -3135,7 +3135,6 @@ class StrategicConcernResponse(BaseModel):
     problems: str
     intended_use: str
 
-    # Fix (Anomaly 1): Ensure responses normalize the KRA value identically to create sequences
     @field_validator('mfo', mode='before')
     @classmethod
     def resolve_mfo_normalization_response(cls, v: str) -> str:
@@ -3325,63 +3324,6 @@ class DeploymentResponse(BaseModel):
 class MilestoneUpdatePayload(BaseModel):
     project_id: uuid.UUID
     milestones: Dict[str, bool] = Field(..., example={"2026_Q1": True, "2026_Q2": True, "2026_Q3": False, "2026_Q4": False})
-
-
-# ==========================================================
-# 17. MITHI EXTENDED SURVEY SCHEMAS (Section 4, 5, 8.2)
-# ==========================================================
-
-class MithiSecurityDrSchema(BaseModel):
-    """MITHI Survey (Annex A-1) - Section 4 Security, Disaster Recovery & Backup Checklist"""
-    has_security_policy: bool = Field(False, description="Presence of active security policy guidelines")
-    has_dr_plan: bool = Field(False, description="Presence of disaster recovery plans")
-    has_back_up_power: bool = Field(False, description="Back-up power unit presence (e.g., Generator, UPS)")
-    has_digital_signatures: bool = Field(False, description="Deployment of certified digital signatures")
-    has_encryption: bool = Field(False, description="Active encryption frameworks for critical SUC databases")
-    has_offsite_backup: bool = Field(False, description="Active off-site backup pipelines")
-    has_hardware_firewall: bool = Field(False, description="Hardware firewall network implementations")
-    has_physical_access_control: bool = Field(False, description="Physical access restrictions to server rooms")
-    has_software_firewall: bool = Field(False, description="Active endpoint security software firewalls")
-    has_secure_servers: bool = Field(False, description="Secure operating servers deployment status")
-
-
-class MithiDataArchivingSchema(BaseModel):
-    """MITHI Survey (Annex A-1) - Section 5 Data Archiving Configurations"""
-    has_archiving_system: bool = Field(False, description="Presence of institutional data archiving systems")
-    archiving_mode: str = Field("Manual", description="Archiving mode: Manual, Electronic, Both")
-    archiving_medium: List[str] = Field(default_factory=list, description="Storage media: Optical, Hard Disk, Tape, etc.")
-    archived_information: List[str] = Field(default_factory=list, description="Classifications: Publications, Letters, etc.")
-
-
-class MithiIctIssuesSchema(BaseModel):
-    """MITHI Survey (Annex A-1) - Section 8.2 ICT Implementation Bottlenecks"""
-    has_budget_issues: bool = Field(False, description="Insufficient budget constraints")
-    has_procurement_issues: bool = Field(False, description="Government standard procurement bottlenecks")
-    has_reluctant_stakeholders: bool = Field(False, description="Resistance to digital systems transition")
-    has_management_support_issues: bool = Field(False, description="Lack of institutional executive support")
-    has_personnel_recruitment_issues: bool = Field(False, description="Difficulty recruiting or retaining IT personnel")
-    has_employee_skills_issues: bool = Field(False, description="Low level of ICT literacy among SUC employees")
-    has_bandwidth_issues: bool = Field(False, description="Unavailability of required network bandwidth")
-    has_contract_management_issues: bool = Field(False, description="Difficulties in contracts and vendor management")
-
-
-# ==========================================================
-# 18. PART IV.B RELATIONAL STAFFING SCHEMAS
-# ==========================================================
-
-class IctStaffPositionCreate(BaseModel):
-    """Administrative creation schema for institutional IT staffing models"""
-    position_title: str = Field(..., example="Database Administrator", description="Official position title")
-    status: str = Field(..., example="Permanent", description="Permanent, Contractual, or Casual")
-    count: int = Field(1, ge=0, description="Total headcount for this position")
-
-
-class IctStaffPositionResponse(IctStaffPositionCreate):
-    """Relational database response mapping details for IT personnel"""
-    id: uuid.UUID
-    issp_period: str
-
-    model_config = ConfigDict(from_attributes=True)
 
 =========================================
 CORE SYSTEM FILE: .\app\__init__.py
@@ -6860,6 +6802,7 @@ from sqlalchemy import (
     JSON,  # Dialect-agnostic JSON compiles to JSONB on PostgreSQL / JSON on SQLite
     func,
     event,
+    text,
 )
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -7127,7 +7070,7 @@ class ScopeChoice(str, enum.Enum):
 
 
 # ==========================================================
-# CAMPUS REGISTRIES (Gap 1)
+# CAMPUS REGISTRIES
 # ==========================================================
 
 class Campus(Base):
@@ -7258,7 +7201,7 @@ class ExistingInventory(Base):
     status: Mapped[AssetStatus] = mapped_column(Enum(AssetStatus), default=AssetStatus.FUNCTIONAL, nullable=False)
     unserviceable_report_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     
-    # Gap 18: Track device lifecycle acquisition date
+    # Track device lifecycle acquisition date
     date_acquired: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     department: Mapped[Department] = relationship("Department", back_populates="inventory")
@@ -7327,7 +7270,7 @@ class Proposal(Base):
         back_populates="proposals"
     )
     
-    # Gap 13: Relational deployment mapping configurations
+    # Relational deployment mapping configurations
     deployments_relation: Mapped[List["ProposalDeployment"]] = relationship(
         "ProposalDeployment", 
         back_populates="proposal", 
@@ -7338,6 +7281,13 @@ class Proposal(Base):
         "AuditTrail", 
         foreign_keys="AuditTrail.proposal_id", 
         back_populates="proposal"
+    )
+
+    is_expansion: Mapped[bool] = mapped_column(
+        Boolean, 
+        default=False, 
+        server_default=text("false"), 
+        nullable=False
     )
 
     def sync_payload(self) -> None:
@@ -7353,6 +7303,7 @@ class Proposal(Base):
         self.payload["item_key"] = self.item_key
         self.payload["unit_cost"] = str(self.unit_cost)
         self.payload["project_key"] = self.project_key
+        self.payload["is_expansion"] = self.is_expansion
 
 
 class SubscriptionProposal(Base):
@@ -7424,6 +7375,13 @@ class SubscriptionProposal(Base):
         back_populates="subscription"
     )
 
+    is_expansion: Mapped[bool] = mapped_column(
+        Boolean, 
+        default=False, 
+        server_default=text("false"), 
+        nullable=False
+    )
+
     def sync_payload(self) -> None:
         """
         Forces software subscription inputs to synchronize into the encrypted JSON
@@ -7437,10 +7395,11 @@ class SubscriptionProposal(Base):
         self.payload["subscription_type"] = self.subscription_type
         self.payload["annual_cost_per_user"] = str(self.annual_cost_per_user)
         self.payload["project_key"] = self.project_key
+        self.payload["is_expansion"] = self.is_expansion
 
 
 # ==========================================================
-# DEPLOYMENT ALLOCATIONS MATRIX (Gap 13)
+# DEPLOYMENT ALLOCATIONS MATRIX
 # ==========================================================
 
 class ProposalDeployment(Base):
@@ -7606,7 +7565,7 @@ class GaaPerformance(Base):
 
 
 # ==========================================================
-# DICT GLOSSARY & INSTRUCTIONS REGISTRY (Gaps 7 & 8)
+# DICT GLOSSARY & INSTRUCTIONS REGISTRY
 # ==========================================================
 
 class GlossaryTerm(Base):
@@ -7633,7 +7592,7 @@ class GeneralInstruction(Base):
 
 
 # ==========================================================
-# DICT MITHI INVENTORIES & OS REGISTRIES (Gaps 15, 16, 17)
+# DICT MITHI INVENTORIES & OS REGISTRIES
 # ==========================================================
 
 class ServerCapacityTrack(Base):
@@ -7700,7 +7659,7 @@ class IctStaffPosition(Base):
 
 
 # ==========================================================
-# CORE REGISTRIES & COLLABORATIVE MATRIX (Gaps 4, 11, 19, 24, 25)
+# CORE REGISTRIES & COLLABORATIVE MATRIX
 # ==========================================================
 
 class StrategicConcern(Base):
@@ -8307,24 +8266,20 @@ def validate_proposal_constraints(db: Session, dept_id: int, payload: ProposalUp
                 detail="The total quantity requested across all planning years must be strictly greater than 0 on submission."
             )
         
-        unserviceable_count = db.query(func.sum(ExistingInventory.quantity)).filter(
-            ExistingInventory.department_id == dept_id,
-            func.lower(ExistingInventory.item_name) == func.lower(target_item_name),
-            ExistingInventory.status.in_([AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR])
-        ).scalar() or 0
+        # Use the explicit payload.is_expansion boolean flag to restrict validation patterns
+        if not payload.is_expansion:
+            unserviceable_count = db.query(func.sum(ExistingInventory.quantity)).filter(
+                ExistingInventory.department_id == dept_id,
+                func.lower(ExistingInventory.item_name) == func.lower(target_item_name),
+                ExistingInventory.status.in_([AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR])
+            ).scalar() or 0
 
-        target_offices = payload.target_offices_json or []
-        is_expansion_project = any(
-            any(keyword in str(office).lower() for keyword in ["laboratory", "lab", "campus", "center", "academic", "instructional", "classroom", "library"])
-            for office in target_offices if office
-        )
-
-        if not is_expansion_project and total_requested > (unserviceable_count + 2):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Requested quantity ({total_requested}) exceeds justified replacement thresholds of unserviceable units ({unserviceable_count}) for '{target_item_name}'. "
-                       f"Please specify target laboratories or centers in your deployment fields for expansion proposals."
-            )
+            if total_requested > (unserviceable_count + 2):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Requested quantity ({total_requested}) exceeds justified replacement thresholds of unserviceable units ({unserviceable_count}) for '{target_item_name}'. "
+                           f"For new layouts, check the 'Is Expansion Project' option and specify your target room."
+                )
 
 
 def validate_subscription_constraints(db: Session, dept_id: int, payload: SubscriptionProposalCreate, is_submitting: bool = False):
@@ -8682,7 +8637,8 @@ def create_draft_proposal(
             payload=json_payload,
             target_offices_json=payload.target_offices_json,
             canvas_evidence_url=resolved_canvas_url,
-            custom_specification=payload.custom_specification
+            custom_specification=payload.custom_specification,
+            is_expansion=payload.is_expansion
         )
         db_proposal.s3_storage_class = "STANDARD"
         db_proposal.is_restoring = False
@@ -8762,7 +8718,8 @@ def update_proposal_item(
         "total_qty": proposal.total_qty,
         "yearly_quantities": proposal.yearly_quantities,
         "custom_specification": proposal.custom_specification,
-        "target_offices_json": proposal.target_offices_json
+        "target_offices_json": proposal.target_offices_json,
+        "is_expansion": proposal.is_expansion
     }
 
     resolved_item_name = payload.item_select
@@ -8791,6 +8748,7 @@ def update_proposal_item(
     proposal.target_offices_json = payload.target_offices_json
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.custom_specification = payload.custom_specification
+    proposal.is_expansion = payload.is_expansion
 
     old_payload = dict(proposal.payload) if proposal.payload else {}
     old_payload["supplier_name"] = resolved_supplier
@@ -8807,7 +8765,8 @@ def update_proposal_item(
         "total_qty": proposal.total_qty,
         "yearly_quantities": payload.yearly_quantities,
         "custom_specification": payload.custom_specification,
-        "target_offices_json": proposal.target_offices_json
+        "target_offices_json": proposal.target_offices_json,
+        "is_expansion": payload.is_expansion
     }
 
     audit = AuditTrail(
@@ -8947,7 +8906,8 @@ def submit_proposal(
         yearly_quantities=proposal.yearly_quantities,
         unit_cost=proposal.unit_cost,
         canvas_evidence_url=proposal.canvas_evidence_url,
-        target_offices_json=proposal.target_offices_json
+        target_offices_json=proposal.target_offices_json,
+        is_expansion=proposal.is_expansion
     )
     validate_proposal_constraints(db, user["department_id"], payload_to_verify, is_submitting=True)
 
@@ -9376,6 +9336,7 @@ def create_mooe_subscription(
         status=ProposalStatus.DRAFT,
         canvas_evidence_url=payload.canvas_evidence_url,
         target_offices_json=payload.target_offices_json,
+        is_expansion=payload.is_expansion,
         payload={"comments": []}
     )
     db_entry.is_restoring = False
@@ -9496,6 +9457,7 @@ def update_mooe_subscription(
     sub.total_multiyear_mooe = total_cost
     sub.canvas_evidence_url = payload.canvas_evidence_url
     sub.target_offices_json = payload.target_offices_json
+    sub.is_expansion = payload.is_expansion
 
     try:
         db.commit()
@@ -9625,7 +9587,8 @@ def submit_mooe_subscription(
         yearly_users=sub.yearly_users,
         annual_cost_per_user=sub.annual_cost_per_user,
         canvas_evidence_url=sub.canvas_evidence_url,
-        target_offices_json=sub.target_offices_json
+        target_offices_json=sub.target_offices_json,
+        is_expansion=sub.is_expansion
     )
     validate_subscription_constraints(db, user["department_id"], payload_to_verify, is_submitting=True)
 
@@ -12400,6 +12363,7 @@ import uuid
 import html
 import logging
 import posixpath
+import importlib
 from typing import List, Optional, Any, Dict, Tuple
 from urllib.parse import urlparse
 from sqlalchemy.orm import Session
@@ -12632,12 +12596,13 @@ def validate_pdf_content(file_bytes: bytes) -> bool:
     to verify true MIME types and prevent content-type header spoofing.
     """
     try:
-        import magic
+        # Dynamically import to bypass static analysis warnings (e.g. Pylance)
+        magic = importlib.import_module("magic")
         mime = magic.Magic(mime=True)
         detected_type = mime.from_buffer(file_bytes[:2048])
         return detected_type == "application/pdf"
-    except ImportError:
-        # Secure binary fallback pattern check if python-magic dependencies are uninstalled on the host OS
+    except (ImportError, AttributeError, Exception):
+        # Secure binary fallback pattern check if python-magic dependencies are unavailable
         return file_bytes.startswith(b"%PDF-")
 
 =========================================
@@ -28281,6 +28246,8 @@ export default function CapExProposals() {
   const [unitCost, setUnitCost] = useState("");
   const [yearlyQuantities, setYearlyQuantities] = useState({});
   const [targetOffices, setTargetOffices] = useState("");
+  const [isExpansion, setIsExpansion] = useState(false);
+  const [officesRegistry, setOfficesRegistry] = useState([]);
   
   // Unified Creation File Upload State (for unlisted/custom requests)
   const [supplierName, setSupplierName] = useState("");
@@ -28326,6 +28293,25 @@ export default function CapExProposals() {
       console.error("Failed to query budget headroom summary:", err);
     }
   };
+
+  // Fetch the office directory inside useEffect
+  useEffect(() => {
+    const fetchOffices = async () => {
+      try {
+        const res = await fetch(`${rawUrl}/api/dept/offices-list`, {
+          headers: { Authorization: `Bearer ${user.token}` }
+        });
+        if (res.ok) {
+          setOfficesRegistry(await res.json());
+        }
+      } catch (e) {
+        console.error("Failed to load authorized offices:", e);
+      }
+    };
+    if (user?.token) {
+      fetchOffices();
+    }
+  }, [user]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -28444,9 +28430,7 @@ export default function CapExProposals() {
     }
     
     setCreatingProposal(true);
-    const parsedOffices = targetOffices
-      ? targetOffices.split(",").map(o => o.trim()).filter(o => o.length > 0)
-      : [];
+    const parsedOffices = targetOffices ? [targetOffices] : [];
       
     const payload = {
       item_select: itemSelect,
@@ -28454,6 +28438,7 @@ export default function CapExProposals() {
       yearly_quantities: yearlyQuantities,
       unit_cost: parseFloat(unitCost) || 0.0,
       target_offices_json: parsedOffices,
+      is_expansion: isExpansion,
       canvas_evidence_url: null
     };
 
@@ -28470,6 +28455,7 @@ export default function CapExProposals() {
       setSuccess("Proposal draft created and canvas quotation linked successfully.");
       setCustomSpec("");
       setTargetOffices("");
+      setIsExpansion(false);
       setSupplierName("");
       setCanvasFile(null);
       
@@ -28776,18 +28762,38 @@ export default function CapExProposals() {
               ))}
             </div>
 
+            {/* Expansion Checkbox */}
+            <div className="flex items-center gap-2 p-3 bg-slate-950/50 rounded-lg border border-slate-850">
+              <input
+                type="checkbox"
+                id="is_expansion"
+                checked={isExpansion}
+                onChange={(e) => setIsExpansion(e.target.checked)}
+                className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
+              />
+              <label htmlFor="is_expansion" className="text-[10px] font-bold text-slate-300 uppercase tracking-wider cursor-pointer select-none">
+                Is this an expansion project?
+              </label>
+            </div>
+
+            {/* Target Deployments Registry Selector Dropdown */}
             <div>
               <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-                Target Deployments (Offices/Labs, CSV List)
+                Target Deployment Office / Room {isExpansion && <span className="text-red-500">*</span>}
               </label>
-              <input
-                type="text"
-                required
+              <select
                 value={targetOffices}
                 onChange={(e) => setTargetOffices(e.target.value)}
-                placeholder="e.g. Dean's Office, Lab 403"
-                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
-              />
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-slate-100 outline-none focus:ring-1 focus:ring-blue-600"
+                required={isExpansion}
+              >
+                <option value="">-- Select Deployment Location --</option>
+                {officesRegistry.map((off) => (
+                  <option key={off.id} value={off.office_name}>
+                    {off.office_name} ({off.division})
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Dynamic Room Over Budget Headroom Warnings (Gap 30) */}
@@ -28896,6 +28902,11 @@ export default function CapExProposals() {
                                 <div className="text-[10px] text-amber-500 mt-0.5">Custom: {p.custom_specification}</div>
                               ) : (
                                 <div className="text-[10px] text-slate-500 mt-0.5">Standard Spec</div>
+                              )}
+                              {p.is_expansion && (
+                                <span className="text-[9px] px-1.5 py-0.2 mt-1 inline-block bg-blue-955/40 border border-blue-900 text-blue-400 font-bold uppercase tracking-wider rounded">
+                                  Expansion
+                                </span>
                               )}
                             </td>
                             <td className="py-3.5 px-2">

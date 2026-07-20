@@ -25,7 +25,8 @@ from app.database.models import (
     NeedsAssessment,
     MasterNarrative,
     BudgetCeiling,
-    ProposalDeployment  # Gap 13 Database Model
+    ProposalDeployment,  # Gap 13 Database Model
+    CoreOfficeFunction  # Added to resolve offices-list 404
 )
 from app.schemas import (
     InventoryCreate, 
@@ -436,6 +437,23 @@ def get_dept_catalog(
 ):
     """ Retrieves standard catalog items directly from the catalog_items table. """
     return db.query(CatalogItem).filter(CatalogItem.is_active == True).all()
+
+
+@router.get("/offices-list")
+def get_offices_list(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_user)
+):
+    """
+    Retrieves the list of SUC core offices mapped 
+    to the active ISSP planning period.
+    """
+    issp_period = get_active_issp_period(db)
+    return (
+        db.query(CoreOfficeFunction)
+        .filter(CoreOfficeFunction.issp_period == issp_period)
+        .all()
+    )
 
 
 @router.post("/inventory", response_model=InventoryResponse, status_code=status.HTTP_201_CREATED)
