@@ -1239,9 +1239,8 @@ def set_departmental_ceiling(
              )
 
         existing_query = db.query(BudgetCeiling).filter(
-            BudgetCeiling.department_id == payload.department_id,
-            BudgetCeiling.issp_period == issp_period
-        )
+            BudgetCeiling.department_id == payload.department_id
+)
         if not is_sqlite:
             existing_query = existing_query.with_for_update()
         existing = existing_query.first()
@@ -1324,9 +1323,8 @@ def update_budget_ceilings_bulk(
 
                 for item in payload.sub_ceilings:
                     record_query = db.query(BudgetCeiling).filter(
-                        BudgetCeiling.department_id == item.department_id,
-                        BudgetCeiling.issp_period == issp_period
-                    )
+                        BudgetCeiling.department_id == item.department_id
+)
                     # Fix (Anomaly 26): Enforce row level validation locking prior to mass modifications
                     if not is_sqlite:
                         record_query = record_query.with_for_update()
