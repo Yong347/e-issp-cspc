@@ -306,14 +306,14 @@ def bootstrap_metadata(db):
     # POPULATING COMPLEMENTARY NORMALIZED RELATIONAL DIRECTORIES
     # ==========================================================
     logger.info("Synchronizing normalized core office functions relational table...")
-    for idx, office in enumerate(core_offices_registry):
+    for office in core_offices_registry:
         existing_office = db.query(CoreOfficeFunction).filter(
             CoreOfficeFunction.office_name == office["office_name"],
             CoreOfficeFunction.issp_period == baseline_period
         ).first()
         if not existing_office:
             db_office = CoreOfficeFunction(
-                id=office["id"],
+                # REMOVED: id=office["id"], let the DB auto-increment IDs natively
                 issp_period=baseline_period,
                 office_name=office["office_name"],
                 division=office["division"],
