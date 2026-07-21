@@ -39,6 +39,29 @@ def deserialize_json_if_string(v: Any) -> Any:
                 pass
     return v
 
+# Defensive deserializer helper to guarantee list types when database columns are null
+def deserialize_list_if_string(v: Any) -> List[Any]:
+    if v is None:
+        return []
+    res = deserialize_json_if_string(v)
+    return res if isinstance(res, list) else []
+
+# Defensive deserializer helper to guarantee dict types when database columns are null
+def deserialize_dict_if_string(v: Any) -> Dict[Any, Any]:
+    if v is None:
+        return {}
+    res = deserialize_json_if_string(v)
+    return res if isinstance(res, dict) else {}
+
+# Defensive deserializer helper to guarantee optional dict types when columns can be null
+def deserialize_optional_dict_if_string(v: Any) -> Optional[Dict[Any, Any]]:
+    if v is None:
+        return None
+    res = deserialize_json_if_string(v)
+    if isinstance(res, dict):
+        return res if res else None
+    return None
+
 
 # ==========================================================
 # 1. AUTHENTICATION & SESSION SCHEMAS
@@ -115,7 +138,7 @@ class CatalogItemResponse(CatalogItemSchema):
     @classmethod
     def deserialize_fields(cls, v: Any) -> Any:
         """Resolves stringified JSON outputs returned by SQLite driver implementations"""
-        return deserialize_json_if_string(v)
+        return deserialize_list_if_string(v)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -279,7 +302,7 @@ class ProposalUpdatePayload(BaseModel):
             if qty < 0:
                 raise ValueError(f"Requested quantity for planning year {year} cannot be negative.")
             if qty > 10_000:
-                raise ValueError(f"Requested quantity for planning year {year} exceeds maximum allowable threshold (10,000 units).")
+                raise ValueError(f"Requested quantity for planning year {year} exceeds maximum allowable threshold (10,005 units).")
 
         # Allow 0 quantities on raw draft creation to prevent 422 errors.
         total_qty = sum(self.yearly_quantities.values())
@@ -292,7 +315,7 @@ class ProposalUpdatePayload(BaseModel):
                 raise ValueError("Custom specification is mandatory for unlisted ('other') items and must be longer than 4 characters.")
             
             blocked_keywords = ["gaming", "playstation", "xbox", "nintendo", "console", "entertainment"]
-            spec_lower = self.custom_specification.lower()
+            spec_lower = self.custom_specification.lower() if self.custom_specification else ""
             for keyword in blocked_keywords:
                 if keyword in spec_lower:
                     raise ValueError(f"Compliance Violation: Blocked keyword '{keyword}' detected in custom specifications.")
@@ -323,11 +346,17 @@ class ProposalResponse(BaseModel):
     is_restoring: Optional[bool] = Field(False, description="True if a cold archival retrieval is currently processing")
     is_expansion: Optional[bool] = Field(False, description="Explicitly flags if this is an expansion project")
 
-    @field_validator('yearly_quantities', 'target_offices_json', mode='before')
+    @field_validator('yearly_quantities', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        """Resolves stringified JSON outputs returned by SQLite driver implementations"""
-        return deserialize_json_if_string(v)
+    def deserialize_yearly_quantities(cls, v: Any) -> Dict[str, int]:
+        """Resolves stringified or null JSON outputs for quantities defensively"""
+        return deserialize_dict_if_string(v)
+
+    @field_validator('target_offices_json', mode='before')
+    @classmethod
+    def deserialize_target_offices(cls, v: Any) -> List[str]:
+        """Resolves stringified or null JSON outputs for offices defensively"""
+        return deserialize_list_if_string(v)
 
     @field_validator('is_restoring', 'is_expansion', mode='before')
     @classmethod
@@ -378,11 +407,17 @@ class SubscriptionProposalCreate(BaseModel):
     def sanitize_subscription_texts(cls, v: Optional[str]) -> Optional[str]:
         return sanitize_text(v)
 
-    @field_validator('yearly_users', 'target_offices_json', mode='before')
+    @field_validator('yearly_users', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        """Resolves stringified JSON outputs returned by SQLite driver implementations"""
-        return deserialize_json_if_string(v)
+    def deserialize_yearly_users(cls, v: Any) -> Dict[str, int]:
+        """Resolves stringified or null JSON outputs for user counts defensively"""
+        return deserialize_dict_if_string(v)
+
+    @field_validator('target_offices_json', mode='before')
+    @classmethod
+    def deserialize_target_offices(cls, v: Any) -> List[str]:
+        """Resolves stringified or null JSON outputs for offices defensively"""
+        return deserialize_list_if_string(v)
 
     @field_validator('target_offices_json')
     @classmethod
@@ -398,7 +433,7 @@ class SubscriptionProposalCreate(BaseModel):
                 raise ValueError(f"Invalid fiscal year key '{year}' detected. Year keys must be 4-digit calendar strings.")
             if count < 0:
                 raise ValueError(f"Allocated user seat count for planning year {year} cannot be negative.")
-            if count > 100_000:
+            if count > 100_005:
                 raise ValueError(f"Allocated user seat count for planning year {year} exceeds maximum allowable threshold (100,005 users).")
 
         # Allow 0 users on raw draft creation to prevent 422 errors.
@@ -464,10 +499,19 @@ class AdminHardwareOverride(BaseModel):
     target_offices_json: Optional[List[str]] = None
     project_key: Optional[str] = Field(None, description="Overridden strategic project key mapping")
 
-    @field_validator('yearly_quantities', 'target_offices_json', mode='before')
+    @field_validator('yearly_quantities', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_yearly_quantities(cls, v: Any) -> Optional[Dict[str, int]]:
+        if v is None:
+            return None
+        return deserialize_dict_if_string(v)
+
+    @field_validator('target_offices_json', mode='before')
+    @classmethod
+    def deserialize_target_offices(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        return deserialize_list_if_string(v)
 
     @field_validator('yearly_quantities')
     @classmethod
@@ -495,10 +539,19 @@ class AdminSubscriptionOverride(BaseModel):
     target_offices_json: Optional[List[str]] = None
     project_key: Optional[str] = Field(None, description="Overridden strategic project key mapping")
 
-    @field_validator('yearly_users', 'target_offices_json', mode='before')
+    @field_validator('yearly_users', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_yearly_users(cls, v: Any) -> Optional[Dict[str, int]]:
+        if v is None:
+            return None
+        return deserialize_dict_if_string(v)
+
+    @field_validator('target_offices_json', mode='before')
+    @classmethod
+    def deserialize_target_offices(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        return deserialize_list_if_string(v)
 
     @field_validator('yearly_users')
     @classmethod
@@ -626,7 +679,7 @@ class GeneratedDocumentResponse(BaseModel):
     triggered_by: str = Field(..., example="Ian P. Benitez")
     file_size_bytes: int = Field(..., ge=0)
     s3_vault_url: str = Field(..., description="Secure path to the generated document PDF")
-    s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks active storage tier for COA retrieval")
+    s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks active storage class")
     is_restoring: bool = Field(False, description="True if a cold retrieval operation is currently active")
 
     @field_validator('s3_storage_class', mode='before')
@@ -650,7 +703,9 @@ class AuditLogEntryResponse(BaseModel):
     proposal_id: Optional[uuid.UUID] = None
     subscription_id: Optional[uuid.UUID] = None
     action: str = Field(..., example="UPDATE_PROPOSAL_PRICE")
-    user_id: int = Field(..., description="ID of the user who initiated the action")
+    user_id: Optional[int] = Field(None, description="ID of the user who initiated the action")
+    operator_email: Optional[str] = Field(None, example="admin@cspc.edu.ph")
+    operator_role: Optional[str] = Field(None, example="ROLE_MIS_ADMIN")
     timestamp: datetime = Field(...)
     old_value: Optional[Dict[str, Any]] = Field(None, description="Previous JSON state before change")
     new_value: Optional[Dict[str, Any]] = Field(None, description="New JSON state after change")
@@ -735,6 +790,15 @@ class ManpowerSchema(BaseModel):
     admin_casual: int = Field(..., ge=0)
     academic_regular: int = Field(..., ge=0)
     academic_casual: int = Field(..., ge=0)
+
+
+class ManpowerContainer(BaseModel):
+    """Container for validating manpower_json fields defensively"""
+    total_employees: int = 0
+    admin_regular: int = 0
+    admin_casual: int = 0
+    academic_regular: int = 0
+    academic_casual: int = 0
 
 
 class MFOSchema(BaseModel):
@@ -848,8 +912,8 @@ class MithiHardwareItemSchema(BaseModel):
 
     @field_validator('yearly_owned', 'yearly_leased', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_fields(cls, v: Any) -> Dict[str, int]:
+        return deserialize_dict_if_string(v)
 
     @model_validator(mode='after')
     def validate_mithi_hardware(self) -> 'MithiHardwareItemSchema':
@@ -878,8 +942,8 @@ class ImplementationScheduleItem(BaseModel):
 
     @field_validator('milestones', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_fields(cls, v: Any) -> Dict[str, bool]:
+        return deserialize_dict_if_string(v)
 
 
 # ==========================================================
@@ -909,8 +973,8 @@ class MithiDataArchivingSchema(BaseModel):
 
     @field_validator('archiving_medium', 'archived_information', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_fields(cls, v: Any) -> List[str]:
+        return deserialize_list_if_string(v)
 
 
 class MithiIctIssuesSchema(BaseModel):
@@ -1034,15 +1098,22 @@ class MasterNarrativeUpdate(BaseModel):
     implementation_schedules: Optional[List[ImplementationScheduleItem]] = Field([], description="Timelines and schedule milestones")
 
     @field_validator(
-        'scope_json', 'planners_json', 'manpower_json', 'major_final_outputs', 'core_offices_json',
+        'scope_json', 'planners_json', 'major_final_outputs', 'core_offices_json',
         'strategic_concerns_json', 'systems_json', 'databases_json', 'internal_projects_json',
-        'cross_projects_json', 'pmf_matrix_json', 'mithi_network_profile', 'mithi_special_solutions',
-        'mithi_data_center', 'mithi_hardware_inventory', 'mithi_security_dr', 'mithi_data_archiving',
-        'mithi_ict_issues', 'implementation_schedules', mode='before'
+        'cross_projects_json', 'pmf_matrix_json', 'mithi_special_solutions',
+        'mithi_hardware_inventory', 'implementation_schedules', mode='before'
     )
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_list_fields(cls, v: Any) -> Any:
+        return deserialize_list_if_string(v)
+
+    @field_validator(
+        'manpower_json', 'mithi_network_profile', 'mithi_data_center', 'mithi_security_dr', 
+        'mithi_data_archiving', 'mithi_ict_issues', mode='before'
+    )
+    @classmethod
+    def deserialize_dict_fields(cls, v: Any) -> Any:
+        return deserialize_optional_dict_if_string(v)
 
     @model_validator(mode='after')
     def validate_issp_cycle_range(self) -> 'MasterNarrativeUpdate':
@@ -1128,23 +1199,29 @@ class MasterNarrativeResponse(BaseModel):
     implementation_schedules: List[ImplementationScheduleItem] = []
 
     @field_validator(
-        'planners_json', 'manpower_json', 'core_offices_json', 'strategic_concerns_json',
+        'planners_json', 'core_offices_json', 'strategic_concerns_json',
         'systems_json', 'databases_json', 'internal_projects_json', 'cross_projects_json',
-        'pmf_matrix_json', 'mithi_network_profile', 'mithi_special_solutions',
-        'mithi_data_center', 'mithi_hardware_inventory', 'mithi_security_dr',
-        'mithi_data_archiving', 'mithi_ict_issues', 'implementation_schedules',
-        mode='before'
+        'pmf_matrix_json', 'mithi_special_solutions', 'mithi_hardware_inventory', 
+        'implementation_schedules', mode='before'
     )
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_list_fields(cls, v: Any) -> Any:
+        return deserialize_list_if_string(v)
+
+    @field_validator(
+        'manpower_json', 'mithi_network_profile', 'mithi_data_center', 'mithi_security_dr',
+        'mithi_data_archiving', 'mithi_ict_issues', mode='before'
+    )
+    @classmethod
+    def deserialize_dict_fields(cls, v: Any) -> Any:
+        return deserialize_optional_dict_if_string(v)
 
     # Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
     @field_validator('mithi_network_profile', 'mithi_data_center', 'manpower_json', mode='before')
     @classmethod
     def clear_empty_dicts(cls, v: Any) -> Any:
-        v_deserialized = deserialize_json_if_string(v)
-        if isinstance(v_deserialized, dict) and not v_deserialized:
+        v_deserialized = deserialize_optional_dict_if_string(v)
+        if not v_deserialized:
             return None
         return v_deserialized
 
@@ -1429,8 +1506,8 @@ class InvestmentSummaryRow(BaseModel):
 
     @field_validator('yearly_quantities', 'yearly_costs', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_fields(cls, v: Any) -> Dict[str, Any]:
+        return deserialize_dict_if_string(v)
 
 
 # --- Gap 11/12: Annual Cost Breakdown & Continuing Institutional Costs ---
@@ -1453,8 +1530,8 @@ class AnnualCostBreakdownResponse(BaseModel):
 
     @field_validator('yearly_quantities', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_fields(cls, v: Any) -> Dict[str, int]:
+        return deserialize_dict_if_string(v)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1480,5 +1557,5 @@ class MilestoneUpdatePayload(BaseModel):
 
     @field_validator('milestones', mode='before')
     @classmethod
-    def deserialize_fields(cls, v: Any) -> Any:
-        return deserialize_json_if_string(v)
+    def deserialize_fields(cls, v: Any) -> Dict[str, bool]:
+        return deserialize_dict_if_string(v)

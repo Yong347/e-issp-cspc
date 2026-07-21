@@ -4,6 +4,7 @@ import html
 import uuid
 import logging
 from decimal import Decimal
+from datetime import datetime  # <--- Add this import
 from typing import List, Optional, Dict, Any
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
@@ -446,14 +447,49 @@ def get_admin_dashboard_metrics(
             detail="Failed to load dashboard metrics."
         )
 
-
 @router.get("/audit-logs", response_model=List[AuditLogEntryResponse])
 def get_audit_logs(
+    category: Optional[str] = Query(None, description="Filter by: budget, state, override, user"),
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
     db: Session = Depends(get_db), 
     admin: dict = Depends(require_admin)
 ):
     try:
-        return db.query(AuditTrail).order_by(AuditTrail.timestamp.desc()).all()
+        query = db.query(AuditTrail).options(
+            joinedload(AuditTrail.user),
+            joinedload(AuditTrail.proposal),
+            joinedload(AuditTrail.subscription)
+        )
+        
+        if category:
+            cat_lower = category.lower().strip()
+            if cat_lower == "budget":
+                query = query.filter(AuditTrail.action.ilike("%budget%"))
+            elif cat_lower == "state":
+                query = query.filter(AuditTrail.action.ilike("%state%"))
+            elif cat_lower == "override":
+                query = query.filter(AuditTrail.action.ilike("%override%"))
+            elif cat_lower == "user":
+                query = query.filter(AuditTrail.action.ilike("%user%"))
+                
+        if start_date:
+            query = query.filter(AuditTrail.timestamp >= start_date)
+        if end_date:
+            query = query.filter(AuditTrail.timestamp <= end_date)
+            
+        logs = query.order_by(AuditTrail.timestamp.desc()).all()
+        
+        # Hydrate dynamic operator attributes to keep representation details clean
+        for log in logs:
+            if log.user:
+                log.operator_email = log.user.email
+                log.operator_role = log.user.role_tag.value
+            else:
+                log.operator_email = "System/Cron"
+                log.operator_role = "SYSTEM"
+                
+        return logs
     except Exception as e:
         logger.error(f"Failed to query audit trail database ledger: {str(e)}", exc_info=True)
         raise HTTPException(

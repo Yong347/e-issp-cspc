@@ -1,17 +1,36 @@
 // frontend/src/views/admin/Queue/ConsolidatedQueue.jsx
 import React, { useState, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { getComments, postComment, resolveComment } from "../../../api/dept";
 import StatusPill from "../../../components/common/StatusPill";
 import { 
-  ShieldCheck, FileText, FolderKanban, RefreshCw, AlertCircle, CheckCircle, 
-  Search, Check, RotateCcw, Edit, MessageSquare, ExternalLink, HardDrive, CheckSquare
+  ShieldCheck, 
+  FileText, 
+  FolderKanban, 
+  RefreshCw, 
+  AlertCircle, 
+  CheckCircle, 
+  Search, 
+  Check, 
+  RotateCcw, 
+  Edit, 
+  MessageSquare, 
+  ExternalLink, 
+  HardDrive, 
+  CheckSquare,
+  Lock,
+  ChevronRight,
+  ShieldAlert,
+  Save,
+  X
 } from "lucide-react";
 
 export default function ConsolidatedQueue() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
+  const location = useLocation();
 
   const [activeTab, setActiveTab] = useState("capex"); // capex or mooe
   const [proposals, setProposals] = useState([]);
@@ -22,6 +41,10 @@ export default function ConsolidatedQueue() {
   // Filters
   const [deptFilter, setDeptFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+
+  // Deep-Linking Highlight State
+  const [highlightedId, setHighlightedId] = useState(null);
 
   // Override Modal State
   const [activeOverrideItem, setActiveOverrideItem] = useState(null);
@@ -48,7 +71,9 @@ export default function ConsolidatedQueue() {
       1: "College of Engineering",
       2: "College of Computer Studies",
       3: "College of Arts & Sciences",
-      4: "Human Resources Management"
+      4: "College of Health Sciences",
+      5: "College of Tourism",
+      6: "Human Resources Management"
     };
     return depts[id] || `Department ID: ${id}`;
   };
@@ -61,21 +86,13 @@ export default function ConsolidatedQueue() {
       if (deptFilter) queryParams += `&dept_id=${deptFilter}`;
       if (statusFilter) queryParams += `&status_filter=${statusFilter}`;
 
-      if (activeTab === "capex") {
-        const res = await fetch(`${apiUrl}/api/admin/proposals${queryParams}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) throw new Error("Failed to load CapEx hardware queue.");
-        const data = await res.json();
-        setProposals(data);
-      } else {
-        const res = await fetch(`${apiUrl}/api/admin/subscriptions${queryParams}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) throw new Error("Failed to load MOOE subscriptions queue.");
-        const data = await res.json();
-        setProposals(data); // Shared state container
-      }
+      const endpoint = activeTab === "capex" ? "proposals" : "subscriptions";
+      const res = await fetch(`${apiUrl}/api/admin/${endpoint}${queryParams}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error(`Failed to load ${activeTab === "capex" ? "CapEx" : "MOOE"} queue.`);
+      const data = await res.json();
+      setProposals(data);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -83,11 +100,41 @@ export default function ConsolidatedQueue() {
     }
   };
 
+  // Intercept deep-linking redirections on tab change
+  useEffect(() => {
+    if (location.state?.tab) {
+      setActiveTab(location.state.tab);
+    }
+  }, [location.state]);
+
   useEffect(() => {
     if (token) {
       fetchQueue();
     }
   }, [token, activeTab, deptFilter, statusFilter, activeCycle]);
+
+  // Handle auto-focus and scrolling glow effects
+  useEffect(() => {
+    if (location.state?.highlightId && proposals.length > 0) {
+      const targetId = location.state.highlightId;
+      setHighlightedId(targetId);
+      
+      // Delay slightly to ensure tab elements have mounted to the DOM tree
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`proposal-${targetId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          
+          // Clear highlight glow states after 4 seconds
+          setTimeout(() => {
+            setHighlightedId(null);
+          }, 4000);
+        }
+      }, 400);
+
+      return () => clearTimeout(timer);
+    }
+  }, [location.state, proposals]);
 
   // Transition: SUBMITTED -> APPROVED
   const handleApprove = async (id, itemName) => {
@@ -129,7 +176,7 @@ export default function ConsolidatedQueue() {
     }
   };
 
-  // Polymorphic Administrative Override modal configuration
+  // Override Configuration Setup
   const openOverrideModal = (item) => {
     setActiveOverrideItem(item);
     setOverrideItemName(item.item_name || item.software_name || "");
@@ -137,7 +184,6 @@ export default function ConsolidatedQueue() {
     setOverrideSpec(item.custom_specification || item.justification || "");
     setOverrideOffices(item.target_offices_json ? item.target_offices_json.join(", ") : "");
     
-    // Prefill quantities/users map based on active years
     const currentQuantities = item.yearly_quantities || item.yearly_users || {};
     const prefill = {};
     planningYears.forEach(year => {
@@ -243,9 +289,22 @@ export default function ConsolidatedQueue() {
     }
   };
 
+  // Client-Side Search Filtering
+  const filteredProposals = proposals.filter(item => {
+    const query = searchTerm.toLowerCase().trim();
+    const label = item.item_name || item.software_name || "";
+    const spec = item.custom_specification || item.justification || "";
+    const dept = getDeptName(item.department_id);
+
+    return query === "" || 
+      label.toLowerCase().includes(query) || 
+      spec.toLowerCase().includes(query) ||
+      dept.toLowerCase().includes(query);
+  });
+
   return (
-    <div className="space-y-6 max-w-6xl mx-auto text-xs text-slate-100">
-      {/* Page Title */}
+    <div className="space-y-6 max-w-6xl mx-auto text-xs text-slate-100 select-none">
+      {/* Title */}
       <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 bg-slate-900 p-6 rounded-xl border border-slate-800">
         <div>
           <h2 className="text-white font-bold text-base flex items-center gap-2">
@@ -259,7 +318,7 @@ export default function ConsolidatedQueue() {
         <button
           onClick={fetchQueue}
           disabled={loading}
-          className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-colors flex items-center gap-1.5 self-start disabled:opacity-50"
+          className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-colors flex items-center gap-1.5 self-start disabled:opacity-50 cursor-pointer"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           <span>Sync Workspace</span>
@@ -267,25 +326,25 @@ export default function ConsolidatedQueue() {
       </div>
 
       {error && (
-        <div className="p-4 bg-red-950/40 border border-red-900/50 text-red-300 rounded-lg flex items-start gap-2.5">
-          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+        <div className="p-4 bg-red-955/40 border border-red-900/50 text-red-300 rounded-lg flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
       {success && (
         <div className="p-4 bg-emerald-950/40 border border-emerald-900/50 text-emerald-300 rounded-lg flex items-start gap-2.5">
-          <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <CheckCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{success}</span>
         </div>
       )}
 
-      {/* Segmented Queue View Tabs & Filters */}
+      {/* Tabs & Filters */}
       <div className="flex flex-col md:flex-row gap-4 justify-between items-center bg-slate-900/50 p-4 rounded-xl border border-slate-850">
         <div className="flex gap-1.5 p-1 bg-slate-950 rounded-lg border border-slate-800 self-start">
           <button
             onClick={() => { setActiveTab("capex"); setProposals([]); }}
-            className={`flex items-center gap-1.5 px-4 py-2 font-bold rounded-md transition-all ${
+            className={`flex items-center gap-1.5 px-4 py-2 font-bold rounded-md transition-all cursor-pointer ${
               activeTab === "capex" 
                 ? "bg-blue-600 text-white" 
                 : "text-slate-400 hover:text-slate-200"
@@ -296,7 +355,7 @@ export default function ConsolidatedQueue() {
           </button>
           <button
             onClick={() => { setActiveTab("mooe"); setProposals([]); }}
-            className={`flex items-center gap-1.5 px-4 py-2 font-bold rounded-md transition-all ${
+            className={`flex items-center gap-1.5 px-4 py-2 font-bold rounded-md transition-all cursor-pointer ${
               activeTab === "mooe" 
                 ? "bg-indigo-600 text-white" 
                 : "text-slate-400 hover:text-slate-200"
@@ -307,24 +366,39 @@ export default function ConsolidatedQueue() {
           </button>
         </div>
 
-        {/* Dynamic Filters */}
-        <div className="flex items-center gap-3 w-full md:w-auto">
+        {/* Filters */}
+        <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
+          <div className="relative w-full sm:w-56">
+            <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+              <Search className="w-3.5 h-3.5" />
+            </span>
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search queue records..."
+              className="w-full pl-8 pr-3 py-1.5 bg-slate-950 border border-slate-850 rounded text-xs text-white outline-none placeholder-slate-600"
+            />
+          </div>
+
           <select
             value={deptFilter}
             onChange={(e) => setDeptFilter(e.target.value)}
-            className="p-2 bg-slate-950 border border-slate-850 rounded text-slate-300 font-semibold cursor-pointer outline-none w-full md:w-44"
+            className="p-2 bg-slate-950 border border-slate-855 rounded text-slate-300 font-semibold cursor-pointer outline-none w-full md:w-44 text-xs"
           >
             <option value="">-- All Departments --</option>
             <option value="1">College of Engineering</option>
             <option value="2">College of Computer Studies</option>
             <option value="3">College of Arts & Sciences</option>
-            <option value="4">Human Resources Management</option>
+            <option value="4">College of Health Sciences</option>
+            <option value="5">College of Tourism</option>
+            <option value="6">Human Resources Management</option>
           </select>
 
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="p-2 bg-slate-950 border border-slate-850 rounded text-slate-300 font-semibold cursor-pointer outline-none w-full md:w-40"
+            className="p-2 bg-slate-950 border border-slate-855 rounded text-slate-300 font-semibold cursor-pointer outline-none w-full md:w-40 text-xs"
           >
             <option value="">-- All Statuses --</option>
             <option value="Submitted">Submitted</option>
@@ -343,7 +417,7 @@ export default function ConsolidatedQueue() {
               <RefreshCw className="w-6 h-6 animate-spin text-blue-500" />
               <span>Fetching dynamic queue records...</span>
             </div>
-          ) : proposals.length > 0 ? (
+          ) : filteredProposals.length > 0 ? (
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-950/40 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
@@ -357,7 +431,7 @@ export default function ConsolidatedQueue() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-850">
-                {proposals.map((item) => {
+                {filteredProposals.map((item) => {
                   const isCapEx = activeTab === "capex";
                   const label = isCapEx ? item.item_name : item.software_name;
                   const itemSpec = isCapEx ? item.custom_specification : item.justification;
@@ -365,11 +439,18 @@ export default function ConsolidatedQueue() {
                   const totalMetric = isCapEx ? `${item.total_qty} units` : `₱${parseFloat(item.total_multiyear_mooe).toLocaleString()} MOOE`;
                   const filename = item.canvas_evidence_url ? item.canvas_evidence_url.split("/").pop() : null;
 
+                  const isHighlighted = item.id === highlightedId;
+                  const rowClass = `transition-all duration-700 ${
+                    isHighlighted 
+                      ? "bg-blue-950/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
+                      : "hover:bg-slate-950/20"
+                  }`;
+
                   return (
-                    <tr key={item.id} className="hover:bg-slate-950/20 transition-all">
+                    <tr key={item.id} id={`proposal-${item.id}`} className={rowClass}>
                       {/* Department Tag */}
                       <td className="py-3.5 px-3">
-                        <span className="inline-block px-2.5 py-1 rounded-[4px] text-[10px] font-bold bg-blue-950/40 border border-blue-900/60 text-blue-400">
+                        <span className="inline-block px-2.5 py-1 rounded-[4px] text-[10px] font-bold bg-blue-955/40 border border-blue-900/60 text-blue-400 font-mono">
                           {getDeptName(item.department_id)}
                         </span>
                       </td>
@@ -382,12 +463,17 @@ export default function ConsolidatedQueue() {
                             {itemSpec}
                           </div>
                         )}
+                        {item.is_expansion && (
+                          <span className="text-[8px] px-1.5 py-0.2 mt-1 inline-block bg-blue-955/40 border border-blue-900 text-blue-400 font-bold uppercase tracking-wider rounded">
+                            Expansion
+                          </span>
+                        )}
                       </td>
 
                       {/* Multi-Year Timeline Breakdown */}
                       <td className="py-3.5 px-3">
                         <div className="font-semibold text-slate-300">{totalMetric}</div>
-                        <div className="text-[10px] text-slate-500 mt-0.5">
+                        <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
                           {planningYears.map(year => {
                             const val = isCapEx ? item.yearly_quantities?.[String(year)] : item.yearly_users?.[String(year)];
                             return `FY ${year}: ${val || 0}`;
@@ -410,7 +496,7 @@ export default function ConsolidatedQueue() {
                               rel="noreferrer"
                               className="text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-1.5"
                             >
-                              <span>Proof</span>
+                              <span className="max-w-[120px] truncate block">{filename}</span>
                               <ExternalLink className="w-3 h-3 shrink-0" />
                             </a>
                             {item.s3_storage_class && (
@@ -445,29 +531,29 @@ export default function ConsolidatedQueue() {
                             <>
                               <button
                                 onClick={() => handleApprove(item.id, label)}
-                                className="p-1.5 bg-slate-950 hover:bg-emerald-950/50 text-slate-400 hover:text-emerald-400 rounded border border-slate-850 transition-all cursor-pointer"
+                                className="p-1.5 bg-slate-955 hover:bg-emerald-950/50 text-slate-400 hover:text-emerald-400 rounded border border-slate-850 transition-all cursor-pointer"
                                 title="Approve compliance entry"
                               >
                                 <Check className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => openOverrideModal(item)}
-                                className="p-1.5 bg-slate-950 hover:bg-purple-950/50 text-slate-400 hover:text-purple-400 rounded border border-slate-850 transition-all cursor-pointer"
+                                className="p-1.5 bg-slate-955 hover:bg-purple-950/50 text-slate-400 hover:text-purple-400 rounded border border-slate-850 transition-all cursor-pointer"
                                 title="Administrative Override"
                               >
                                 <Edit className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => handleReturn(item.id, label)}
-                                className="p-1.5 bg-slate-950 hover:bg-red-955/50 text-slate-400 hover:text-red-400 rounded border border-slate-850 transition-all cursor-pointer"
+                                className="p-1.5 bg-slate-955 hover:bg-red-955/50 text-slate-400 hover:text-red-400 rounded border border-slate-850 transition-all cursor-pointer"
                                 title="Return to department drafts"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
                               </button>
                             </>
                           ) : (
-                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wide self-center px-1">
-                              Locked
+                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wide self-center px-1 flex items-center gap-1">
+                              <Lock className="w-3 h-3 text-slate-600" /> Locked
                             </span>
                           )}
                         </div>
@@ -487,13 +573,13 @@ export default function ConsolidatedQueue() {
 
       {/* Polymorphic Override Modal */}
       {activeOverrideItem && (
-        <div className="fixed inset-0 bg-slate-955/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-slate-955/75 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-lg p-6 space-y-4">
             <div className="flex justify-between items-center border-b border-slate-800 pb-3">
               <h3 className="font-bold text-white text-sm">Administrative Override Console</h3>
               <button 
                 onClick={() => setActiveOverrideItem(null)}
-                className="text-slate-400 hover:text-white font-bold text-lg"
+                className="text-slate-400 hover:text-white font-bold text-lg cursor-pointer"
               >
                 &times;
               </button>
@@ -567,20 +653,20 @@ export default function ConsolidatedQueue() {
 
               <div>
                 <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-                  Overridden Narrative Justification / Specifications
+                  Overridden Justification Specifications
                 </label>
                 <textarea
                   rows={3}
                   value={overrideSpec}
                   onChange={(e) => setOverrideSpec(e.target.value)}
-                  className="w-full p-2.5 bg-slate-950 border border-slate-850 rounded-lg text-white"
+                  className="w-full p-2.5 bg-slate-955 border border-slate-850 rounded-lg text-white resize-none"
                 />
               </div>
 
               <button
                 type="submit"
                 disabled={submittingOverride}
-                className="w-full p-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg font-bold transition-all"
+                className="w-full p-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg font-bold transition-all cursor-pointer"
               >
                 <span>{submittingOverride ? "Commiting overrides..." : "Commit Administrative Override"}</span>
               </button>
@@ -593,14 +679,14 @@ export default function ConsolidatedQueue() {
       {activeDiscussionItem && (
         <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col h-[520px]">
-            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50 rounded-t-xl">
+            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-955/50 rounded-t-xl">
               <div>
                 <h3 className="text-white font-bold text-sm">Discussions & Revision Remarks</h3>
-                <p className="text-[10px] text-slate-500">Resource ID: {activeDiscussionItem.id}</p>
+                <p className="text-[10px] text-slate-500 font-mono">Resource ID: {activeDiscussionItem.id}</p>
               </div>
               <button 
                 onClick={() => setActiveDiscussionItem(null)}
-                className="text-slate-400 hover:text-white text-lg font-bold"
+                className="text-slate-400 hover:text-white text-lg font-bold cursor-pointer"
               >
                 &times;
               </button>
@@ -619,7 +705,7 @@ export default function ConsolidatedQueue() {
                     
                     {comment.requires_department_action && (
                       <div className="pt-2 border-t border-slate-800/80 flex justify-between items-center">
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-950/40 border border-red-900 text-red-400 font-bold uppercase tracking-wider">
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-955/40 border border-red-900 text-red-400 font-bold uppercase tracking-wider">
                           Requires Dept Action
                         </span>
                         {comment.is_resolved ? (
@@ -655,7 +741,7 @@ export default function ConsolidatedQueue() {
                   onChange={(e) => setRequiresAction(e.target.checked)}
                   className="w-3.5 h-3.5 accent-red-600 rounded cursor-pointer"
                 />
-                <label htmlFor="action_gate" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer">
+                <label htmlFor="action_gate" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer select-none">
                   Flag as Action Item (submission lock gate)
                 </label>
               </div>
@@ -671,7 +757,7 @@ export default function ConsolidatedQueue() {
                 />
                 <button 
                   type="submit"
-                  className="p-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded cursor-pointer"
+                  className="p-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded cursor-pointer transition-colors"
                 >
                   Post Remark
                 </button>

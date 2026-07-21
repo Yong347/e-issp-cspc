@@ -34,11 +34,11 @@ def upgrade() -> None:
     existing_cols_core = [col['name'] for col in inspector.get_columns('issp_core')]
     with op.batch_alter_table('issp_core', schema=None) as batch_op:
         if 'is_expansion' not in existing_cols_core:
-            batch_op.add_column(sa.Column('is_expansion', sa.Boolean(), server_default=sa.text('false'), nullable=False))
+            batch_op.add_column(sa.Column('is_expansion', sa.Boolean(), server_default='0', nullable=False))
         if 's3_storage_class' not in existing_cols_core:
             batch_op.add_column(sa.Column('s3_storage_class', sa.String(length=50), server_default='STANDARD', nullable=False))
         if 'is_restoring' not in existing_cols_core:
-            batch_op.add_column(sa.Column('is_restoring', sa.Boolean(), server_default=sa.text('false'), nullable=False))
+            batch_op.add_column(sa.Column('is_restoring', sa.Boolean(), server_default='0', nullable=False))
         if 'target_offices_json' not in existing_cols_core:
             batch_op.add_column(sa.Column('target_offices_json', sa.JSON(), server_default='[]', nullable=False))
 
@@ -46,11 +46,11 @@ def upgrade() -> None:
     existing_cols_sub = [col['name'] for col in inspector.get_columns('subscription_proposals')]
     with op.batch_alter_table('subscription_proposals', schema=None) as batch_op:
         if 'is_expansion' not in existing_cols_sub:
-            batch_op.add_column(sa.Column('is_expansion', sa.Boolean(), server_default=sa.text('false'), nullable=False))
+            batch_op.add_column(sa.Column('is_expansion', sa.Boolean(), server_default='0', nullable=False))
         if 's3_storage_class' not in existing_cols_sub:
             batch_op.add_column(sa.Column('s3_storage_class', sa.String(length=50), server_default='STANDARD', nullable=False))
         if 'is_restoring' not in existing_cols_sub:
-            batch_op.add_column(sa.Column('is_restoring', sa.Boolean(), server_default=sa.text('false'), nullable=False))
+            batch_op.add_column(sa.Column('is_restoring', sa.Boolean(), server_default='0', nullable=False))
         if 'target_offices_json' not in existing_cols_sub:
             batch_op.add_column(sa.Column('target_offices_json', sa.JSON(), server_default='[]', nullable=False))
 

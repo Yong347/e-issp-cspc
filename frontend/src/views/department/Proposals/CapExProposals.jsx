@@ -1,5 +1,6 @@
 // frontend/src/views/department/Proposals/CapExProposals.jsx
 import React, { useState, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
@@ -18,9 +19,19 @@ import {
 import StatusPill from "../../../components/common/StatusPill";
 import DeploymentsMapping from "./DeploymentsMapping";
 import { 
-  FolderKanban, Plus, RefreshCw, AlertCircle, CheckCircle, 
-  Trash2, Send, Upload, MessageCircle, CheckSquare, RefreshCcw,
-  Wallet, Building2
+  FolderKanban, 
+  Plus, 
+  RefreshCw, 
+  AlertCircle, 
+  CheckCircle, 
+  Trash2, 
+  Send, 
+  Upload, 
+  MessageCircle, 
+  CheckSquare, 
+  RefreshCcw,
+  Wallet, 
+  Building2
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -29,6 +40,7 @@ const rawUrl = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
 export default function CapExProposals() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
+  const location = useLocation();
   
   const [proposals, setProposals] = useState([]);
   const [catalog, setCatalog] = useState([]);
@@ -68,6 +80,9 @@ export default function CapExProposals() {
 
   // Row Expansion State for Table IV.A Mapping Integration
   const [expandedProposalId, setExpandedProposalId] = useState(null);
+
+  // Deep-linking Highlight State
+  const [highlightedId, setHighlightedId] = useState(null);
 
   useEffect(() => {
     if (planningYears && planningYears.length > 0) {
@@ -142,6 +157,29 @@ export default function CapExProposals() {
       fetchData();
     }
   }, [user, activeCycle]);
+
+  // Handle auto-focus and scrolling glow effects from deep-links
+  useEffect(() => {
+    if (location.state?.highlightId && proposals.length > 0) {
+      const targetId = location.state.highlightId;
+      setHighlightedId(targetId);
+      setExpandedProposalId(targetId); // Auto-expand deployments sub-drawer
+
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`proposal-${targetId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          
+          // Clear highlight glow states after 4 seconds
+          setTimeout(() => {
+            setHighlightedId(null);
+          }, 4000);
+        }
+      }, 400);
+
+      return () => clearTimeout(timer);
+    }
+  }, [location.state, proposals]);
 
   // Budget Headroom Live Warning Calculation (Gap 30)
   useEffect(() => {
@@ -434,7 +472,7 @@ export default function CapExProposals() {
             <span>Create CapEx Request</span>
           </h3>
 
-          {/* Budget Headroom Stats Tracker Dashboard Block (Gap 30) */}
+          {/* Budget Headroom Stats Tracker Dashboard Block */}
           {headroom && (
             <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-2 text-[11px]">
               <div className="flex items-center gap-1 text-slate-400 font-bold uppercase tracking-wider text-[9px]">
@@ -478,7 +516,7 @@ export default function CapExProposals() {
             </div>
 
             {itemSelect === "other" && (
-              <div className="space-y-4 p-3.5 bg-slate-950 border border-slate-850 rounded-lg animate-fadeIn">
+              <div className="space-y-4 p-3.5 bg-slate-950 border border-slate-855 rounded-lg animate-fadeIn">
                 <span className="block text-[9px] uppercase font-extrabold text-blue-400 tracking-wider">
                   Mandatory Market Canvas Verification
                 </span>
@@ -563,7 +601,7 @@ export default function CapExProposals() {
             </div>
 
             {/* Expansion Checkbox */}
-            <div className="flex items-center gap-2 p-3 bg-slate-950/50 rounded-lg border border-slate-850">
+            <div className="flex items-center gap-2 p-3 bg-slate-955/50 rounded-lg border border-slate-850">
               <input
                 type="checkbox"
                 id="is_expansion"
@@ -584,7 +622,7 @@ export default function CapExProposals() {
               <select
                 value={targetOffices}
                 onChange={(e) => setTargetOffices(e.target.value)}
-                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-slate-100 outline-none focus:ring-1 focus:ring-blue-600"
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-slate-100 outline-none focus:ring-1 focus:ring-blue-600 cursor-pointer"
                 required={isExpansion}
               >
                 <option value="">-- Select Deployment Location --</option>
@@ -596,7 +634,7 @@ export default function CapExProposals() {
               </select>
             </div>
 
-            {/* Dynamic Room Over Budget Headroom Warnings (Gap 30) */}
+            {/* Dynamic Room Over Budget Headroom Warnings */}
             {warning && (
               <div className="p-3 bg-red-955/20 border border-red-900 text-red-400 font-bold rounded animate-pulse leading-normal">
                 {warning}
@@ -693,9 +731,16 @@ export default function CapExProposals() {
                       const isCustom = p.item_key === "other";
                       const filename = p.canvas_evidence_url ? p.canvas_evidence_url.split("/").pop() : null;
                       
+                      const isHighlighted = p.id === highlightedId;
+                      const rowClass = `transition-all duration-700 ${
+                        isHighlighted 
+                          ? "bg-blue-955/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
+                          : "hover:bg-slate-955/20"
+                      }`;
+
                       return (
                         <React.Fragment key={p.id}>
-                          <tr className="hover:bg-slate-955/20 transition-colors">
+                          <tr id={`proposal-${p.id}`} className={rowClass}>
                             <td className="py-3.5 px-2">
                               <div className="font-semibold text-slate-200">{p.item_name}</div>
                               {isCustom ? (
@@ -711,7 +756,7 @@ export default function CapExProposals() {
                             </td>
                             <td className="py-3.5 px-2">
                               <div className="font-semibold text-slate-300">Total: {p.total_qty} units</div>
-                              <div className="text-[10px] text-slate-500 mt-0.5">
+                              <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
                                 {planningYears.map(y => `${y}: ${p.yearly_quantities?.[String(y)] || 0}`).join(" | ")}
                               </div>
                             </td>
@@ -731,13 +776,13 @@ export default function CapExProposals() {
                                   </a>
                                   {p.s3_storage_class === "GLACIER" ? (
                                     p.is_restoring ? (
-                                      /* Active Time-Based S3 Glacier Progress Bar Indicator (Gap 28) */
+                                      /* Active Time-Based S3 Glacier Progress Bar Indicator */
                                       <div className="space-y-1 w-full max-w-[120px] pt-1">
                                         <div className="flex justify-between text-[8px] font-mono text-amber-400 font-semibold">
                                           <span>RESTORING</span>
                                           <span>{p.restore_progress || 50}%</span>
                                         </div>
-                                        <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden border border-slate-850">
+                                        <div className="w-full bg-slate-955 h-1 rounded-full overflow-hidden border border-slate-850">
                                           <div 
                                             className="h-full bg-amber-500 rounded-full transition-all duration-500 animate-pulse" 
                                             style={{ width: `${p.restore_progress || 50}%` }} 
@@ -756,7 +801,7 @@ export default function CapExProposals() {
                                     <button 
                                       onClick={() => handleMetadataSync(p.id)}
                                       title="Sync metadata class"
-                                      className="text-[9px] text-slate-500 hover:text-slate-400 flex items-center gap-0.5 cursor-pointer"
+                                      className="text-[9px] text-slate-500 hover:text-slate-400 flex items-center gap-0.5 cursor-pointer font-sans"
                                     >
                                       <RefreshCcw className="w-2.5 h-2.5" />
                                       <span>Sync</span>
@@ -848,7 +893,7 @@ export default function CapExProposals() {
 
       {activeCommentsProposal && (
         <div className="fixed inset-0 bg-slate-955/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col h-[500px]">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col h-[500px] animate-fadeIn">
             <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-955/50 rounded-t-xl">
               <div>
                 <h3 className="text-white font-bold text-sm">Discussions Thread</h3>

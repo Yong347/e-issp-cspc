@@ -1,5 +1,6 @@
 // frontend/src/views/department/Proposals/MooeSubscriptions.jsx
 import React, { useState, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
@@ -16,8 +17,19 @@ import {
 } from "../../../api/dept";
 import StatusPill from "../../../components/common/StatusPill";
 import { 
-  FileText, Plus, RefreshCw, AlertCircle, CheckCircle, 
-  Trash2, Send, Upload, MessageCircle, CheckSquare, RefreshCcw
+  FileText, 
+  Plus, 
+  RefreshCw, 
+  AlertCircle, 
+  CheckCircle, 
+  Trash2, 
+  Send, 
+  Upload, 
+  MessageCircle, 
+  CheckSquare, 
+  RefreshCcw,
+  Clock,
+  HardDrive
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -26,6 +38,7 @@ const rawUrl = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
 export default function MooeSubscriptions() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
+  const location = useLocation();
   
   const [subscriptions, setSubscriptions] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -57,6 +70,9 @@ export default function MooeSubscriptions() {
   const [newCommentText, setNewCommentText] = useState("");
   const [requiresAction, setRequiresAction] = useState(false);
 
+  // Deep-linking Highlight State
+  const [highlightedId, setHighlightedId] = useState(null);
+
   useEffect(() => {
     if (planningYears && planningYears.length > 0) {
       const initial = {};
@@ -85,6 +101,28 @@ export default function MooeSubscriptions() {
       fetchData();
     }
   }, [user, activeCycle]);
+
+  // Handle auto-focus and scrolling glow effects from deep-links
+  useEffect(() => {
+    if (location.state?.highlightId && subscriptions.length > 0) {
+      const targetId = location.state.highlightId;
+      setHighlightedId(targetId);
+
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`subscription-${targetId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          
+          // Clear highlight glow states after 4 seconds
+          setTimeout(() => {
+            setHighlightedId(null);
+          }, 4000);
+        }
+      }, 400);
+
+      return () => clearTimeout(timer);
+    }
+  }, [location.state, subscriptions]);
 
   // Active Polling for Glacier Restore Progress on Subscriptions (Gap 28)
   useEffect(() => {
@@ -416,7 +454,7 @@ export default function MooeSubscriptions() {
                 value={annualCostPerUser}
                 onChange={(e) => setAnnualCostPerUser(e.target.value)}
                 placeholder="0.00"
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all font-mono"
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all font-mono"
               />
             </div>
 
@@ -453,7 +491,7 @@ export default function MooeSubscriptions() {
                 value={justification}
                 onChange={(e) => setJustification(e.target.value)}
                 placeholder="How this license directly maps to MFO outcomes and curriculum"
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
+                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all resize-none"
               />
             </div>
 
@@ -482,7 +520,7 @@ export default function MooeSubscriptions() {
           </form>
         </div>
 
-        {/* Dynamic Proposals Board */}
+        {/* Proposals List */}
         <div className="lg:col-span-2 space-y-6">
           {uploadSubscriptionId && (
             <div className="bg-slate-900 p-5 rounded-xl border border-blue-900/50 space-y-4">
@@ -556,20 +594,27 @@ export default function MooeSubscriptions() {
                       <th className="py-3 px-2 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800">
+                  <tbody className="divide-y divide-slate-850">
                     {subscriptions.map(sub => {
                       const filename = sub.canvas_evidence_url ? sub.canvas_evidence_url.split("/").pop() : null;
                       const totalSeats = Object.values(sub.yearly_users || {}).reduce((a, b) => a + b, 0);
                       
+                      const isHighlighted = sub.id === highlightedId;
+                      const rowClass = `transition-all duration-700 ${
+                        isHighlighted 
+                          ? "bg-blue-955/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
+                          : "hover:bg-slate-950/20"
+                      }`;
+
                       return (
-                        <tr key={sub.id} className="hover:bg-slate-950/20 transition-colors">
+                        <tr key={sub.id} id={`subscription-${sub.id}`} className={rowClass}>
                           <td className="py-3.5 px-2">
                             <div className="font-semibold text-slate-200">{sub.software_name}</div>
                             <div className="text-[10px] text-slate-500 mt-0.5">{sub.subscription_type}</div>
                           </td>
                           <td className="py-3.5 px-2">
-                            <div className="font-semibold text-slate-300">Total: {totalSeats} seats</div>
-                            <div className="text-[10px] text-slate-500 mt-0.5">
+                            <div className="font-semibold text-slate-300 font-sans">Total: {totalSeats} seats</div>
+                            <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
                               {planningYears.map(y => `${y}: ${sub.yearly_users?.[String(y)] || 0}`).join(" | ")}
                             </div>
                           </td>
@@ -589,13 +634,13 @@ export default function MooeSubscriptions() {
                                 </a>
                                 {sub.s3_storage_class === "GLACIER" ? (
                                   sub.is_restoring ? (
-                                    /* Active Time-Based S3 Glacier Progress Bar Indicator (Gap 28) */
+                                    /* Active Time-Based S3 Glacier Progress Bar Indicator */
                                     <div className="space-y-1 w-full max-w-[120px] pt-1">
                                       <div className="flex justify-between text-[8px] font-mono text-amber-400 font-semibold">
                                         <span>RESTORING</span>
                                         <span>{sub.restore_progress || 50}%</span>
                                       </div>
-                                      <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden border border-slate-850">
+                                      <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden border border-slate-855">
                                         <div 
                                           className="h-full bg-amber-500 rounded-full transition-all duration-500 animate-pulse" 
                                           style={{ width: `${sub.restore_progress || 50}%` }} 
@@ -614,7 +659,7 @@ export default function MooeSubscriptions() {
                                   <button 
                                     onClick={() => handleMetadataSync(sub.id)}
                                     title="Sync metadata class"
-                                    className="text-[9px] text-slate-500 hover:text-slate-400 flex items-center gap-0.5 cursor-pointer"
+                                    className="text-[9px] text-slate-500 hover:text-slate-400 flex items-center gap-0.5 cursor-pointer font-sans"
                                   >
                                     <RefreshCcw className="w-2.5 h-2.5" />
                                     <span>Sync</span>
@@ -683,11 +728,11 @@ export default function MooeSubscriptions() {
 
       {activeCommentsProposal && (
         <div className="fixed inset-0 bg-slate-955/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col h-[500px]">
-            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50 rounded-t-xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col h-[500px] animate-fadeIn">
+            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-955/50 rounded-t-xl">
               <div>
                 <h3 className="text-white font-bold text-sm">Discussions Thread</h3>
-                <p className="text-[10px] text-slate-400">Proposal ID: {activeCommentsProposal.id}</p>
+                <p className="text-[10px] text-slate-400 font-mono">Proposal ID: {activeCommentsProposal.id}</p>
               </div>
               <button 
                 onClick={() => setActiveCommentsProposal(null)}
@@ -700,7 +745,7 @@ export default function MooeSubscriptions() {
             <div className="flex-1 p-4 overflow-y-auto space-y-3 font-sans text-xs">
               {comments.length > 0 ? (
                 comments.map((comment) => (
-                  <div key={comment.id} className="p-3 bg-slate-955 border border-slate-850 rounded-lg space-y-1.5">
+                  <div key={comment.id} className="p-3 bg-slate-950 border border-slate-850 rounded-lg space-y-1.5">
                     <div className="flex justify-between items-center text-[10px]">
                       <span className="font-bold text-blue-400">{comment.author_name}</span>
                       <span className="text-slate-500">{new Date(comment.timestamp).toLocaleTimeString()}</span>

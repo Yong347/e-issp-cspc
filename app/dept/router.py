@@ -3,11 +3,11 @@ import os
 import uuid
 import logging
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, List, Optional, Dict
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from botocore.exceptions import ClientError
 
@@ -387,7 +387,7 @@ def get_department_budget_summary(
     mooe_drafted = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        SubscriptionProposal.status == ProposalStatus.DRAFT,
+        Proposal.status == ProposalStatus.DRAFT,
         SubscriptionProposal.is_archived == False
     ).scalar() or Decimal("0.00")
 
@@ -1116,82 +1116,103 @@ async def upload_unserviceable_evidence(
 
 @router.get("/notifications", response_model=List[Dict[str, Any]])
 def get_department_notifications(
+    category: Optional[str] = Query(None, description="Filter by: budget, state, comment, override, security"),
+    days: Optional[int] = Query(None, description="Limit log search duration boundary"),
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
     """
-    Retrieves and aggregates all workspace-relevant events for the calling department,
-    including proposal status updates, budget ceiling modifications, admin remarks,
-    and account security changes.
+    Retrieves and aggregates all workspace-relevant events for the calling department.
+    Enriches each entry with deep-linking indicators, action states, and operator contexts.
     """
     dept_id = user["department_id"]
-    user_id = user["id"]
     active_cycle = get_active_issp_period(db)
     notifications = []
 
-    # 1. Fetch relevant Proposal and Subscription IDs to filter audit logs
-    proposal_ids = [str(p.id) for p in db.query(Proposal.id).filter(Proposal.department_id == dept_id).all()]
-    sub_ids = [str(s.id) for s in db.query(SubscriptionProposal.id).filter(SubscriptionProposal.department_id == dept_id).all()]
+    # Fast-map local proposal and subscription names to optimize lookup speeds
+    proposals_query = db.query(Proposal).filter(Proposal.department_id == dept_id)
+    subs_query = db.query(SubscriptionProposal).filter(SubscriptionProposal.department_id == dept_id)
 
-    # Query the most recent global audit trails
-    audit_trails = db.query(AuditTrail).order_by(AuditTrail.timestamp.desc()).limit(300).all()
+    proposals_list = proposals_query.all()
+    subs_list = subs_query.all()
+
+    proposal_map = {p.id: p.item_name for p in proposals_list}
+    subscription_map = {s.id: s.software_name for s in subs_list}
+
+    proposal_ids = [str(pid) for pid in proposal_map.keys()]
+    sub_ids = [str(sid) for sid in subscription_map.keys()]
+
+    # Query audit trails joined with active operator entities
+    audit_query = db.query(AuditTrail).options(joinedload(AuditTrail.user))
+    
+    if days:
+        boundary_date = datetime.utcnow() - timedelta(days=days)
+        audit_query = audit_query.filter(AuditTrail.timestamp >= boundary_date)
+
+    audit_trails = audit_query.order_by(AuditTrail.timestamp.desc()).all()
 
     for log in audit_trails:
         is_relevant = False
         title = "Workspace Event"
         description = ""
         type_ = "general"
+        target_name = "System Asset"
+        url_path = None
 
         log_prop_id = str(log.proposal_id) if log.proposal_id else None
         log_sub_id = str(log.subscription_id) if log.subscription_id else None
 
-        # Case A: Directly associated with a proposal in this department
+        operator_email = log.user.email if log.user else "System/Cron"
+        operator_role = log.user.role_tag.value if log.user else "SYSTEM"
+
         if log_prop_id in proposal_ids:
             is_relevant = True
+            target_name = proposal_map[log.proposal_id]
+            url_path = "/dept/proposals"
             if log.action == "STATE_TRANSITION_SUBMITTED":
                 title = "Proposal Submitted"
-                description = "Your proposal has been successfully queued for MIS review."
+                description = f"Your hardware proposal '{target_name}' has been successfully queued for MIS review."
                 type_ = "status_change"
             elif log.action == "STATE_TRANSITION_APPROVED":
                 title = "Proposal Approved"
-                description = "An administrator has approved your hardware proposal."
+                description = f"MIS Admin has approved your hardware proposal '{target_name}'."
                 type_ = "status_change"
             elif log.action == "STATE_TRANSITION_RETURNED":
                 title = "Proposal Returned"
-                description = "Your proposal was returned to drafts. Check the comments for required actions."
+                description = f"Your proposal '{target_name}' was returned to drafts. Please check inline action items."
                 type_ = "status_change"
             elif log.action == "PROPOSAL_OVERRIDDEN_BY_ADMIN":
-                title = "Proposal Overridden"
-                description = "An administrator applied a compliance override to your proposal parameters."
+                title = "Proposal Parameter Override"
+                description = f"MIS Admin applied a compliance override to your hardware proposal '{target_name}'."
                 type_ = "override"
             else:
-                title = "Proposal Updated"
-                description = f"Activity logged: {log.action.replace('_', ' ').title()}"
+                title = "Proposal Log Entry"
+                description = f"An operation was logged on '{target_name}': {log.action}"
 
-        # Case B: Directly associated with a software subscription in this department
         elif log_sub_id in sub_ids:
             is_relevant = True
+            target_name = subscription_map[log.subscription_id]
+            url_path = "/dept/subscriptions"
             if log.action == "STATE_TRANSITION_SUBMITTED":
                 title = "Subscription Submitted"
-                description = "Your software subscription request has been queued for review."
+                description = f"Your software subscription request '{target_name}' has been queued for review."
                 type_ = "status_change"
             elif log.action == "STATE_TRANSITION_APPROVED":
                 title = "Subscription Approved"
-                description = "An administrator has approved your software subscription."
+                description = f"MIS Admin approved your software subscription '{target_name}'."
                 type_ = "status_change"
             elif log.action == "STATE_TRANSITION_RETURNED":
                 title = "Subscription Returned"
-                description = "Your subscription request was returned to drafts. Check comments for details."
+                description = f"Your subscription request '{target_name}' was returned to drafts."
                 type_ = "status_change"
             elif log.action == "PROPOSAL_OVERRIDDEN_BY_ADMIN":
-                title = "Subscription Overridden"
-                description = "An administrator applied an override to your subscription parameters."
+                title = "Subscription Parameter Override"
+                description = f"MIS Admin applied an override to your subscription '{target_name}'."
                 type_ = "override"
             else:
-                title = "Subscription Updated"
-                description = f"Activity logged: {log.action.replace('_', ' ').title()}"
+                title = "Subscription Log Entry"
+                description = f"An operation was logged on software '{target_name}': {log.action}"
 
-        # Case C: Budget ceiling updates targeting this department
         elif log.action == "SYSTEM_BUDGET_CEILING_UPDATED":
             nv = log.new_value or {}
             log_dept_id = nv.get("department_id")
@@ -1202,28 +1223,21 @@ def get_department_notifications(
                 mooe = nv.get("allocated_mooe", "0.00")
                 description = f"Your department budget ceiling was modified: CapEx Limit is now ₱{float(capex):,.2f} | MOOE Limit is ₱{float(mooe):,.2f}"
                 type_ = "budget"
+                url_path = "/dept/dashboard"
 
         elif log.action == "SYSTEM_BULK_BUDGET_CEILINGS_UPDATED":
             is_relevant = True
             title = "Bulk Budget Ceilings Restructured"
-            description = f"The administrator has adjusted the sub-ceiling parameters for the planning cycle: '{active_cycle}'."
+            description = f"The administrator adjusted the global sub-ceiling parameters for the planning cycle: '{active_cycle}'."
             type_ = "budget"
+            url_path = "/dept/dashboard"
 
-        # Case D: Account security changes
-        elif log.action == "SYSTEM_SECURITY_PASSWORD_ROTATED" and log.user_id == user_id:
+        elif log.action == "SYSTEM_SECURITY_PASSWORD_ROTATED" and log.user_id == user["id"]:
             is_relevant = True
             title = "Password Rotated"
             description = "Your account password was updated successfully."
             type_ = "security"
-
-        elif log.action == "SYSTEM_USER_WHITELIST_MODIFIED":
-            nv = log.new_value or {}
-            ov = log.old_value or {}
-            if nv.get("email") == user["email"] or ov.get("email") == user["email"]:
-                is_relevant = True
-                title = "Account Profile Altered"
-                description = "Your whitelisted user profile configurations were updated by the MIS division."
-                type_ = "security"
+            url_path = "/dept/profile"
 
         if is_relevant:
             notifications.append({
@@ -1232,13 +1246,16 @@ def get_department_notifications(
                 "description": description,
                 "type": type_,
                 "timestamp": log.timestamp.isoformat(),
-                "ref_id": log_prop_id or log_sub_id or ""
+                "ref_id": log_prop_id or log_sub_id or "",
+                "target_name": target_name,
+                "url_path": url_path,
+                "operator_email": operator_email,
+                "operator_role": operator_role,
+                "old_value": log.old_value,
+                "new_value": log.new_value
             })
 
-    # 2. Fetch unresolved comments needing action
-    proposals_list = db.query(Proposal).filter(Proposal.department_id == dept_id, Proposal.is_archived == False).all()
-    subs_list = db.query(SubscriptionProposal).filter(SubscriptionProposal.department_id == dept_id, SubscriptionProposal.is_archived == False).all()
-
+    # Append unresolved action items/remarks (Proposals)
     for p in proposals_list:
         comments_payload = p.payload.get("comments", []) if p.payload else []
         for c in comments_payload:
@@ -1246,12 +1263,20 @@ def get_department_notifications(
                 notifications.append({
                     "id": c.get("id"),
                     "title": "Action Required: Pinned Feedback",
-                    "description": f"Remarks on '{p.item_name}': \"{c.get('text')}\"",
+                    "description": f"Admin remark pinned on '{p.item_name}': \"{c.get('text')}\"",
                     "type": "comment",
-                    "timestamp": c.get("timestamp"),
-                    "ref_id": str(p.id)
+                    # Fallback to current time if timestamp is missing
+                    "timestamp": c.get("timestamp") or datetime.utcnow().isoformat(), 
+                    "ref_id": str(p.id),
+                    "target_name": p.item_name,
+                    "url_path": "/dept/proposals",
+                    "operator_email": c.get("author_email") or "Admin",
+                    "operator_role": "ROLE_MIS_ADMIN",
+                    "old_value": None,
+                    "new_value": {"comment_text": c.get("text")}
                 })
 
+    # Append unresolved action items/remarks (Subscriptions)
     for s in subs_list:
         comments_payload = s.payload.get("comments", []) if s.payload else []
         for c in comments_payload:
@@ -1259,55 +1284,86 @@ def get_department_notifications(
                 notifications.append({
                     "id": c.get("id"),
                     "title": "Action Required: Pinned Feedback",
-                    "description": f"Remarks on '{s.software_name}': \"{c.get('text')}\"",
+                    "description": f"Admin remark pinned on software '{s.software_name}': \"{c.get('text')}\"",
                     "type": "comment",
-                    "timestamp": c.get("timestamp"),
-                    "ref_id": str(s.id)
-                })
+                    # Fallback to current time if timestamp is missing
+                    "timestamp": c.get("timestamp") or datetime.utcnow().isoformat(), 
+                    "ref_id": str(s.id),
+                    "target_name": s.software_name,
+                    "url_path": "/dept/subscriptions",
+                    "operator_email": c.get("author_email") or "Admin",
+                    "operator_role": "ROLE_MIS_ADMIN",
+                    "old_value": None,
+                    "new_value": {"comment_text": c.get("text")}
+                })  
 
-    # Sort consolidated list by timestamp descending
+    # Backend filtering before returning payload
+    if category:
+        notifications = [n for n in notifications if n["type"] == category.lower().strip()]
+
     notifications.sort(key=lambda x: x["timestamp"], reverse=True)
     return notifications[:50]
 
 
-# ==========================================================
-# INLINE DISCUSSION AND ACTION-REQUIRED COMMENT THREADS
-# ==========================================================
-
-@router.get("/action-items/summary")
+@router.get("/action-items/summary", response_model=Dict[str, int])
 def get_action_items_summary(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Returns a lightweight summary of unresolved action items and returned proposals. """
-    unread_actions = 0
-    returned_proposals = 0
-
+    """
+    Calculates the count of unresolved action items (unread_actions) and 
+    returned proposals (returned_proposals) for the calling department.
+    """
     dept_id = user["department_id"]
+    active_period = get_active_issp_period(db)
 
-    # Fetch User's Capex and MOOE items
-    capex_items = db.query(Proposal).filter(Proposal.department_id == dept_id).all()
-    mooe_items = db.query(SubscriptionProposal).filter(SubscriptionProposal.department_id == dept_id).all()
+    unread_actions = 0
     
-    all_items = capex_items + mooe_items
-
-    for item in all_items:
-        # 1. Check for Returned Status
-        if item.status == ProposalStatus.RETURNED:
-            returned_proposals += 1
-
-        # 2. Check Payload for Unresolved Actionable Comments
-        payload = item.payload or {}
-        comments = payload.get("comments", [])
-        
-        for comment in comments:
-            if comment.get("requires_department_action") is True and comment.get("is_resolved") is False:
+    # Count unresolved action comments on CapEx Proposals
+    proposals = db.query(Proposal).filter(
+        Proposal.department_id == dept_id,
+        Proposal.issp_period == active_period,
+        Proposal.is_archived == False
+    ).all()
+    
+    for p in proposals:
+        comments_list = p.payload.get("comments", []) if p.payload else []
+        for c in comments_list:
+            if c.get("requires_department_action") and not c.get("is_resolved"):
                 unread_actions += 1
 
-        return {
-            "unread_actions": unread_actions,
-            "returned_proposals": returned_proposals
-        }
+    # Count unresolved action comments on MOOE Subscriptions
+    subscriptions = db.query(SubscriptionProposal).filter(
+        SubscriptionProposal.department_id == dept_id,
+        SubscriptionProposal.issp_period == active_period,
+        SubscriptionProposal.is_archived == False
+    ).all()
+
+    for s in subscriptions:
+        comments_list = s.payload.get("comments", []) if s.payload else []
+        for c in comments_list:
+            if c.get("requires_department_action") and not c.get("is_resolved"):
+                unread_actions += 1
+
+    # Count returned proposals and subscriptions
+    returned_proposals = db.query(Proposal).filter(
+        Proposal.department_id == dept_id,
+        Proposal.issp_period == active_period,
+        Proposal.status == ProposalStatus.RETURNED,
+        Proposal.is_archived == False
+    ).count()
+
+    returned_subscriptions = db.query(SubscriptionProposal).filter(
+        SubscriptionProposal.department_id == dept_id,
+        SubscriptionProposal.issp_period == active_period,
+        SubscriptionProposal.status == ProposalStatus.RETURNED,
+        SubscriptionProposal.is_archived == False
+    ).count()
+
+    return {
+        "unread_actions": unread_actions,
+        "returned_proposals": returned_proposals + returned_subscriptions
+    }
 
 
 @router.post("/proposals/{proposal_id}/comments")
@@ -1873,8 +1929,8 @@ def request_subscription_glacier_restore(
         )
 
     sub = db.query(SubscriptionProposal).filter(
-        sub.id == subscription_id,
-        sub.department_id == user["department_id"]
+        SubscriptionProposal.id == subscription_id,
+        SubscriptionProposal.department_id == user["department_id"]
     ).first()
 
     if not sub:
