@@ -48,6 +48,7 @@ import TransmittalLetterPreview from "./views/admin/Narrative/TransmittalLetterP
 import StaffPositionsManager from "./views/admin/Narrative/StaffPositionsManager";
 
 import { useAuth } from "./context/AuthContext";
+import { NotificationProvider } from "./context/NotificationContext";
 
 // --- ROLE-BASED ROUTE GUARD ---
 const ProtectedRoute = ({ children, allowedRoles }) => {
@@ -104,80 +105,82 @@ const RootRedirect = () => {
 export default function App() {
   return (
     <Router>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/" element={<RootRedirect />} />
+      <NotificationProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<RootRedirect />} />
 
-        {/* Department User Workspace Paths */}
-        <Route
-          path="/dept"
-          element={
-            <ProtectedRoute allowedRoles={["ROLE_DEPT_USER"]}>
-              <DashboardLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<Navigate to="dashboard" replace />} />
-          <Route path="dashboard" element={<DeptDashboard />} />
-          <Route path="inventory" element={<InventoryManager />} />
-          <Route path="needs" element={<NeedsAssessment />} />
-          <Route path="proposals" element={<CapExProposals />} />
-          <Route path="subscriptions" element={<MooeSubscriptions />} />
-          <Route path="quotations" element={<QuotationManager />} />
-          <Route path="glacier" element={<GlacierConsole />} />
-          <Route path="vault" element={<DocumentVault />} />
-          <Route path="inbox" element={<ActionInbox />} />
-          <Route path="catalog" element={<CatalogViewer />} />
-          <Route path="profile" element={<ProfileSettings />} />
-        </Route>
+          {/* Department User Workspace Paths */}
+          <Route
+            path="/dept"
+            element={
+              <ProtectedRoute allowedRoles={["ROLE_DEPT_USER"]}>
+                <DashboardLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route path="dashboard" element={<DeptDashboard />} />
+            <Route path="inventory" element={<InventoryManager />} />
+            <Route path="needs" element={<NeedsAssessment />} />
+            <Route path="proposals" element={<CapExProposals />} />
+            <Route path="subscriptions" element={<MooeSubscriptions />} />
+            <Route path="quotations" element={<QuotationManager />} />
+            <Route path="glacier" element={<GlacierConsole />} />
+            <Route path="vault" element={<DocumentVault />} />
+            <Route path="inbox" element={<ActionInbox />} />
+            <Route path="catalog" element={<CatalogViewer />} />
+            <Route path="profile" element={<ProfileSettings />} />
+          </Route>
 
-        {/* Administrator & Governance Paths */}
-        <Route
-          path="/admin"
-          element={
-            <ProtectedRoute allowedRoles={["ROLE_MIS_ADMIN"]}>
-              <DashboardLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<Navigate to="dashboard" replace />} />
-          <Route path="dashboard" element={<Dashboard />} />
-          <Route path="queue" element={<ConsolidatedQueue />} />
-          <Route path="budget" element={<CeilingControl />} />
-          <Route path="analytics" element={<ComplianceAnalytics />} />
-          
-          <Route path="narratives" element={<NarrativeManager />} />
-          <Route path="diagrams" element={<DiagramVault />} />
-          <Route path="mithi" element={<MithiSurveys />} />
-          <Route path="users" element={<UserWhitelisting />} />
-          <Route path="catalog" element={<CatalogManager />} />
-          <Route path="audit" element={<AuditTrails />} />
-          <Route path="vault" element={<DocumentVault />} />
+          {/* Administrator & Governance Paths */}
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute allowedRoles={["ROLE_MIS_ADMIN"]}>
+                <DashboardLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route path="dashboard" element={<Dashboard />} />
+            <Route path="queue" element={<ConsolidatedQueue />} />
+            <Route path="budget" element={<CeilingControl />} />
+            <Route path="analytics" element={<ComplianceAnalytics />} />
+            
+            <Route path="narratives" element={<NarrativeManager />} />
+            <Route path="diagrams" element={<DiagramVault />} />
+            <Route path="mithi" element={<MithiSurveys />} />
+            <Route path="users" element={<UserWhitelisting />} />
+            <Route path="catalog" element={<CatalogManager />} />
+            <Route path="audit" element={<AuditTrails />} />
+            <Route path="vault" element={<DocumentVault />} />
 
-          {/* Newly Mapped Administrative Sub-Routes */}
-          <Route path="campuses" element={<CampusManager />} />
-          <Route path="glossary" element={<GlossaryManager />} />
-          <Route path="instructions" element={<InstructionsManager />} />
-          <Route path="inventory/server-capacity" element={<ServerCapacityManager />} />
-          <Route path="inventory/os-census" element={<OsCensusManager />} />
-          <Route path="inventory/software-census" element={<OfficeSoftwareManager />} />
-          <Route path="narratives/offices" element={<CoreOfficesManager />} />
-          <Route path="narratives/costs" element={<CostBreakdownManager />} />
-          <Route path="narratives/cross-projects" element={<CrossProjectsManager />} />
-          <Route path="narratives/degrees" element={<DegreeOfferings />} />
-          <Route path="narratives/gaa" element={<GaaTargets />} />
-          <Route path="narratives/gantt" element={<GanttScheduleManager />} />
-          <Route path="narratives/metrics" element={<PerformanceMetricsManager />} />
-          <Route path="narratives/concerns" element={<StrategicConcernsManager />} />
-          <Route path="narratives/transmittal" element={<TransmittalLetterPreview />} />
-          <Route path="narratives/staff-positions" element={<StaffPositionsManager />} />
-          
-          {/* Administrator profile routing configuration */}
-          <Route path="profile" element={<ProfileSettings />} />
-        </Route>
+            {/* Newly Mapped Administrative Sub-Routes */}
+            <Route path="campuses" element={<CampusManager />} />
+            <Route path="glossary" element={<GlossaryManager />} />
+            <Route path="instructions" element={<InstructionsManager />} />
+            <Route path="inventory/server-capacity" element={<ServerCapacityManager />} />
+            <Route path="inventory/os-census" element={<OsCensusManager />} />
+            <Route path="inventory/software-census" element={<OfficeSoftwareManager />} />
+            <Route path="narratives/offices" element={<CoreOfficesManager />} />
+            <Route path="narratives/costs" element={<CostBreakdownManager />} />
+            <Route path="narratives/cross-projects" element={<CrossProjectsManager />} />
+            <Route path="narratives/degrees" element={<DegreeOfferings />} />
+            <Route path="narratives/gaa" element={<GaaTargets />} />
+            <Route path="narratives/gantt" element={<GanttScheduleManager />} />
+            <Route path="narratives/metrics" element={<PerformanceMetricsManager />} />
+            <Route path="narratives/concerns" element={<StrategicConcernsManager />} />
+            <Route path="narratives/transmittal" element={<TransmittalLetterPreview />} />
+            <Route path="narratives/staff-positions" element={<StaffPositionsManager />} />
+            
+            {/* Administrator profile routing configuration */}
+            <Route path="profile" element={<ProfileSettings />} />
+          </Route>
 
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </NotificationProvider>
     </Router>
   );
 }

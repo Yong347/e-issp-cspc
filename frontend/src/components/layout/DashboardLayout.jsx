@@ -3,6 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useCycle } from '../../context/CycleContext';
+import { useNotifications } from '../../context/NotificationContext';
 import { 
   FileText, ShieldCheck, Database, ClipboardList, 
   FolderKanban, LogOut, FileBarChart, LayoutDashboard, UserCheck, 
@@ -17,6 +18,7 @@ export default function DashboardLayout() {
   const navigate = useNavigate();
   const { user, logoutSession } = useAuth();
   const { activeCycle } = useCycle();
+  const { actionCount } = useNotifications();
   const [headroom, setHeadroom] = useState(null);
 
   // Submenu open states
@@ -141,9 +143,25 @@ export default function DashboardLayout() {
                   </button>
                   {workflowOpen && (
                     <div className="mt-1 space-y-0.5">
-                      <NavLink to="/dept/inbox" className={subNavLinkClass}>
-                        <Inbox className="w-3.5 h-3.5 text-red-400" />
-                        <span>Remarks & Action Items</span>
+                      <NavLink 
+                        to="/dept/inbox" 
+                        className={({ isActive }) => 
+                          `flex items-center justify-between w-full pl-8 pr-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${
+                            isActive 
+                              ? "text-blue-400 font-bold" 
+                              : "text-slate-500 hover:text-slate-200"
+                          }`
+                        }
+                      >
+                        <div className="flex items-center space-x-3">
+                          <Inbox className="w-3.5 h-3.5 text-red-400" />
+                          <span>Remarks & Action Items</span>
+                        </div>
+                        {actionCount > 0 && (
+                          <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-red-600 px-1 text-[9px] font-bold text-white animate-pulse">
+                            {actionCount}
+                          </span>
+                        )}
                       </NavLink>
                       <NavLink to="/dept/catalog" className={subNavLinkClass}>
                         <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
@@ -359,7 +377,7 @@ export default function DashboardLayout() {
       </aside>
 
       {/* Main Workspace Frame */}
-      <main className="flex-1 flex flex-col overflow-hidden bg-slate-950">
+      <main className="flex-1 flex flex-col overflow-hidden bg-slate-955">
         <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-8 flex-shrink-0">
           <div className="flex items-center space-x-4">
             <span className="text-xs text-slate-500 font-semibold">Active Planning Framework:</span>

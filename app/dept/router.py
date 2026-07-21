@@ -1094,6 +1094,42 @@ async def upload_unserviceable_evidence(
 # INLINE DISCUSSION AND ACTION-REQUIRED COMMENT THREADS
 # ==========================================================
 
+@router.get("/action-items/summary")
+def get_action_items_summary(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """ Returns a lightweight summary of unresolved action items and returned proposals. """
+    unread_actions = 0
+    returned_proposals = 0
+
+    dept_id = user["department_id"]
+
+    # Fetch User's Capex and MOOE items
+    capex_items = db.query(Proposal).filter(Proposal.department_id == dept_id).all()
+    mooe_items = db.query(SubscriptionProposal).filter(SubscriptionProposal.department_id == dept_id).all()
+    
+    all_items = capex_items + mooe_items
+
+    for item in all_items:
+        # 1. Check for Returned Status
+        if item.status == ProposalStatus.RETURNED:
+            returned_proposals += 1
+
+        # 2. Check Payload for Unresolved Actionable Comments
+        payload = item.payload or {}
+        comments = payload.get("comments", [])
+        
+        for comment in comments:
+            if comment.get("requires_department_action") is True and comment.get("is_resolved") is False:
+                unread_actions += 1
+
+    return {
+        "unread_actions": unread_actions,
+        "returned_proposals": returned_proposals
+    }
+
+
 @router.post("/proposals/{proposal_id}/comments")
 def post_inline_comment(
     proposal_id: uuid.UUID,

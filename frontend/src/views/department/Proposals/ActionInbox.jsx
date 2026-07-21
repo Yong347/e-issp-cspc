@@ -2,12 +2,14 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
+import { useNotifications } from "../../../context/NotificationContext";
 import { getProposals, getSubscriptions } from "../../../api/dept";
 import { Inbox, RefreshCw, AlertCircle, HelpCircle, History } from "lucide-react";
 
 export default function ActionInbox() {
   const { user } = useAuth();
   const { activeCycle } = useCycle();
+  const { fetchNotifications } = useNotifications();
   
   const [actionItems, setActionItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -55,6 +57,11 @@ export default function ActionInbox() {
       // Sort chronologically (newest entries first)
       items.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       setActionItems(items);
+      
+      // Update global counter indicator immediately
+      if (fetchNotifications) {
+        fetchNotifications();
+      }
     } catch (err) {
       setError(err.message || "Failed to load department action items.");
     } finally {
@@ -75,10 +82,10 @@ export default function ActionInbox() {
         <div>
           <h2 className="text-white font-bold text-base flex items-center gap-2">
             <Inbox className="w-5 h-5 text-blue-400" />
-            <span>Administrative Remarks & Audit Log</span>
+            <span>Feedback & Revisions Inbox</span>
           </h2>
           <p className="text-slate-400 text-xs mt-1">
-            Read-only ledger of feedback, administrative corrections, and dynamic evaluation notes logged by the MIS Administrator.
+            Dynamic ledger of feedback, required modifications, and administrative evaluation notes logged by the MIS Administrator.
           </p>
         </div>
         <button
