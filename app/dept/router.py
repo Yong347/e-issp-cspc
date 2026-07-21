@@ -4,7 +4,7 @@ import uuid
 import logging
 from decimal import Decimal
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -32,7 +32,7 @@ from app.schemas import (
     InventoryCreate, 
     InventoryResponse, 
     ProposalUpdatePayload, 
-    ProposalResponse,  # <--- Added ProposalResponse to the imports
+    ProposalResponse,
     CommentCreate,
     CatalogItemResponse,
     NeedsAssessmentCreate, 
@@ -41,7 +41,7 @@ from app.schemas import (
     SubscriptionProposalResponse,
     DeploymentCreate,   # Gap 13 Pydantic Request Schema
     DeploymentResponse,
-    CoreOfficeFunctionResponse  # <--- Add this import
+    CoreOfficeFunctionResponse
 )
 from app.auth.router import require_user, require_dept_user
 from app.storage.s3_client import storage_client
@@ -373,7 +373,7 @@ def get_department_budget_summary(
     mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
+        SubscriptionProposal.status.in_([SubscriptionProposal.status.SUBMITTED, SubscriptionProposal.status.APPROVED]),
         SubscriptionProposal.is_archived == False
     ).scalar() or Decimal("0.00")
     
@@ -387,8 +387,8 @@ def get_department_budget_summary(
     mooe_drafted = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        SubscriptionProposal.status == ProposalStatus.DRAFT,
-        SubscriptionProposal.is_archived == False
+        Proposal.status == ProposalStatus.DRAFT,
+        Proposal.is_archived == False
     ).scalar() or Decimal("0.00")
 
     total_spent = capex_spent + mooe_spent
@@ -498,7 +498,7 @@ def get_existing_inventory(
     ).offset(skip).limit(limit).all()
 
 
-@router.get("/proposals", response_model=List[ProposalResponse])  # <--- Added response_model here
+@router.get("/proposals", response_model=List[ProposalResponse])
 def get_departmental_proposals(
     issp_period_filter: Optional[str] = Query(None, alias="issp_period"),
     status_filter: Optional[ProposalStatus] = Query(None),
@@ -520,7 +520,7 @@ def get_departmental_proposals(
     return query.offset(skip).limit(limit).all()
 
 
-@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)  # <--- Added response_model here
+@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)
 def get_proposal_detail(
     proposal_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -715,7 +715,7 @@ def update_proposal_item(
     proposal.target_offices_json = payload.target_offices_json
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.custom_specification = payload.custom_specification
-    proposal.is_expansion = payload.is_expansion
+    proposal.is_expansion = proposal.is_expansion
 
     old_payload = dict(proposal.payload) if proposal.payload else {}
     old_payload["supplier_name"] = resolved_supplier
@@ -733,7 +733,7 @@ def update_proposal_item(
         "yearly_quantities": payload.yearly_quantities,
         "custom_specification": payload.custom_specification,
         "target_offices_json": proposal.target_offices_json,
-        "is_expansion": payload.is_expansion
+        "is_expansion": proposal.is_expansion
     }
 
     audit = AuditTrail(
@@ -808,6 +808,7 @@ def delete_proposal(
                     Bucket=storage_client.bucket_name,
                     Key=key
                 )
+                    
                 logger.info(f"S3 asset deleted successfully: {key}")
             except Exception as s3_err:
                 logger.critical(f"Failed to delete S3 asset '{key}': {str(s3_err)}")
@@ -929,7 +930,7 @@ def submit_proposal(
 # ==========================================================
 
 @router.post("/upload/canvas")
-async def upload_canvas_evidence(
+async def upload_canvas(
     proposal_id: str = Form(...),
     supplier_name: str = Form(...),
     file: UploadFile = File(...),
@@ -1092,6 +1093,166 @@ async def upload_unserviceable_evidence(
 
 
 # ==========================================================
+# UNIFIED NOTIFICATIONS FEED ENDPOINT
+# ==========================================================
+
+@router.get("/notifications", response_model=List[Dict[str, Any]])
+def get_department_notifications(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """
+    Retrieves and aggregates all workspace-relevant events for the calling department,
+    including proposal status updates, budget ceiling modifications, admin remarks,
+    and account security changes.
+    """
+    dept_id = user["department_id"]
+    user_id = user["id"]
+    active_cycle = get_active_issp_period(db)
+    notifications = []
+
+    # 1. Fetch relevant Proposal and Subscription IDs to filter audit logs
+    proposal_ids = [str(p.id) for p in db.query(Proposal.id).filter(Proposal.department_id == dept_id).all()]
+    sub_ids = [str(s.id) for s in db.query(SubscriptionProposal.id).filter(SubscriptionProposal.department_id == dept_id).all()]
+
+    # Query the most recent global audit trails
+    audit_trails = db.query(AuditTrail).order_by(AuditTrail.timestamp.desc()).limit(300).all()
+
+    for log in audit_trails:
+        is_relevant = False
+        title = "Workspace Event"
+        description = ""
+        type_ = "general"
+
+        log_prop_id = str(log.proposal_id) if log.proposal_id else None
+        log_sub_id = str(log.subscription_id) if log.subscription_id else None
+
+        # Case A: Directly associated with a proposal in this department
+        if log_prop_id in proposal_ids:
+            is_relevant = True
+            if log.action == "STATE_TRANSITION_SUBMITTED":
+                title = "Proposal Submitted"
+                description = "Your proposal has been successfully queued for MIS review."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_APPROVED":
+                title = "Proposal Approved"
+                description = "An administrator has approved your hardware proposal."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_RETURNED":
+                title = "Proposal Returned"
+                description = "Your proposal was returned to drafts. Check the comments for required actions."
+                type_ = "status_change"
+            elif log.action == "PROPOSAL_OVERRIDDEN_BY_ADMIN":
+                title = "Proposal Overridden"
+                description = "An administrator applied a compliance override to your proposal parameters."
+                type_ = "override"
+            else:
+                title = "Proposal Updated"
+                description = f"Activity logged: {log.action.replace('_', ' ').title()}"
+
+        # Case B: Directly associated with a software subscription in this department
+        elif log_sub_id in sub_ids:
+            is_relevant = True
+            if log.action == "STATE_TRANSITION_SUBMITTED":
+                title = "Subscription Submitted"
+                description = "Your software subscription request has been queued for review."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_APPROVED":
+                title = "Subscription Approved"
+                description = "An administrator has approved your software subscription."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_RETURNED":
+                title = "Subscription Returned"
+                description = "Your subscription request was returned to drafts. Check comments for details."
+                type_ = "status_change"
+            elif log.action == "PROPOSAL_OVERRIDDEN_BY_ADMIN":
+                title = "Subscription Overridden"
+                description = "An administrator applied an override to your subscription parameters."
+                type_ = "override"
+            else:
+                title = "Subscription Updated"
+                description = f"Activity logged: {log.action.replace('_', ' ').title()}"
+
+        # Case C: Budget ceiling updates targeting this department
+        elif log.action == "SYSTEM_BUDGET_CEILING_UPDATED":
+            nv = log.new_value or {}
+            log_dept_id = nv.get("department_id")
+            if log_dept_id is not None and int(log_dept_id) == dept_id:
+                is_relevant = True
+                title = "Budget Ceiling Updated"
+                capex = nv.get("allocated_capex", "0.00")
+                mooe = nv.get("allocated_mooe", "0.00")
+                description = f"Your department budget ceiling was modified: CapEx Limit is now ₱{float(capex):,.2f} | MOOE Limit is ₱{float(mooe):,.2f}"
+                type_ = "budget"
+
+        elif log.action == "SYSTEM_BULK_BUDGET_CEILINGS_UPDATED":
+            is_relevant = True
+            title = "Bulk Budget Ceilings Restructured"
+            description = f"The administrator has adjusted the sub-ceiling parameters for the planning cycle: '{active_cycle}'."
+            type_ = "budget"
+
+        # Case D: Account security changes
+        elif log.action == "SYSTEM_SECURITY_PASSWORD_ROTATED" and log.user_id == user_id:
+            is_relevant = True
+            title = "Password Rotated"
+            description = "Your account password was updated successfully."
+            type_ = "security"
+
+        elif log.action == "SYSTEM_USER_WHITELIST_MODIFIED":
+            nv = log.new_value or {}
+            ov = log.old_value or {}
+            if nv.get("email") == user["email"] or ov.get("email") == user["email"]:
+                is_relevant = True
+                title = "Account Profile Altered"
+                description = "Your whitelisted user profile configurations were updated by the MIS division."
+                type_ = "security"
+
+        if is_relevant:
+            notifications.append({
+                "id": str(log.id),
+                "title": title,
+                "description": description,
+                "type": type_,
+                "timestamp": log.timestamp.isoformat(),
+                "ref_id": log_prop_id or log_sub_id or ""
+            })
+
+    # 2. Fetch unresolved comments needing action
+    proposals_list = db.query(Proposal).filter(Proposal.department_id == dept_id, Proposal.is_archived == False).all()
+    subs_list = db.query(SubscriptionProposal).filter(SubscriptionProposal.department_id == dept_id, SubscriptionProposal.is_archived == False).all()
+
+    for p in proposals_list:
+        comments_payload = p.payload.get("comments", []) if p.payload else []
+        for c in comments_payload:
+            if c.get("requires_department_action") and not c.get("is_resolved"):
+                notifications.append({
+                    "id": c.get("id"),
+                    "title": "Action Required: Pinned Feedback",
+                    "description": f"Remarks on '{p.item_name}': \"{c.get('text')}\"",
+                    "type": "comment",
+                    "timestamp": c.get("timestamp"),
+                    "ref_id": str(p.id)
+                })
+
+    for s in subs_list:
+        comments_payload = s.payload.get("comments", []) if s.payload else []
+        for c in comments_payload:
+            if c.get("requires_department_action") and not c.get("is_resolved"):
+                notifications.append({
+                    "id": c.get("id"),
+                    "title": "Action Required: Pinned Feedback",
+                    "description": f"Remarks on '{s.software_name}': \"{c.get('text')}\"",
+                    "type": "comment",
+                    "timestamp": c.get("timestamp"),
+                    "ref_id": str(s.id)
+                })
+
+    # Sort consolidated list by timestamp descending
+    notifications.sort(key=lambda x: x["timestamp"], reverse=True)
+    return notifications[:50]
+
+
+# ==========================================================
 # INLINE DISCUSSION AND ACTION-REQUIRED COMMENT THREADS
 # ==========================================================
 
@@ -1248,8 +1409,8 @@ def resolve_proposal_comment(
             comment_found = True
             break
 
-    if not comment_found:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
+        if not comment_found:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
 
     target.payload = current_payload
     try:

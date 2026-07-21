@@ -2058,6 +2058,7 @@ CORE SYSTEM FILE: .\app\schemas.py
 # app/schemas.py
 import uuid
 import html
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
@@ -2082,6 +2083,17 @@ MFO_MAPPING = {
 def sanitize_text(v: Optional[str]) -> Optional[str]:
     if v is not None:
         return html.escape(v.strip())
+    return v
+
+# Shared utility to safely parse stringified JSON returned by database dialects (e.g. SQLite)
+def deserialize_json_if_string(v: Any) -> Any:
+    if isinstance(v, str):
+        v_clean = v.strip()
+        if (v_clean.startswith("{") and v_clean.endswith("}")) or (v_clean.startswith("[") and v_clean.endswith("]")):
+            try:
+                return json.loads(v_clean)
+            except Exception:
+                pass
     return v
 
 
@@ -2362,6 +2374,12 @@ class ProposalResponse(BaseModel):
     is_restoring: bool = Field(False, description="True if a cold archival retrieval is currently processing")
     is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
+    @field_validator('yearly_quantities', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        """Resolves stringified JSON outputs returned by SQLite driver implementations"""
+        return deserialize_json_if_string(v)
+
     @field_validator('s3_storage_class', mode='before')
     @classmethod
     def resolve_storage_class(cls, v: str) -> str:
@@ -2402,6 +2420,12 @@ class SubscriptionProposalCreate(BaseModel):
     @classmethod
     def sanitize_subscription_texts(cls, v: Optional[str]) -> Optional[str]:
         return sanitize_text(v)
+
+    @field_validator('yearly_users', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        """Resolves stringified JSON outputs returned by SQLite driver implementations"""
+        return deserialize_json_if_string(v)
 
     @field_validator('target_offices_json')
     @classmethod
@@ -2475,6 +2499,11 @@ class AdminHardwareOverride(BaseModel):
     target_offices_json: Optional[List[str]] = None
     project_key: Optional[str] = Field(None, description="Overridden strategic project key mapping")
 
+    @field_validator('yearly_quantities', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     @field_validator('yearly_quantities')
     @classmethod
     def validate_quantities_override(cls, v: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
@@ -2500,6 +2529,11 @@ class AdminSubscriptionOverride(BaseModel):
     annual_cost_per_user: Optional[Decimal] = Field(None, ge=0, le=100_000_000)
     target_offices_json: Optional[List[str]] = None
     project_key: Optional[str] = Field(None, description="Overridden strategic project key mapping")
+
+    @field_validator('yearly_users', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
     @field_validator('yearly_users')
     @classmethod
@@ -2847,6 +2881,11 @@ class MithiHardwareItemSchema(BaseModel):
     yearly_leased: Dict[str, int] = Field(default_factory=dict, description="Map of calendar year strings to leased quantities")
     older_than_3_years: int = Field(0, ge=0, description="Total units older than 3 years")
 
+    @field_validator('yearly_owned', 'yearly_leased', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     @model_validator(mode='after')
     def validate_mithi_hardware(self) -> 'MithiHardwareItemSchema':
         for year, val in self.yearly_owned.items():
@@ -2871,6 +2910,11 @@ class ImplementationScheduleItem(BaseModel):
     project_id: uuid.UUID
     project_name: str
     milestones: Dict[str, bool] = Field(..., description="Active checkmarks (e.g., {'2026_Q1': True, '2026_Q2': False})")
+
+    @field_validator('milestones', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
 
 # ==========================================================
@@ -2897,6 +2941,11 @@ class MithiDataArchivingSchema(BaseModel):
     archiving_mode: str = Field("Manual", description="Archiving mode: Manual, Electronic, Both")
     archiving_medium: List[str] = Field(default_factory=list, description="Storage media: Optical, Hard Disk, Tape, etc.")
     archived_information: List[str] = Field(default_factory=list, description="Classifications: Publications, Letters, etc.")
+
+    @field_validator('archiving_medium', 'archived_information', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
 
 class MithiIctIssuesSchema(BaseModel):
@@ -2996,9 +3045,9 @@ class MasterNarrativeUpdate(BaseModel):
     placement_ict_org_url: Optional[str] = Field(None, description="Path to placement of proposed ICT organizational structure in institutional chart")
     
     # Advanced structured fields derived from technical forms and planning requirements
-    site_development_plan_url: Optional[str] = Field(None, description="Path to the uploaded Annex A-2 Campus Site Development Plan")
-    fiber_backbone_url: Optional[str] = Field(None, description="Path to the uploaded Fiber Optic Backbone Cabling Diagram")
-    system_architecture_url: Optional[str] = Field(None, description="Path to the uploaded System Architecture Diagram")
+    site_development_plan_url: Optional[str] = Field(None, description="Path to the original uploaded Annex A-2 Campus Site Development Plan")
+    fiber_backbone_url: Optional[str] = Field(None, description="Path to the original uploaded Fiber Optic Backbone Cabling Diagram")
+    system_architecture_url: Optional[str] = Field(None, description="Path to the original uploaded System Architecture Diagram")
     
     # CSPC Network Diagram & Core topology (Page 129 compliance layout element)
     network_topology_url: Optional[str] = Field(None, description="Path to the uploaded CSPC Network Diagram & Core topology")
@@ -3017,6 +3066,17 @@ class MasterNarrativeUpdate(BaseModel):
     mithi_ict_issues: Optional[MithiIctIssuesSchema] = Field(None, description="DICT Annex A-1 Section 8.2 ICT Issues checklists")
 
     implementation_schedules: Optional[List[ImplementationScheduleItem]] = Field([], description="Timelines and schedule milestones")
+
+    @field_validator(
+        'scope_json', 'planners_json', 'manpower_json', 'major_final_outputs', 'core_offices_json',
+        'strategic_concerns_json', 'systems_json', 'databases_json', 'internal_projects_json',
+        'cross_projects_json', 'pmf_matrix_json', 'mithi_network_profile', 'mithi_special_solutions',
+        'mithi_data_center', 'mithi_hardware_inventory', 'mithi_security_dr', 'mithi_data_archiving',
+        'mithi_ict_issues', 'implementation_schedules', mode='before'
+    )
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
     @model_validator(mode='after')
     def validate_issp_cycle_range(self) -> 'MasterNarrativeUpdate':
@@ -3101,13 +3161,26 @@ class MasterNarrativeResponse(BaseModel):
 
     implementation_schedules: List[ImplementationScheduleItem] = []
 
+    @field_validator(
+        'planners_json', 'manpower_json', 'core_offices_json', 'strategic_concerns_json',
+        'systems_json', 'databases_json', 'internal_projects_json', 'cross_projects_json',
+        'pmf_matrix_json', 'mithi_network_profile', 'mithi_special_solutions',
+        'mithi_data_center', 'mithi_hardware_inventory', 'mithi_security_dr',
+        'mithi_data_archiving', 'mithi_ict_issues', 'implementation_schedules',
+        mode='before'
+    )
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     # Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
     @field_validator('mithi_network_profile', 'mithi_data_center', 'manpower_json', mode='before')
     @classmethod
     def clear_empty_dicts(cls, v: Any) -> Any:
-        if isinstance(v, dict) and not v:
+        v_deserialized = deserialize_json_if_string(v)
+        if isinstance(v_deserialized, dict) and not v_deserialized:
             return None
-        return v
+        return v_deserialized
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -3388,11 +3461,16 @@ class InvestmentSummaryRow(BaseModel):
     total_quantity: int
     total_cost: Decimal
 
+    @field_validator('yearly_quantities', 'yearly_costs', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
 
 # --- Gap 11/12: Annual Cost Breakdown & Continuing Institutional Costs ---
 class AnnualCostBreakdownCreate(BaseModel):
     project_key: str = Field(..., example="WiFi")
-    cost_type: str = Field(..., example="CapEx")
+    text_type: str = Field(..., example="CapEx")
     item_description: str = Field(..., example="Enterprise Access Point")
     unit_cost: Decimal = Field(..., ge=0)
     yearly_quantities: Dict[str, int] = Field(default_factory=dict, example={"2026": 5, "2027": 0, "2028": 0})
@@ -3406,6 +3484,12 @@ class AnnualCostBreakdownResponse(BaseModel):
     item_description: str
     unit_cost: Decimal
     yearly_quantities: Dict[str, int]
+
+    @field_validator('yearly_quantities', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -3427,6 +3511,11 @@ class DeploymentResponse(BaseModel):
 class MilestoneUpdatePayload(BaseModel):
     project_id: uuid.UUID
     milestones: Dict[str, bool] = Field(..., example={"2026_Q1": True, "2026_Q2": True, "2026_Q3": False, "2026_Q4": False})
+
+    @field_validator('milestones', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
 =========================================
 CORE SYSTEM FILE: .\app\__init__.py
@@ -7054,7 +7143,7 @@ from sqlalchemy import (
     func,
     event,
     text,
-    UniqueConstraint,  # <--- Added for multi-cycle composite constraint support
+    UniqueConstraint,
 )
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -7103,7 +7192,7 @@ class GUID(TypeDecorator):
     Compiles cleanly to PostgreSQL's native UUID, falling back to CHAR(36)
     on SQLite development and testing environments to avoid schema mismatches.
     """
-    impl = CHAR(36)  # <--- Fix: Specify length 36 explicitly to prevent SQLite truncation
+    impl = CHAR(36)
     cache_ok = True
 
     def load_dialect_impl(self, dialect):
@@ -7377,7 +7466,6 @@ class Department(Base):
         cascade="all, delete-orphan"
     )
     
-    # Updated to List/plural to handle multiple planning periods
     budget_ceilings: Mapped[List["BudgetCeiling"]] = relationship(
         "BudgetCeiling", 
         back_populates="department", 
@@ -7397,7 +7485,6 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     role_tag: Mapped[RoleTag] = mapped_column(Enum(RoleTag), nullable=False)
     
-    # Nullable department reassignment uses SET NULL on delete to safeguard audit trail logs
     department_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("departments.id", ondelete="SET NULL"), 
         nullable=True, 
@@ -7455,7 +7542,6 @@ class ExistingInventory(Base):
     status: Mapped[AssetStatus] = mapped_column(Enum(AssetStatus), default=AssetStatus.FUNCTIONAL, nullable=False)
     unserviceable_report_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     
-    # Track device lifecycle acquisition date
     date_acquired: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     department: Mapped[Department] = relationship("Department", back_populates="inventory")
@@ -7488,17 +7574,14 @@ class Proposal(Base):
     item_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    # DYNAMIC JSON COLUMN
     yearly_quantities: Mapped[Dict[str, int]] = mapped_column(
         MutableDict.as_mutable(JSON), 
         default=dict, 
         nullable=False
     )
     
-    # Flat column preserved for database query/index optimization; kept in sync via listeners
     total_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
 
-    # Project Alignment Map
     project_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
 
     payload: Mapped[Dict[str, Any]] = mapped_column(
@@ -7524,7 +7607,6 @@ class Proposal(Base):
         back_populates="proposals"
     )
     
-    # Relational deployment mapping configurations
     deployments_relation: Mapped[List["ProposalDeployment"]] = relationship(
         "ProposalDeployment", 
         back_populates="proposal", 
@@ -7562,7 +7644,7 @@ class Proposal(Base):
 
 class SubscriptionProposal(Base):
     """
-    Handles Annex A-2 / MOOE Software and Cloud Subscriptions.
+    Handles Annex a-2 / MOOE Software and Cloud Subscriptions.
     Provides structured setters to automatically synchronize flat database columns
     with the nested encrypted payload dictionary to prevent state drift.
     """
@@ -7586,7 +7668,6 @@ class SubscriptionProposal(Base):
     software_name: Mapped[str] = mapped_column(String(255), nullable=False)
     justification: Mapped[str] = mapped_column(Text, nullable=False)
     
-    # DYNAMIC JSON COLUMN
     yearly_users: Mapped[Dict[str, int]] = mapped_column(
         MutableDict.as_mutable(JSON), 
         default=dict, 
@@ -7595,10 +7676,8 @@ class SubscriptionProposal(Base):
     
     annual_cost_per_user: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    # Flat column preserved for database query/index optimization; kept in sync via listeners
     total_multiyear_mooe: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False, index=True)
     
-    # Project Alignment Map
     project_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
 
     status: Mapped[ProposalStatus] = mapped_column(Enum(ProposalStatus), default=ProposalStatus.DRAFT, nullable=False)
@@ -7706,7 +7785,6 @@ class BudgetCeiling(Base):
     """
     __tablename__ = "budget_ceilings"
     
-    # Composite unique constraint on Department and ISSP planning cycle combined
     __table_args__ = (
         UniqueConstraint("department_id", "issp_period", name="uq_budget_ceilings_dept_period"),
     )
@@ -7714,7 +7792,7 @@ class BudgetCeiling(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     department_id: Mapped[int] = mapped_column(
         ForeignKey("departments.id", ondelete="CASCADE"), 
-        nullable=False,  # Removed unique=True parameter
+        nullable=False,
         index=True
     )
     allocated_capex: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
@@ -7750,7 +7828,6 @@ class BudgetCeiling(Base):
             value = Decimal("0.00")
         elif not isinstance(value, Decimal):
             value = Decimal(str(value))
-        # Ensure the total sub-ceiling is quantized to 1.00 to avoid fractional cents
         quantized_total = value.quantize(Decimal("1.00"))
         self.allocated_capex = (quantized_total * Decimal("0.70")).quantize(Decimal("1.00"))
         self.allocated_mooe = quantized_total - self.allocated_capex
@@ -7758,938 +7835,6 @@ class BudgetCeiling(Base):
     @sub_ceiling.expression
     def sub_ceiling(cls):
         return cls.allocated_capex + cls.allocated_mooe
-
-
-class AuditTrail(Base):
-    """
-    Provides immutable system auditing required for COA policy adherence.
-    Ensures log history is preserved securely when target users or items are deleted.
-    """
-    __tablename__ = "audit_trails"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    proposal_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        ForeignKey("issp_core.id", ondelete="SET NULL"), 
-        nullable=True
-    )
-    subscription_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        ForeignKey("subscription_proposals.id", ondelete="SET NULL"), 
-        nullable=True
-    )
-    action: Mapped[str] = mapped_column(String(100), nullable=False)
-    user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), 
-        nullable=True
-    )
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), 
-        server_default=func.now(), 
-        nullable=False
-    )
-    old_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
-    new_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
-
-    proposal: Mapped[Optional[Proposal]] = relationship("Proposal", foreign_keys=[proposal_id], back_populates="audit_logs")
-    subscription: Mapped[Optional[SubscriptionProposal]] = relationship("SubscriptionProposal", foreign_keys=[subscription_id], back_populates="audit_logs")
-    user: Mapped[Optional[User]] = relationship("User")
-
-
-# ==========================================================
-# DICT ANNEX A-4 STRUCTURAL ADDITIONS
-# ==========================================================
-
-class DegreeOffering(Base):
-    """
-    DICT Annex A-4: Dynamic collection of graduate and undergraduate degree offerings.
-    """
-    __tablename__ = "degree_offerings"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    department_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    degree_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    level: Mapped[str] = mapped_column(String(50), nullable=False)
-    accreditation_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-
-class GaaPerformance(Base):
-    """
-    DICT Annex A-4: GAA institutional target performance indicators.
-    """
-    __tablename__ = "gaa_performance"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    indicator_name: Mapped[str] = mapped_column(String(250), nullable=False)
-    target_value: Mapped[str] = mapped_column(String(100), nullable=False)
-
-
-# ==========================================================
-# DICT GLOSSARY & INSTRUCTIONS REGISTRY
-# ==========================================================
-
-class GlossaryTerm(Base):
-    """
-    Dynamic dictionary containing vocabulary definitions (Pages 6-10 compliance framework).
-    """
-    __tablename__ = "glossary_terms"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    term: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    definition: Mapped[str] = mapped_column(Text, nullable=False)
-    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-
-class GeneralInstruction(Base):
-    """
-    General Submission Guidelines Configuration (Page 11 compliance framework).
-    """
-    __tablename__ = "general_instructions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    step_number: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
-    instruction_text: Mapped[str] = mapped_column(Text, nullable=False)
-
-
-# ==========================================================
-# DICT MITHI INVENTORIES & OS REGISTRIES
-# ==========================================================
-
-class ServerCapacityTrack(Base):
-    """
-    Section 1.3 server hosting storage profile census tracking capacity allocations.
-    """
-    __tablename__ = "server_capacity_tracking"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    campus_id: Mapped[int] = mapped_column(ForeignKey("campuses.id", ondelete="CASCADE"), nullable=False, index=True)
-    capacity_tier: Mapped[str] = mapped_column(String(50), nullable=False)
-    location: Mapped[str] = mapped_column(String(50), nullable=False)
-    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-
-    campus: Mapped[Campus] = relationship("Campus", back_populates="server_capacities")
-
-
-class ClientOsCensus(Base):
-    """
-    Section 2.1 client operating systems licenses tracking.
-    """
-    __tablename__ = "client_os_census"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    os_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    workstations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    servers_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-
-class OfficeSoftwareCensus(Base):
-    """
-    Section 2.2 office productivity automation licenses tracking.
-    """
-    __tablename__ = "office_software_census"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    software_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    license_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-
-# ==========================================================
-# PART IV.B RELATIONAL STAFFING SYSTEM (Staff Registry)
-# ==========================================================
-
-class IctStaffPosition(Base):
-    """
-    Part IV.B: Relational mapping for the SUC ICT Organizational structure.
-    Tracks active staffing positions, classifications (Permanent, Casual, Contractual),
-    and headcounts to fulfill compliance reporting requirements.
-    """
-    __tablename__ = "ict_staff_positions"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
-        nullable=False,
-        index=True
-    )
-    position_title: Mapped[str] = mapped_column(String(150), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), nullable=False)
-    count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="staff_positions_relation")
-
-
-# ==========================================================
-# CORE REGISTRIES & COLLABORATIVE MATRIX
-# ==========================================================
-
-class StrategicConcern(Base):
-    """
-    Table I.E: Relational Strategic Concerns KRA/MFO mapping directory.
-    """
-    __tablename__ = "strategic_concerns"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    mfo: Mapped[str] = mapped_column(String(255), nullable=False)
-    critical_system: Mapped[str] = mapped_column(String(255), nullable=False)
-    problems: Mapped[str] = mapped_column(Text, nullable=False)
-    intended_use: Mapped[str] = mapped_column(Text, nullable=False)
-    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="strategic_concerns_relation")
-
-
-class CoreOfficeFunction(Base):
-    """
-    Annex A-3: Physical directory detailing authorized organizational functions of the SUC offices.
-    """
-    __tablename__ = "core_office_functions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    office_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    division: Mapped[str] = mapped_column(String(100), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="office_functions_relation")
-
-
-class CrossAgencyProject(Base):
-    """
-    Part III.B: Joint cross-government cooperative systems initiatives.
-    """
-    __tablename__ = "cross_agency_projects"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    objectives: Mapped[str] = mapped_column(Text, nullable=False)
-    duration: Mapped[str] = mapped_column(String(100), nullable=False)
-    deliverables: Mapped[str] = mapped_column(Text, nullable=False)
-    lead_agency: Mapped[str] = mapped_column(String(150), nullable=False)
-    implementing_agencies: Mapped[str] = mapped_column(String(200), nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="cross_projects_relation")
-
-
-class PerformanceMetric(Base):
-    """
-    Part III.C: Performance Measurement Framework (PMF) milestones and verification indices.
-    """
-    __tablename__ = "performance_metrics"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    project_title: Mapped[str] = mapped_column(String(200), nullable=False)
-    result_hierarchy: Mapped[str] = mapped_column(String(100), nullable=False)
-    indicator: Mapped[str] = mapped_column(Text, nullable=False)
-    baseline: Mapped[str] = mapped_column(String(200), nullable=False)
-    target: Mapped[str] = mapped_column(String(200), nullable=False)
-    collection_method: Mapped[str] = mapped_column(String(200), nullable=False)
-    responsibility: Mapped[str] = mapped_column(String(150), nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="performance_metrics_relation")
-
-
-class AnnualCostBreakdown(Base):
-    """
-    Part V.D / Annex A-5: Standard cost allocation matrix details for SUC CapEx, MOOE and Continuing programs.
-    """
-    __tablename__ = "annual_cost_breakdown"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    project_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    cost_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    item_description: Mapped[str] = mapped_column(String(200), nullable=False)
-    unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
-    yearly_quantities: Mapped[Dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="annual_costs_relation")
-
-
-# ==========================================================
-# MASTER NARRATIVE ARCHITECTURE
-# ==========================================================
-
-class MasterNarrative(Base):
-    """
-    Central database table storing all MIS Admin authored narratives, 
-    diagram associations, matrices, and dynamic template layout parameters.
-    """
-    __tablename__ = "master_narratives"
-
-    issp_period: Mapped[str] = mapped_column(String(50), primary_key=True)
-    agency_name: Mapped[str] = mapped_column(
-        String(255), 
-        default="Camarines Sur Polytechnic Colleges", 
-        nullable=False
-    )
-    issp_period_from: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    issp_period_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    agency_website_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-
-    scope_choice: Mapped[Optional[ScopeChoice]] = mapped_column(Enum(ScopeChoice), nullable=True)
-    scope_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    agency_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    cert_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    transmittal_recipient: Mapped[Optional[str]] = mapped_column(
-        String(255), 
-        default="ATTY. IVAN JOHN E. UY", 
-        nullable=True
-    )
-    transmittal_recipient_title: Mapped[Optional[str]] = mapped_column(
-        String(255), 
-        default="Secretary", 
-        nullable=True
-    )
-    transmittal_recipient_agency: Mapped[Optional[str]] = mapped_column(
-        String(255), 
-        default="Department of Information and Communications Technology", 
-        nullable=True
-    )
-    transmittal_recipient_address: Mapped[Optional[str]] = mapped_column(
-        Text, 
-        default="DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City", 
-        nullable=True
-    )
-    transmittal_date: Mapped[Optional[str]] = mapped_column(
-        String(50), 
-        default="22 February 2023", 
-        nullable=True
-    )
-
-    signatory_prepared_by: Mapped[str] = mapped_column(String(200), nullable=False)
-    preparer_position: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    preparer_tel: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    preparer_fax: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    preparer_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-
-    signatory_approved_by: Mapped[str] = mapped_column(String(200), nullable=False)
-
-    mandate_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    vision_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    mission_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    present_situation_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-
-    planners_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    manpower_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    annual_ict_budget: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
-    org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    major_final_outputs: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    core_offices_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    strategic_concerns_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-
-    conceptual_framework_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    network_layout_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    systems_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    databases_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-
-    internal_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    cross_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    pmf_matrix_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-
-    existing_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    proposed_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    placement_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    mithi_network_profile: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_special_solutions: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    mithi_data_center: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_hardware_inventory: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    
-    mithi_security_dr: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_data_archiving: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_ict_issues: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-
-    implementation_schedules: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    functional_interface_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    
-    site_development_plan_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    network_topology_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    process_flow_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    proposals: Mapped[List[Proposal]] = relationship(
-        "Proposal", 
-        back_populates="master_narrative",
-        cascade="save-update, merge",
-        passive_deletes=True
-    )
-    subscriptions: Mapped[List[SubscriptionProposal]] = relationship(
-        "SubscriptionProposal", 
-        back_populates="master_narrative",
-        cascade="save-update, merge",
-        passive_deletes=True
-    )
-    
-    strategic_concerns_relation: Mapped[List[StrategicConcern]] = relationship(
-        "StrategicConcern", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    office_functions_relation: Mapped[List[CoreOfficeFunction]] = relationship(
-        "CoreOfficeFunction", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    cross_projects_relation: Mapped[List[CrossAgencyProject]] = relationship(
-        "CrossAgencyProject", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    performance_metrics_relation: Mapped[List[PerformanceMetric]] = relationship(
-        "PerformanceMetric", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    annual_costs_relation: Mapped[List[AnnualCostBreakdown]] = relationship(
-        "AnnualCostBreakdown", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    staff_positions_relation: Mapped[List[IctStaffPosition]] = relationship(
-        "IctStaffPosition",
-        back_populates="master_narrative",
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-
-# ==========================================================
-# AUTOMATED PAYLOAD SYNCHRONIZATION EVENT LISTENERS
-# ==========================================================
-
-@event.listens_for(Proposal, 'before_insert')
-@event.listens_for(Proposal, 'before_update')
-def receive_before_save(mapper, connection, target):
-    if target.yearly_quantities:
-        target.total_qty = sum(int(qty) for qty in target.yearly_quantities.values() if qty is not None)
-    else:
-        target.total_qty = 0
-    target.sync_payload()
-
-
-@event.listens_for(SubscriptionProposal, 'before_insert')
-@event.listens_for(SubscriptionProposal, 'before_update')
-def receive_subscription_before_save(mapper, connection, target):
-    if target.yearly_users and target.annual_cost_per_user:
-        accumulated_mooe = Decimal("0.00")
-        for year, users in target.yearly_users.items():
-            if users is not None:
-                accumulated_mooe += Decimal(str(users)) * target.annual_cost_per_user
-        target.total_multiyear_mooe = accumulated_mooe
-    else:
-        target.total_multiyear_mooe = Decimal("0.00")
-    target.sync_payload()
-
-
-@event.listens_for(ExistingInventory, 'before_insert')
-@event.listens_for(ExistingInventory, 'before_update')
-def validate_inventory_state(mapper, connection, target):
-    if target.status in [AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR]:
-        if not target.unserviceable_report_url or not target.unserviceable_report_url.strip():
-            raise BusinessRuleViolation(
-                "An Unserviceable Report PDF URL is mandatory for Condemned or Needs Repair items."
-            )
-
-
-class AuditTrail(Base):
-    """
-    Provides immutable system auditing required for COA policy adherence.
-    Ensures log history is preserved securely when target users or items are deleted.
-    """
-    __tablename__ = "audit_trails"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    proposal_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        ForeignKey("issp_core.id", ondelete="SET NULL"), 
-        nullable=True
-    )
-    subscription_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        ForeignKey("subscription_proposals.id", ondelete="SET NULL"), 
-        nullable=True
-    )
-    action: Mapped[str] = mapped_column(String(100), nullable=False)
-    user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), 
-        nullable=True
-    )
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), 
-        server_default=func.now(), 
-        nullable=False
-    )
-    old_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
-    new_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
-
-    proposal: Mapped[Optional[Proposal]] = relationship("Proposal", foreign_keys=[proposal_id], back_populates="audit_logs")
-    subscription: Mapped[Optional[SubscriptionProposal]] = relationship("SubscriptionProposal", foreign_keys=[subscription_id], back_populates="audit_logs")
-    user: Mapped[Optional[User]] = relationship("User")
-
-
-# ==========================================================
-# DICT ANNEX A-4 STRUCTURAL ADDITIONS
-# ==========================================================
-
-class DegreeOffering(Base):
-    """
-    DICT Annex A-4: Dynamic collection of graduate and undergraduate degree offerings.
-    """
-    __tablename__ = "degree_offerings"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    department_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    degree_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    level: Mapped[str] = mapped_column(String(50), nullable=False)
-    accreditation_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-
-class GaaPerformance(Base):
-    """
-    DICT Annex A-4: GAA institutional target performance indicators.
-    """
-    __tablename__ = "gaa_performance"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    indicator_name: Mapped[str] = mapped_column(String(250), nullable=False)
-    target_value: Mapped[str] = mapped_column(String(100), nullable=False)
-
-
-# ==========================================================
-# DICT GLOSSARY & INSTRUCTIONS REGISTRY
-# ==========================================================
-
-class GlossaryTerm(Base):
-    """
-    Dynamic dictionary containing vocabulary definitions (Pages 6-10 compliance framework).
-    """
-    __tablename__ = "glossary_terms"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    term: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    definition: Mapped[str] = mapped_column(Text, nullable=False)
-    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-
-class GeneralInstruction(Base):
-    """
-    General Submission Guidelines Configuration (Page 11 compliance framework).
-    """
-    __tablename__ = "general_instructions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    step_number: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
-    instruction_text: Mapped[str] = mapped_column(Text, nullable=False)
-
-
-# ==========================================================
-# DICT MITHI INVENTORIES & OS REGISTRIES
-# ==========================================================
-
-class ServerCapacityTrack(Base):
-    """
-    Section 1.3 server hosting storage profile census tracking capacity allocations.
-    """
-    __tablename__ = "server_capacity_tracking"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    campus_id: Mapped[int] = mapped_column(ForeignKey("campuses.id", ondelete="CASCADE"), nullable=False, index=True)
-    capacity_tier: Mapped[str] = mapped_column(String(50), nullable=False)
-    location: Mapped[str] = mapped_column(String(50), nullable=False)
-    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-
-    campus: Mapped[Campus] = relationship("Campus", back_populates="server_capacities")
-
-
-class ClientOsCensus(Base):
-    """
-    Section 2.1 client operating systems licenses tracking.
-    """
-    __tablename__ = "client_os_census"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    os_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    workstations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    servers_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-
-class OfficeSoftwareCensus(Base):
-    """
-    Section 2.2 office productivity automation licenses tracking.
-    """
-    __tablename__ = "office_software_census"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    software_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    license_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-
-# ==========================================================
-# PART IV.B RELATIONAL STAFFING SYSTEM (Staff Registry)
-# ==========================================================
-
-class IctStaffPosition(Base):
-    """
-    Part IV.B: Relational mapping for the SUC ICT Organizational structure.
-    Tracks active staffing positions, classifications (Permanent, Casual, Contractual),
-    and headcounts to fulfill compliance reporting requirements.
-    """
-    __tablename__ = "ict_staff_positions"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
-        nullable=False,
-        index=True
-    )
-    position_title: Mapped[str] = mapped_column(String(150), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), nullable=False)
-    count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="staff_positions_relation")
-
-
-# ==========================================================
-# CORE REGISTRIES & COLLABORATIVE MATRIX
-# ==========================================================
-
-class StrategicConcern(Base):
-    """
-    Table I.E: Relational Strategic Concerns KRA/MFO mapping directory.
-    """
-    __tablename__ = "strategic_concerns"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    mfo: Mapped[str] = mapped_column(String(255), nullable=False)
-    critical_system: Mapped[str] = mapped_column(String(255), nullable=False)
-    problems: Mapped[str] = mapped_column(Text, nullable=False)
-    intended_use: Mapped[str] = mapped_column(Text, nullable=False)
-    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="strategic_concerns_relation")
-
-
-class CoreOfficeFunction(Base):
-    """
-    Annex A-3: Physical directory detailing authorized organizational functions of the SUC offices.
-    """
-    __tablename__ = "core_office_functions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    office_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    division: Mapped[str] = mapped_column(String(100), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="office_functions_relation")
-
-
-class CrossAgencyProject(Base):
-    """
-    Part III.B: Joint cross-government cooperative systems initiatives.
-    """
-    __tablename__ = "cross_agency_projects"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    objectives: Mapped[str] = mapped_column(Text, nullable=False)
-    duration: Mapped[str] = mapped_column(String(100), nullable=False)
-    deliverables: Mapped[str] = mapped_column(Text, nullable=False)
-    lead_agency: Mapped[str] = mapped_column(String(150), nullable=False)
-    implementing_agencies: Mapped[str] = mapped_column(String(200), nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="cross_projects_relation")
-
-
-class PerformanceMetric(Base):
-    """
-    Part III.C: Performance Measurement Framework (PMF) milestones and verification indices.
-    """
-    __tablename__ = "performance_metrics"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    project_title: Mapped[str] = mapped_column(String(200), nullable=False)
-    result_hierarchy: Mapped[str] = mapped_column(String(100), nullable=False)
-    indicator: Mapped[str] = mapped_column(Text, nullable=False)
-    baseline: Mapped[str] = mapped_column(String(200), nullable=False)
-    target: Mapped[str] = mapped_column(String(200), nullable=False)
-    collection_method: Mapped[str] = mapped_column(String(200), nullable=False)
-    responsibility: Mapped[str] = mapped_column(String(150), nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="performance_metrics_relation")
-
-
-class AnnualCostBreakdown(Base):
-    """
-    Part V.D / Annex A-5: Standard cost allocation matrix details for SUC CapEx, MOOE and Continuing programs.
-    """
-    __tablename__ = "annual_cost_breakdown"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    issp_period: Mapped[str] = mapped_column(
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
-        nullable=False,
-        index=True
-    )
-    project_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    cost_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    item_description: Mapped[str] = mapped_column(String(200), nullable=False)
-    unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
-    yearly_quantities: Mapped[Dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
-
-    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="annual_costs_relation")
-
-
-# ==========================================================
-# MASTER NARRATIVE ARCHITECTURE
-# ==========================================================
-
-class MasterNarrative(Base):
-    """
-    Central database table storing all MIS Admin authored narratives, 
-    diagram associations, matrices, and dynamic template layout parameters.
-    """
-    __tablename__ = "master_narratives"
-
-    issp_period: Mapped[str] = mapped_column(String(50), primary_key=True)
-    agency_name: Mapped[str] = mapped_column(
-        String(255), 
-        default="Camarines Sur Polytechnic Colleges", 
-        nullable=False
-    )
-    issp_period_from: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    issp_period_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    agency_website_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-
-    scope_choice: Mapped[Optional[ScopeChoice]] = mapped_column(Enum(ScopeChoice), nullable=True)
-    scope_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    agency_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    cert_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    transmittal_recipient: Mapped[Optional[str]] = mapped_column(
-        String(255), 
-        default="ATTY. IVAN JOHN E. UY", 
-        nullable=True
-    )
-    transmittal_recipient_title: Mapped[Optional[str]] = mapped_column(
-        String(255), 
-        default="Secretary", 
-        nullable=True
-    )
-    transmittal_recipient_agency: Mapped[Optional[str]] = mapped_column(
-        String(255), 
-        default="Department of Information and Communications Technology", 
-        nullable=True
-    )
-    transmittal_recipient_address: Mapped[Optional[str]] = mapped_column(
-        Text, 
-        default="DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City", 
-        nullable=True
-    )
-    transmittal_date: Mapped[Optional[str]] = mapped_column(
-        String(50), 
-        default="22 February 2023", 
-        nullable=True
-    )
-
-    signatory_prepared_by: Mapped[str] = mapped_column(String(200), nullable=False)
-    preparer_position: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    preparer_tel: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    preparer_fax: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    preparer_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-
-    signatory_approved_by: Mapped[str] = mapped_column(String(200), nullable=False)
-
-    mandate_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    vision_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    mission_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    present_situation_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
-
-    planners_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    manpower_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    annual_ict_budget: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
-    org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    major_final_outputs: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    core_offices_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    strategic_concerns_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-
-    conceptual_framework_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    network_layout_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    systems_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    databases_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-
-    internal_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    cross_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    pmf_matrix_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-
-    existing_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    proposed_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    placement_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    mithi_network_profile: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_special_solutions: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    mithi_data_center: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_hardware_inventory: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    
-    mithi_security_dr: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_data_archiving: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-    mithi_ict_issues: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
-
-    implementation_schedules: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    functional_interface_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    
-    site_development_plan_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    network_topology_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    process_flow_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    proposals: Mapped[List[Proposal]] = relationship(
-        "Proposal", 
-        back_populates="master_narrative",
-        cascade="save-update, merge",
-        passive_deletes=True
-    )
-    subscriptions: Mapped[List[SubscriptionProposal]] = relationship(
-        "SubscriptionProposal", 
-        back_populates="master_narrative",
-        cascade="save-update, merge",
-        passive_deletes=True
-    )
-    
-    strategic_concerns_relation: Mapped[List[StrategicConcern]] = relationship(
-        "StrategicConcern", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    office_functions_relation: Mapped[List[CoreOfficeFunction]] = relationship(
-        "CoreOfficeFunction", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    cross_projects_relation: Mapped[List[CrossAgencyProject]] = relationship(
-        "CrossAgencyProject", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    performance_metrics_relation: Mapped[List[PerformanceMetric]] = relationship(
-        "PerformanceMetric", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    annual_costs_relation: Mapped[List[AnnualCostBreakdown]] = relationship(
-        "AnnualCostBreakdown", 
-        back_populates="master_narrative", 
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-    staff_positions_relation: Mapped[List[IctStaffPosition]] = relationship(
-        "IctStaffPosition",
-        back_populates="master_narrative",
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )
-
-
-# ==========================================================
-# AUTOMATED PAYLOAD SYNCHRONIZATION EVENT LISTENERS
-# ==========================================================
-
-@event.listens_for(Proposal, 'before_insert')
-@event.listens_for(Proposal, 'before_update')
-def receive_before_save(mapper, connection, target):
-    if target.yearly_quantities:
-        target.total_qty = sum(int(qty) for qty in target.yearly_quantities.values() if qty is not None)
-    else:
-        target.total_qty = 0
-    target.sync_payload()
-
-
-@event.listens_for(SubscriptionProposal, 'before_insert')
-@event.listens_for(SubscriptionProposal, 'before_update')
-def receive_subscription_before_save(mapper, connection, target):
-    if target.yearly_users and target.annual_cost_per_user:
-        accumulated_mooe = Decimal("0.00")
-        for year, users in target.yearly_users.items():
-            if users is not None:
-                accumulated_mooe += Decimal(str(users)) * target.annual_cost_per_user
-        target.total_multiyear_mooe = accumulated_mooe
-    else:
-        target.total_multiyear_mooe = Decimal("0.00")
-    target.sync_payload()
-
-
-@event.listens_for(ExistingInventory, 'before_insert')
-@event.listens_for(ExistingInventory, 'before_update')
-def validate_inventory_state(mapper, connection, target):
-    if target.status in [AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR]:
-        if not target.unserviceable_report_url or not target.unserviceable_report_url.strip():
-            raise BusinessRuleViolation(
-                "An Unserviceable Report PDF URL is mandatory for Condemned or Needs Repair items."
-            )
 
 
 class AuditTrail(Base):

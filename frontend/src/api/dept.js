@@ -201,3 +201,12 @@ export async function resolveComment(proposalId, commentId) {
   const res = await fetch(`${API_BASE_URL}/api/dept/proposals/${proposalId}/comments/${commentId}/resolve`, { method: "POST", headers: getHeaders() });
   return handleResponse(res, "Failed to resolve comment");
 }
+
+// ==========================================================
+// 8. UNIFIED NOTIFICATIONS
+// ==========================================================
+
+export async function getNotifications() {
+  const res = await fetch(`${API_BASE_URL}/api/dept/notifications`, { headers: getHeaders() });
+  return handleResponse(res, "Failed to load notifications");
+}
