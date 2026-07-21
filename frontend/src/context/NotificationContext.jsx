@@ -1,7 +1,6 @@
 // frontend/src/context/NotificationContext.jsx
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { useAuth } from './AuthContext'; // Adjust this import path if your AuthContext is located elsewhere
-import api from '../services/api'; // Adjust this import path if your axios instance is located elsewhere
+import { useAuth } from './AuthContext';
 
 const NotificationContext = createContext(null);
 
@@ -11,12 +10,24 @@ export function NotificationProvider({ children }) {
   const [returnedCount, setReturnedCount] = useState(0);
 
   const fetchNotifications = useCallback(async () => {
-    // Only poll the backend if the active user is a Department User
-    if (user?.role === 'ROLE_DEPT_USER') {
+    // Only poll the backend if the active user is a Department User with a valid token
+    if (user?.role === 'ROLE_DEPT_USER' && user?.token) {
       try {
-        const response = await api.get('/api/dept/action-items/summary');
-        setActionCount(response.data.unread_actions || 0);
-        setReturnedCount(response.data.returned_proposals || 0);
+        const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+        const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+        const token = user.token;
+
+        const response = await fetch(`${apiUrl}/api/dept/action-items/summary`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        if (!response.ok) {
+          throw new Error("Failed to fetch notification summary");
+        }
+
+        const data = await response.json();
+        setActionCount(data.unread_actions || 0);
+        setReturnedCount(data.returned_proposals || 0);
       } catch (error) {
         console.error("Failed to fetch notification summary:", error);
       }

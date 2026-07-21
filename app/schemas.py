@@ -1,6 +1,7 @@
 # app/schemas.py
 import uuid
 import html
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
@@ -25,6 +26,17 @@ MFO_MAPPING = {
 def sanitize_text(v: Optional[str]) -> Optional[str]:
     if v is not None:
         return html.escape(v.strip())
+    return v
+
+# Shared utility to safely parse stringified JSON returned by database dialects (e.g. SQLite)
+def deserialize_json_if_string(v: Any) -> Any:
+    if isinstance(v, str):
+        v_clean = v.strip()
+        if (v_clean.startswith("{") and v_clean.endswith("}")) or (v_clean.startswith("[") and v_clean.endswith("]")):
+            try:
+                return json.loads(v_clean)
+            except Exception:
+                pass
     return v
 
 
@@ -305,6 +317,12 @@ class ProposalResponse(BaseModel):
     is_restoring: bool = Field(False, description="True if a cold archival retrieval is currently processing")
     is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
 
+    @field_validator('yearly_quantities', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        """Resolves stringified JSON outputs returned by SQLite driver implementations"""
+        return deserialize_json_if_string(v)
+
     @field_validator('s3_storage_class', mode='before')
     @classmethod
     def resolve_storage_class(cls, v: str) -> str:
@@ -345,6 +363,12 @@ class SubscriptionProposalCreate(BaseModel):
     @classmethod
     def sanitize_subscription_texts(cls, v: Optional[str]) -> Optional[str]:
         return sanitize_text(v)
+
+    @field_validator('yearly_users', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        """Resolves stringified JSON outputs returned by SQLite driver implementations"""
+        return deserialize_json_if_string(v)
 
     @field_validator('target_offices_json')
     @classmethod
@@ -418,6 +442,11 @@ class AdminHardwareOverride(BaseModel):
     target_offices_json: Optional[List[str]] = None
     project_key: Optional[str] = Field(None, description="Overridden strategic project key mapping")
 
+    @field_validator('yearly_quantities', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     @field_validator('yearly_quantities')
     @classmethod
     def validate_quantities_override(cls, v: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
@@ -443,6 +472,11 @@ class AdminSubscriptionOverride(BaseModel):
     annual_cost_per_user: Optional[Decimal] = Field(None, ge=0, le=100_000_000)
     target_offices_json: Optional[List[str]] = None
     project_key: Optional[str] = Field(None, description="Overridden strategic project key mapping")
+
+    @field_validator('yearly_users', 'target_offices_json', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
     @field_validator('yearly_users')
     @classmethod
@@ -790,6 +824,11 @@ class MithiHardwareItemSchema(BaseModel):
     yearly_leased: Dict[str, int] = Field(default_factory=dict, description="Map of calendar year strings to leased quantities")
     older_than_3_years: int = Field(0, ge=0, description="Total units older than 3 years")
 
+    @field_validator('yearly_owned', 'yearly_leased', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     @model_validator(mode='after')
     def validate_mithi_hardware(self) -> 'MithiHardwareItemSchema':
         for year, val in self.yearly_owned.items():
@@ -814,6 +853,11 @@ class ImplementationScheduleItem(BaseModel):
     project_id: uuid.UUID
     project_name: str
     milestones: Dict[str, bool] = Field(..., description="Active checkmarks (e.g., {'2026_Q1': True, '2026_Q2': False})")
+
+    @field_validator('milestones', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
 
 # ==========================================================
@@ -840,6 +884,11 @@ class MithiDataArchivingSchema(BaseModel):
     archiving_mode: str = Field("Manual", description="Archiving mode: Manual, Electronic, Both")
     archiving_medium: List[str] = Field(default_factory=list, description="Storage media: Optical, Hard Disk, Tape, etc.")
     archived_information: List[str] = Field(default_factory=list, description="Classifications: Publications, Letters, etc.")
+
+    @field_validator('archiving_medium', 'archived_information', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
 
 class MithiIctIssuesSchema(BaseModel):
@@ -939,9 +988,9 @@ class MasterNarrativeUpdate(BaseModel):
     placement_ict_org_url: Optional[str] = Field(None, description="Path to placement of proposed ICT organizational structure in institutional chart")
     
     # Advanced structured fields derived from technical forms and planning requirements
-    site_development_plan_url: Optional[str] = Field(None, description="Path to the uploaded Annex A-2 Campus Site Development Plan")
-    fiber_backbone_url: Optional[str] = Field(None, description="Path to the uploaded Fiber Optic Backbone Cabling Diagram")
-    system_architecture_url: Optional[str] = Field(None, description="Path to the uploaded System Architecture Diagram")
+    site_development_plan_url: Optional[str] = Field(None, description="Path to the original uploaded Annex A-2 Campus Site Development Plan")
+    fiber_backbone_url: Optional[str] = Field(None, description="Path to the original uploaded Fiber Optic Backbone Cabling Diagram")
+    system_architecture_url: Optional[str] = Field(None, description="Path to the original uploaded System Architecture Diagram")
     
     # CSPC Network Diagram & Core topology (Page 129 compliance layout element)
     network_topology_url: Optional[str] = Field(None, description="Path to the uploaded CSPC Network Diagram & Core topology")
@@ -960,6 +1009,17 @@ class MasterNarrativeUpdate(BaseModel):
     mithi_ict_issues: Optional[MithiIctIssuesSchema] = Field(None, description="DICT Annex A-1 Section 8.2 ICT Issues checklists")
 
     implementation_schedules: Optional[List[ImplementationScheduleItem]] = Field([], description="Timelines and schedule milestones")
+
+    @field_validator(
+        'scope_json', 'planners_json', 'manpower_json', 'major_final_outputs', 'core_offices_json',
+        'strategic_concerns_json', 'systems_json', 'databases_json', 'internal_projects_json',
+        'cross_projects_json', 'pmf_matrix_json', 'mithi_network_profile', 'mithi_special_solutions',
+        'mithi_data_center', 'mithi_hardware_inventory', 'mithi_security_dr', 'mithi_data_archiving',
+        'mithi_ict_issues', 'implementation_schedules', mode='before'
+    )
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
 
     @model_validator(mode='after')
     def validate_issp_cycle_range(self) -> 'MasterNarrativeUpdate':
@@ -1044,13 +1104,26 @@ class MasterNarrativeResponse(BaseModel):
 
     implementation_schedules: List[ImplementationScheduleItem] = []
 
+    @field_validator(
+        'planners_json', 'manpower_json', 'core_offices_json', 'strategic_concerns_json',
+        'systems_json', 'databases_json', 'internal_projects_json', 'cross_projects_json',
+        'pmf_matrix_json', 'mithi_network_profile', 'mithi_special_solutions',
+        'mithi_data_center', 'mithi_hardware_inventory', 'mithi_security_dr',
+        'mithi_data_archiving', 'mithi_ict_issues', 'implementation_schedules',
+        mode='before'
+    )
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     # Coerce empty JSON dictionary inputs to None to prevent Pydantic validation crashes
     @field_validator('mithi_network_profile', 'mithi_data_center', 'manpower_json', mode='before')
     @classmethod
     def clear_empty_dicts(cls, v: Any) -> Any:
-        if isinstance(v, dict) and not v:
+        v_deserialized = deserialize_json_if_string(v)
+        if isinstance(v_deserialized, dict) and not v_deserialized:
             return None
-        return v
+        return v_deserialized
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1331,11 +1404,16 @@ class InvestmentSummaryRow(BaseModel):
     total_quantity: int
     total_cost: Decimal
 
+    @field_validator('yearly_quantities', 'yearly_costs', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
 
 # --- Gap 11/12: Annual Cost Breakdown & Continuing Institutional Costs ---
 class AnnualCostBreakdownCreate(BaseModel):
     project_key: str = Field(..., example="WiFi")
-    cost_type: str = Field(..., example="CapEx")
+    text_type: str = Field(..., example="CapEx")
     item_description: str = Field(..., example="Enterprise Access Point")
     unit_cost: Decimal = Field(..., ge=0)
     yearly_quantities: Dict[str, int] = Field(default_factory=dict, example={"2026": 5, "2027": 0, "2028": 0})
@@ -1349,6 +1427,12 @@ class AnnualCostBreakdownResponse(BaseModel):
     item_description: str
     unit_cost: Decimal
     yearly_quantities: Dict[str, int]
+
+    @field_validator('yearly_quantities', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -1370,3 +1454,8 @@ class DeploymentResponse(BaseModel):
 class MilestoneUpdatePayload(BaseModel):
     project_id: uuid.UUID
     milestones: Dict[str, bool] = Field(..., example={"2026_Q1": True, "2026_Q2": True, "2026_Q3": False, "2026_Q4": False})
+
+    @field_validator('milestones', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        return deserialize_json_if_string(v)

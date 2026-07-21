@@ -51,6 +51,8 @@ from app.schemas import (
     CatalogItemCreate, 
     CatalogItemUpdate, 
     CatalogItemResponse,
+    ProposalResponse,              # <--- Added to the imports
+    SubscriptionProposalResponse,
     WhitelistedUserCreate,
     WhitelistedUserUpdate,
     WhitelistedUserResponse,
@@ -878,7 +880,7 @@ def return_proposal(
 # QUEUES & OVERRIDES
 # ==========================================================
 
-@router.get("/proposals")
+@router.get("/proposals", response_model=List[ProposalResponse])  # <--- Added response_model here
 def get_admin_master_queue(
     dept_id: Optional[int] = Query(None),
     status_filter: Optional[ProposalStatus] = Query(None),
@@ -904,7 +906,7 @@ def get_admin_master_queue(
         )
 
 
-@router.get("/subscriptions")
+@router.get("/subscriptions", response_model=List[SubscriptionProposalResponse])  # <--- Added response_model here
 def get_admin_subscription_queue(
     dept_id: Optional[int] = Query(None),
     status_filter: Optional[ProposalStatus] = Query(None),

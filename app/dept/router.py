@@ -32,6 +32,7 @@ from app.schemas import (
     InventoryCreate, 
     InventoryResponse, 
     ProposalUpdatePayload, 
+    ProposalResponse,  # <--- Added ProposalResponse to the imports
     CommentCreate,
     CatalogItemResponse,
     NeedsAssessmentCreate, 
@@ -497,7 +498,7 @@ def get_existing_inventory(
     ).offset(skip).limit(limit).all()
 
 
-@router.get("/proposals")
+@router.get("/proposals", response_model=List[ProposalResponse])  # <--- Added response_model here
 def get_departmental_proposals(
     issp_period_filter: Optional[str] = Query(None, alias="issp_period"),
     status_filter: Optional[ProposalStatus] = Query(None),
@@ -519,7 +520,7 @@ def get_departmental_proposals(
     return query.offset(skip).limit(limit).all()
 
 
-@router.get("/proposals/{proposal_id}")
+@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)  # <--- Added response_model here
 def get_proposal_detail(
     proposal_id: uuid.UUID,
     db: Session = Depends(get_db),

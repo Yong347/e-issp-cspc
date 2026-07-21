@@ -721,6 +721,12 @@ with open(OUTPUT_FILE, 'w', encoding='utf-8') as outfile:
 print(f"Success! Core architecture blueprint saved to {OUTPUT_FILE}")
 
 =========================================
+CORE SYSTEM FILE: .\test.py
+=========================================
+
+
+
+=========================================
 CORE SYSTEM FILE: .\test_issp.py
 =========================================
 
@@ -3485,6 +3491,8 @@ from app.schemas import (
     CatalogItemCreate, 
     CatalogItemUpdate, 
     CatalogItemResponse,
+    ProposalResponse,              # <--- Added to the imports
+    SubscriptionProposalResponse,
     WhitelistedUserCreate,
     WhitelistedUserUpdate,
     WhitelistedUserResponse,
@@ -3569,6 +3577,15 @@ def create_department(
     try:
         new_dept = Department(name=clean_name)
         db.add(new_dept)
+        db.flush() # Flush to get the ID for the audit trail
+        
+        audit = AuditTrail(
+            action="SYSTEM_DEPARTMENT_CREATED",
+            user_id=admin["id"],
+            old_value=None,
+            new_value={"department_id": new_dept.id, "department_name": new_dept.name}
+        )
+        db.add(audit)
         db.commit()
         db.refresh(new_dept)
         return {"status": "success", "department_id": new_dept.id, "department_name": new_dept.name}
@@ -3600,7 +3617,16 @@ def update_department(
         if existing:
             raise HTTPException(status_code=400, detail="Department name already exists in the system registry.")
         
+        old_name = dept.name
         dept.name = clean_name
+        
+        audit = AuditTrail(
+            action="SYSTEM_DEPARTMENT_MODIFIED",
+            user_id=admin["id"],
+            old_value={"department_id": dept.id, "department_name": old_name},
+            new_value={"department_id": dept.id, "department_name": clean_name}
+        )
+        db.add(audit)
         db.commit()
         return {"status": "success", "department_id": dept.id, "department_name": dept.name}
     except HTTPException:
@@ -3629,6 +3655,14 @@ def delete_department(
                 detail=f"Cannot delete department. There are {linked_users_count} whitelisted users linked to this division."
             )
             
+        audit = AuditTrail(
+            action="SYSTEM_DEPARTMENT_DELETED",
+            user_id=admin["id"],
+            old_value={"department_id": dept.id, "department_name": dept.name},
+            new_value={"event": "Department removed from system registries."}
+        )
+        db.add(audit)
+        
         db.delete(dept)
         db.commit()
         return {"status": "success", "message": "Department successfully purged from registry."}
@@ -3702,16 +3736,14 @@ def set_active_planning_cycle(
     admin: dict = Depends(require_admin)
 ):
     try:
-        # 1. Identify the previously active cycle before deactivating
         prev_active = db.query(MasterNarrative).filter(
             MasterNarrative.is_active == True,
             MasterNarrative.issp_period != issp_period
         ).first()
+        prev_period = prev_active.issp_period if prev_active else "None"
 
-        # 2. Deactivate ALL other cycles cleanly (Avoids complex boolean-filter query bugs)
         db.query(MasterNarrative).update({MasterNarrative.is_active: False})
 
-        # Parse years from period string
         try:
             years = [int(y) for y in issp_period.split("-") if y.isdigit()]
             from_year = years[0] if len(years) >= 1 else None
@@ -3720,7 +3752,6 @@ def set_active_planning_cycle(
             from_year = None
             to_year = None
 
-        # 3. Get or create target narrative
         target_narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
         if not target_narrative:
             target_narrative = MasterNarrative(
@@ -3734,12 +3765,10 @@ def set_active_planning_cycle(
             db.add(target_narrative)
             db.flush()
         else:
-            # Crucial Fix: Always explicitly populate the year boundaries to prevent unhandled TypeErrors
             target_narrative.issp_period_from = from_year
             target_narrative.issp_period_to = to_year
             target_narrative.is_active = True
 
-        # 4. Clone office templates if the new cycle does not have any yet
         has_offices = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).first()
         if not has_offices and prev_active:
             old_offices = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == prev_active.issp_period).all()
@@ -3752,6 +3781,13 @@ def set_active_planning_cycle(
                 )
                 db.add(cloned_office)
 
+        audit = AuditTrail(
+            action="SYSTEM_ISSP_CYCLE_ACTIVATED",
+            user_id=admin["id"],
+            old_value={"previous_active_cycle": prev_period},
+            new_value={"new_active_cycle": issp_period}
+        )
+        db.add(audit)
         db.commit()
         return {
             "status": "success", 
@@ -3777,6 +3813,13 @@ def reset_planning_cycle(
         db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).delete(synchronize_session=False)
         db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).delete(synchronize_session=False)
         
+        audit = AuditTrail(
+            action="SYSTEM_ISSP_CYCLE_RESET",
+            user_id=admin["id"],
+            old_value={"purged_cycle": issp_period},
+            new_value={"event": "All drafts, submissions, and ceilings linked to this cycle were permanently deleted."}
+        )
+        db.add(audit)
         db.commit()
         return {"status": "success", "message": f"Planning cycle '{issp_period}' and associated data purged successfully."}
     except Exception as e:
@@ -3897,11 +3940,22 @@ def add_user_to_whitelist(
 
         existing = db.query(User).filter(User.email == payload.email).first()
         if existing:
+            old_role = existing.role_tag.value
+            old_dept = existing.department_id
+            
             existing.is_whitelisted = True
             existing.department_id = payload.assigned_department_id
             existing.role_tag = payload.role_tag
             if hashed_pwd:
                 existing.password_hash = hashed_pwd
+                
+            audit = AuditTrail(
+                action="SYSTEM_USER_WHITELIST_MODIFIED",
+                user_id=admin["id"],
+                old_value={"email": existing.email, "role": old_role, "department_id": old_dept},
+                new_value={"email": existing.email, "role": payload.role_tag.value, "department_id": payload.assigned_department_id}
+            )
+            db.add(audit)
             try:
                 db.commit()
                 db.refresh(existing)
@@ -3922,6 +3976,16 @@ def add_user_to_whitelist(
             password_hash=hashed_pwd
         )
         db.add(new_user)
+        db.flush()
+        
+        audit = AuditTrail(
+            action="SYSTEM_USER_WHITELISTED",
+            user_id=admin["id"],
+            old_value=None,
+            new_value={"user_id": new_user.id, "email": new_user.email, "role": payload.role_tag.value, "department_id": payload.assigned_department_id}
+        )
+        db.add(audit)
+        
         try:
             db.commit()
             db.refresh(new_user)
@@ -3955,6 +4019,14 @@ def update_whitelisted_user(
         if not target_user:
             raise HTTPException(status_code=404, detail="Whitelisted user not found.")
 
+        old_state = {
+            "email": target_user.email,
+            "role": target_user.role_tag.value,
+            "department_id": target_user.department_id
+        }
+        
+        new_state = {}
+
         if payload.email is not None:
             parts = payload.email.split('@')
             if len(parts) != 2 or parts[1] != "cspc.edu.ph":
@@ -3964,23 +4036,36 @@ def update_whitelisted_user(
             if existing:
                 raise HTTPException(status_code=400, detail="Email address is already whitelisted.")
             target_user.email = payload.email.lower()
+            new_state["email"] = target_user.email
 
         if payload.role_tag is not None:
             target_user.role_tag = payload.role_tag
+            new_state["role"] = payload.role_tag.value
 
         if payload.assigned_department_id is not None:
             if payload.assigned_department_id == 0:
                 target_user.department_id = None
+                new_state["department_id"] = None
             else:
                 dept = db.query(Department).filter(Department.id == payload.assigned_department_id).first()
                 if not dept:
                     raise HTTPException(status_code=400, detail="Department does not exist.")
                 target_user.department_id = payload.assigned_department_id
+                new_state["department_id"] = payload.assigned_department_id
 
         if payload.password:
             salt = bcrypt.gensalt()
             target_user.password_hash = bcrypt.hashpw(payload.password.encode("utf-8"), salt).decode("utf-8")
+            new_state["password_rotated"] = True
 
+        audit = AuditTrail(
+            action="SYSTEM_USER_WHITELIST_MODIFIED",
+            user_id=admin["id"],
+            old_value=old_state,
+            new_value=new_state
+        )
+        db.add(audit)
+        
         db.commit()
         db.refresh(target_user)
         return target_user
@@ -4005,6 +4090,14 @@ def delete_whitelisted_user(
         
         if user_to_delete.email == admin["email"]:
             raise HTTPException(status_code=400, detail="Administrative lockout protection: You cannot delete your own session account.")
+
+        audit = AuditTrail(
+            action="SYSTEM_USER_REMOVED",
+            user_id=admin["id"],
+            old_value={"user_id": user_to_delete.id, "email": user_to_delete.email, "role": user_to_delete.role_tag.value},
+            new_value={"event": "User account permanently removed from system whitelist."}
+        )
+        db.add(audit)
 
         db.delete(user_to_delete)
         db.commit()
@@ -4227,7 +4320,7 @@ def return_proposal(
 # QUEUES & OVERRIDES
 # ==========================================================
 
-@router.get("/proposals")
+@router.get("/proposals", response_model=List[ProposalResponse])  # <--- Added response_model here
 def get_admin_master_queue(
     dept_id: Optional[int] = Query(None),
     status_filter: Optional[ProposalStatus] = Query(None),
@@ -4253,7 +4346,7 @@ def get_admin_master_queue(
         )
 
 
-@router.get("/subscriptions")
+@router.get("/subscriptions", response_model=List[SubscriptionProposalResponse])  # <--- Added response_model here
 def get_admin_subscription_queue(
     dept_id: Optional[int] = Query(None),
     status_filter: Optional[ProposalStatus] = Query(None),
@@ -4690,16 +4783,19 @@ def set_departmental_ceiling(
              )
 
         existing_query = db.query(BudgetCeiling).filter(
-            BudgetCeiling.department_id == payload.department_id
-)
+            BudgetCeiling.department_id == payload.department_id,
+            BudgetCeiling.issp_period == issp_period
+        )
         if not is_sqlite:
             existing_query = existing_query.with_for_update()
         existing = existing_query.first()
         
+        old_capex = existing.allocated_capex if existing else Decimal("0.00")
+        old_mooe = existing.allocated_mooe if existing else Decimal("0.00")
+        
         if existing:
             existing.allocated_capex = payload.allocated_capex
             existing.allocated_mooe = payload.allocated_mooe
-            existing.issp_period = issp_period  
         else:
             new_ceiling = BudgetCeiling(
                 department_id=payload.department_id,
@@ -4708,6 +4804,23 @@ def set_departmental_ceiling(
                 issp_period=issp_period
             )
             db.add(new_ceiling)
+        
+        audit = AuditTrail(
+            action="SYSTEM_BUDGET_CEILING_UPDATED",
+            user_id=admin["id"],
+            old_value={
+                "department_id": payload.department_id,
+                "allocated_capex": str(old_capex),
+                "allocated_mooe": str(old_mooe)
+            },
+            new_value={
+                "department_id": payload.department_id,
+                "allocated_capex": str(payload.allocated_capex),
+                "allocated_mooe": str(payload.allocated_mooe),
+                "cycle": issp_period
+            }
+        )
+        db.add(audit)
         
         try:
             db.commit()
@@ -4774,8 +4887,9 @@ def update_budget_ceilings_bulk(
 
                 for item in payload.sub_ceilings:
                     record_query = db.query(BudgetCeiling).filter(
-                        BudgetCeiling.department_id == item.department_id
-)
+                        BudgetCeiling.department_id == item.department_id,
+                        BudgetCeiling.issp_period == issp_period
+                    )
                     # Fix (Anomaly 26): Enforce row level validation locking prior to mass modifications
                     if not is_sqlite:
                         record_query = record_query.with_for_update()
@@ -4783,7 +4897,6 @@ def update_budget_ceilings_bulk(
 
                     if record:
                         record.sub_ceiling = item.sub_ceiling
-                        record.issp_period = issp_period  
                     else:
                         new_record = BudgetCeiling(
                             department_id=item.department_id,
@@ -4791,6 +4904,15 @@ def update_budget_ceilings_bulk(
                         )
                         new_record.sub_ceiling = item.sub_ceiling
                         db.add(new_record)
+                
+                # We log a single bulk audit trail entry for compactness
+                audit = AuditTrail(
+                    action="SYSTEM_BULK_BUDGET_CEILINGS_UPDATED",
+                    user_id=admin["id"],
+                    old_value={"event": "Bulk sub-ceiling allocations modified."},
+                    new_value={"global_ceiling": str(payload.global_ceiling), "cycle": issp_period, "departments_updated_count": len(payload.sub_ceilings)}
+                )
+                db.add(audit)
                     
             db.commit()
             return {
@@ -4843,11 +4965,20 @@ def update_global_budget_ceiling(
         
         try:
             setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
+            old_val = setting.value if setting else "N/A"
             if not setting:
                 setting = SystemSetting(key="global_budget_ceiling", value=str(payload.global_ceiling))
                 db.add(setting)
             else:
                 setting.value = str(payload.global_ceiling)
+                
+            audit = AuditTrail(
+                action="SYSTEM_GLOBAL_CEILING_UPDATED",
+                user_id=admin["id"],
+                old_value={"global_ceiling": old_val},
+                new_value={"global_ceiling": str(payload.global_ceiling)}
+            )
+            db.add(audit)
             db.commit()
         except Exception as e:
             db.rollback()
@@ -6573,7 +6704,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.database.session import get_db
-from app.database.models import User, RoleTag, MasterNarrative
+from app.database.models import User, RoleTag, MasterNarrative, AuditTrail
 from app.schemas import GoogleAuthRequest, TokenResponse
 from app.config import settings
 
@@ -6808,7 +6939,6 @@ async def authenticate_standard(
     # Isolate password verification execution paths to prevent side-channel timing analysis
     has_valid_user = user is not None and getattr(user, "password_hash", None) is not None
     
-    # Fix (Anomaly 17): Compute a dynamic dummy hash on demand to ensure matching execution times for missing users
     if not has_valid_user:
         dummy_salt = bcrypt.gensalt(rounds=12)
         password_hash_to_verify = bcrypt.hashpw(b"dummy_password", dummy_salt).decode("utf-8")
@@ -6866,6 +6996,15 @@ async def change_password(
     
     current_user.password_hash = new_hash
     
+    # Audit trail for password rotation
+    audit = AuditTrail(
+        action="SYSTEM_SECURITY_PASSWORD_ROTATED",
+        user_id=current_user.id,
+        old_value={"user_email": current_user.email},
+        new_value={"event": "Security credentials rotated successfully."}
+    )
+    db.add(audit)
+    
     try:
         db.commit()
     except Exception as e:
@@ -6915,6 +7054,7 @@ from sqlalchemy import (
     func,
     event,
     text,
+    UniqueConstraint,  # <--- Added for multi-cycle composite constraint support
 )
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -6963,7 +7103,7 @@ class GUID(TypeDecorator):
     Compiles cleanly to PostgreSQL's native UUID, falling back to CHAR(36)
     on SQLite development and testing environments to avoid schema mismatches.
     """
-    impl = CHAR
+    impl = CHAR(36)  # <--- Fix: Specify length 36 explicitly to prevent SQLite truncation
     cache_ok = True
 
     def load_dialect_impl(self, dialect):
@@ -7236,7 +7376,9 @@ class Department(Base):
         back_populates="department", 
         cascade="all, delete-orphan"
     )
-    budget_ceiling: Mapped[Optional["BudgetCeiling"]] = relationship(
+    
+    # Updated to List/plural to handle multiple planning periods
+    budget_ceilings: Mapped[List["BudgetCeiling"]] = relationship(
         "BudgetCeiling", 
         back_populates="department", 
         cascade="all, delete-orphan"
@@ -7563,12 +7705,16 @@ class BudgetCeiling(Base):
     to prevent budget race conditions across departments.
     """
     __tablename__ = "budget_ceilings"
+    
+    # Composite unique constraint on Department and ISSP planning cycle combined
+    __table_args__ = (
+        UniqueConstraint("department_id", "issp_period", name="uq_budget_ceilings_dept_period"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     department_id: Mapped[int] = mapped_column(
         ForeignKey("departments.id", ondelete="CASCADE"), 
-        unique=True, 
-        nullable=False, 
+        nullable=False,  # Removed unique=True parameter
         index=True
     )
     allocated_capex: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
@@ -7582,7 +7728,7 @@ class BudgetCeiling(Base):
         index=True
     )
 
-    department: Mapped[Department] = relationship("Department", back_populates="budget_ceiling")
+    department: Mapped[Department] = relationship("Department", back_populates="budget_ceilings")
 
     @hybrid_property
     def sub_ceiling(self) -> Decimal:
@@ -7597,7 +7743,7 @@ class BudgetCeiling(Base):
     @sub_ceiling.setter
     def sub_ceiling(self, value: Decimal) -> None:
         """
-        Fix (Anomaly 1): Calculates CapEx first, then subtracts it from the consolidated sub-ceiling
+        Calculates CapEx first, then subtracts it from the consolidated sub-ceiling
         value to determine MOOE, avoiding independent quantization rounding/precision loss.
         """
         if value is None:
@@ -7612,6 +7758,938 @@ class BudgetCeiling(Base):
     @sub_ceiling.expression
     def sub_ceiling(cls):
         return cls.allocated_capex + cls.allocated_mooe
+
+
+class AuditTrail(Base):
+    """
+    Provides immutable system auditing required for COA policy adherence.
+    Ensures log history is preserved securely when target users or items are deleted.
+    """
+    __tablename__ = "audit_trails"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposal_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("issp_core.id", ondelete="SET NULL"), 
+        nullable=True
+    )
+    subscription_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("subscription_proposals.id", ondelete="SET NULL"), 
+        nullable=True
+    )
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), 
+        nullable=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), 
+        server_default=func.now(), 
+        nullable=False
+    )
+    old_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    new_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+    proposal: Mapped[Optional[Proposal]] = relationship("Proposal", foreign_keys=[proposal_id], back_populates="audit_logs")
+    subscription: Mapped[Optional[SubscriptionProposal]] = relationship("SubscriptionProposal", foreign_keys=[subscription_id], back_populates="audit_logs")
+    user: Mapped[Optional[User]] = relationship("User")
+
+
+# ==========================================================
+# DICT ANNEX A-4 STRUCTURAL ADDITIONS
+# ==========================================================
+
+class DegreeOffering(Base):
+    """
+    DICT Annex A-4: Dynamic collection of graduate and undergraduate degree offerings.
+    """
+    __tablename__ = "degree_offerings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    department_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    degree_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    level: Mapped[str] = mapped_column(String(50), nullable=False)
+    accreditation_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+
+class GaaPerformance(Base):
+    """
+    DICT Annex A-4: GAA institutional target performance indicators.
+    """
+    __tablename__ = "gaa_performance"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    indicator_name: Mapped[str] = mapped_column(String(250), nullable=False)
+    target_value: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+# ==========================================================
+# DICT GLOSSARY & INSTRUCTIONS REGISTRY
+# ==========================================================
+
+class GlossaryTerm(Base):
+    """
+    Dynamic dictionary containing vocabulary definitions (Pages 6-10 compliance framework).
+    """
+    __tablename__ = "glossary_terms"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    term: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    definition: Mapped[str] = mapped_column(Text, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class GeneralInstruction(Base):
+    """
+    General Submission Guidelines Configuration (Page 11 compliance framework).
+    """
+    __tablename__ = "general_instructions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    step_number: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    instruction_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+# ==========================================================
+# DICT MITHI INVENTORIES & OS REGISTRIES
+# ==========================================================
+
+class ServerCapacityTrack(Base):
+    """
+    Section 1.3 server hosting storage profile census tracking capacity allocations.
+    """
+    __tablename__ = "server_capacity_tracking"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    campus_id: Mapped[int] = mapped_column(ForeignKey("campuses.id", ondelete="CASCADE"), nullable=False, index=True)
+    capacity_tier: Mapped[str] = mapped_column(String(50), nullable=False)
+    location: Mapped[str] = mapped_column(String(50), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    campus: Mapped[Campus] = relationship("Campus", back_populates="server_capacities")
+
+
+class ClientOsCensus(Base):
+    """
+    Section 2.1 client operating systems licenses tracking.
+    """
+    __tablename__ = "client_os_census"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    os_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    workstations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    servers_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class OfficeSoftwareCensus(Base):
+    """
+    Section 2.2 office productivity automation licenses tracking.
+    """
+    __tablename__ = "office_software_census"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    software_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    license_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+# ==========================================================
+# PART IV.B RELATIONAL STAFFING SYSTEM (Staff Registry)
+# ==========================================================
+
+class IctStaffPosition(Base):
+    """
+    Part IV.B: Relational mapping for the SUC ICT Organizational structure.
+    Tracks active staffing positions, classifications (Permanent, Casual, Contractual),
+    and headcounts to fulfill compliance reporting requirements.
+    """
+    __tablename__ = "ict_staff_positions"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    position_title: Mapped[str] = mapped_column(String(150), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="staff_positions_relation")
+
+
+# ==========================================================
+# CORE REGISTRIES & COLLABORATIVE MATRIX
+# ==========================================================
+
+class StrategicConcern(Base):
+    """
+    Table I.E: Relational Strategic Concerns KRA/MFO mapping directory.
+    """
+    __tablename__ = "strategic_concerns"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    mfo: Mapped[str] = mapped_column(String(255), nullable=False)
+    critical_system: Mapped[str] = mapped_column(String(255), nullable=False)
+    problems: Mapped[str] = mapped_column(Text, nullable=False)
+    intended_use: Mapped[str] = mapped_column(Text, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="strategic_concerns_relation")
+
+
+class CoreOfficeFunction(Base):
+    """
+    Annex A-3: Physical directory detailing authorized organizational functions of the SUC offices.
+    """
+    __tablename__ = "core_office_functions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    office_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    division: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="office_functions_relation")
+
+
+class CrossAgencyProject(Base):
+    """
+    Part III.B: Joint cross-government cooperative systems initiatives.
+    """
+    __tablename__ = "cross_agency_projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    objectives: Mapped[str] = mapped_column(Text, nullable=False)
+    duration: Mapped[str] = mapped_column(String(100), nullable=False)
+    deliverables: Mapped[str] = mapped_column(Text, nullable=False)
+    lead_agency: Mapped[str] = mapped_column(String(150), nullable=False)
+    implementing_agencies: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="cross_projects_relation")
+
+
+class PerformanceMetric(Base):
+    """
+    Part III.C: Performance Measurement Framework (PMF) milestones and verification indices.
+    """
+    __tablename__ = "performance_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    project_title: Mapped[str] = mapped_column(String(200), nullable=False)
+    result_hierarchy: Mapped[str] = mapped_column(String(100), nullable=False)
+    indicator: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline: Mapped[str] = mapped_column(String(200), nullable=False)
+    target: Mapped[str] = mapped_column(String(200), nullable=False)
+    collection_method: Mapped[str] = mapped_column(String(200), nullable=False)
+    responsibility: Mapped[str] = mapped_column(String(150), nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="performance_metrics_relation")
+
+
+class AnnualCostBreakdown(Base):
+    """
+    Part V.D / Annex A-5: Standard cost allocation matrix details for SUC CapEx, MOOE and Continuing programs.
+    """
+    __tablename__ = "annual_cost_breakdown"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    project_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    cost_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    item_description: Mapped[str] = mapped_column(String(200), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    yearly_quantities: Mapped[Dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="annual_costs_relation")
+
+
+# ==========================================================
+# MASTER NARRATIVE ARCHITECTURE
+# ==========================================================
+
+class MasterNarrative(Base):
+    """
+    Central database table storing all MIS Admin authored narratives, 
+    diagram associations, matrices, and dynamic template layout parameters.
+    """
+    __tablename__ = "master_narratives"
+
+    issp_period: Mapped[str] = mapped_column(String(50), primary_key=True)
+    agency_name: Mapped[str] = mapped_column(
+        String(255), 
+        default="Camarines Sur Polytechnic Colleges", 
+        nullable=False
+    )
+    issp_period_from: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    issp_period_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    agency_website_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    scope_choice: Mapped[Optional[ScopeChoice]] = mapped_column(Enum(ScopeChoice), nullable=True)
+    scope_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    agency_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    cert_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    transmittal_recipient: Mapped[Optional[str]] = mapped_column(
+        String(255), 
+        default="ATTY. IVAN JOHN E. UY", 
+        nullable=True
+    )
+    transmittal_recipient_title: Mapped[Optional[str]] = mapped_column(
+        String(255), 
+        default="Secretary", 
+        nullable=True
+    )
+    transmittal_recipient_agency: Mapped[Optional[str]] = mapped_column(
+        String(255), 
+        default="Department of Information and Communications Technology", 
+        nullable=True
+    )
+    transmittal_recipient_address: Mapped[Optional[str]] = mapped_column(
+        Text, 
+        default="DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City", 
+        nullable=True
+    )
+    transmittal_date: Mapped[Optional[str]] = mapped_column(
+        String(50), 
+        default="22 February 2023", 
+        nullable=True
+    )
+
+    signatory_prepared_by: Mapped[str] = mapped_column(String(200), nullable=False)
+    preparer_position: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    preparer_tel: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    preparer_fax: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    preparer_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    signatory_approved_by: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    mandate_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    vision_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    mission_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    present_situation_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    planners_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    manpower_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    annual_ict_budget: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
+    org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    major_final_outputs: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    core_offices_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    strategic_concerns_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+    conceptual_framework_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    network_layout_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    systems_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    databases_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+    internal_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    cross_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    pmf_matrix_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+    existing_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    proposed_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    placement_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    mithi_network_profile: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_special_solutions: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    mithi_data_center: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_hardware_inventory: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    
+    mithi_security_dr: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_data_archiving: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_ict_issues: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+
+    implementation_schedules: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    functional_interface_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    
+    site_development_plan_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    network_topology_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    process_flow_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    proposals: Mapped[List[Proposal]] = relationship(
+        "Proposal", 
+        back_populates="master_narrative",
+        cascade="save-update, merge",
+        passive_deletes=True
+    )
+    subscriptions: Mapped[List[SubscriptionProposal]] = relationship(
+        "SubscriptionProposal", 
+        back_populates="master_narrative",
+        cascade="save-update, merge",
+        passive_deletes=True
+    )
+    
+    strategic_concerns_relation: Mapped[List[StrategicConcern]] = relationship(
+        "StrategicConcern", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    office_functions_relation: Mapped[List[CoreOfficeFunction]] = relationship(
+        "CoreOfficeFunction", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    cross_projects_relation: Mapped[List[CrossAgencyProject]] = relationship(
+        "CrossAgencyProject", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    performance_metrics_relation: Mapped[List[PerformanceMetric]] = relationship(
+        "PerformanceMetric", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    annual_costs_relation: Mapped[List[AnnualCostBreakdown]] = relationship(
+        "AnnualCostBreakdown", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    staff_positions_relation: Mapped[List[IctStaffPosition]] = relationship(
+        "IctStaffPosition",
+        back_populates="master_narrative",
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+
+# ==========================================================
+# AUTOMATED PAYLOAD SYNCHRONIZATION EVENT LISTENERS
+# ==========================================================
+
+@event.listens_for(Proposal, 'before_insert')
+@event.listens_for(Proposal, 'before_update')
+def receive_before_save(mapper, connection, target):
+    if target.yearly_quantities:
+        target.total_qty = sum(int(qty) for qty in target.yearly_quantities.values() if qty is not None)
+    else:
+        target.total_qty = 0
+    target.sync_payload()
+
+
+@event.listens_for(SubscriptionProposal, 'before_insert')
+@event.listens_for(SubscriptionProposal, 'before_update')
+def receive_subscription_before_save(mapper, connection, target):
+    if target.yearly_users and target.annual_cost_per_user:
+        accumulated_mooe = Decimal("0.00")
+        for year, users in target.yearly_users.items():
+            if users is not None:
+                accumulated_mooe += Decimal(str(users)) * target.annual_cost_per_user
+        target.total_multiyear_mooe = accumulated_mooe
+    else:
+        target.total_multiyear_mooe = Decimal("0.00")
+    target.sync_payload()
+
+
+@event.listens_for(ExistingInventory, 'before_insert')
+@event.listens_for(ExistingInventory, 'before_update')
+def validate_inventory_state(mapper, connection, target):
+    if target.status in [AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR]:
+        if not target.unserviceable_report_url or not target.unserviceable_report_url.strip():
+            raise BusinessRuleViolation(
+                "An Unserviceable Report PDF URL is mandatory for Condemned or Needs Repair items."
+            )
+
+
+class AuditTrail(Base):
+    """
+    Provides immutable system auditing required for COA policy adherence.
+    Ensures log history is preserved securely when target users or items are deleted.
+    """
+    __tablename__ = "audit_trails"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposal_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("issp_core.id", ondelete="SET NULL"), 
+        nullable=True
+    )
+    subscription_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("subscription_proposals.id", ondelete="SET NULL"), 
+        nullable=True
+    )
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), 
+        nullable=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), 
+        server_default=func.now(), 
+        nullable=False
+    )
+    old_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    new_value: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+    proposal: Mapped[Optional[Proposal]] = relationship("Proposal", foreign_keys=[proposal_id], back_populates="audit_logs")
+    subscription: Mapped[Optional[SubscriptionProposal]] = relationship("SubscriptionProposal", foreign_keys=[subscription_id], back_populates="audit_logs")
+    user: Mapped[Optional[User]] = relationship("User")
+
+
+# ==========================================================
+# DICT ANNEX A-4 STRUCTURAL ADDITIONS
+# ==========================================================
+
+class DegreeOffering(Base):
+    """
+    DICT Annex A-4: Dynamic collection of graduate and undergraduate degree offerings.
+    """
+    __tablename__ = "degree_offerings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    department_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    degree_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    level: Mapped[str] = mapped_column(String(50), nullable=False)
+    accreditation_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+
+class GaaPerformance(Base):
+    """
+    DICT Annex A-4: GAA institutional target performance indicators.
+    """
+    __tablename__ = "gaa_performance"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    indicator_name: Mapped[str] = mapped_column(String(250), nullable=False)
+    target_value: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+# ==========================================================
+# DICT GLOSSARY & INSTRUCTIONS REGISTRY
+# ==========================================================
+
+class GlossaryTerm(Base):
+    """
+    Dynamic dictionary containing vocabulary definitions (Pages 6-10 compliance framework).
+    """
+    __tablename__ = "glossary_terms"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    term: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    definition: Mapped[str] = mapped_column(Text, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class GeneralInstruction(Base):
+    """
+    General Submission Guidelines Configuration (Page 11 compliance framework).
+    """
+    __tablename__ = "general_instructions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    step_number: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    instruction_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+# ==========================================================
+# DICT MITHI INVENTORIES & OS REGISTRIES
+# ==========================================================
+
+class ServerCapacityTrack(Base):
+    """
+    Section 1.3 server hosting storage profile census tracking capacity allocations.
+    """
+    __tablename__ = "server_capacity_tracking"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    campus_id: Mapped[int] = mapped_column(ForeignKey("campuses.id", ondelete="CASCADE"), nullable=False, index=True)
+    capacity_tier: Mapped[str] = mapped_column(String(50), nullable=False)
+    location: Mapped[str] = mapped_column(String(50), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    campus: Mapped[Campus] = relationship("Campus", back_populates="server_capacities")
+
+
+class ClientOsCensus(Base):
+    """
+    Section 2.1 client operating systems licenses tracking.
+    """
+    __tablename__ = "client_os_census"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    os_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    workstations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    servers_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class OfficeSoftwareCensus(Base):
+    """
+    Section 2.2 office productivity automation licenses tracking.
+    """
+    __tablename__ = "office_software_census"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    software_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    license_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+# ==========================================================
+# PART IV.B RELATIONAL STAFFING SYSTEM (Staff Registry)
+# ==========================================================
+
+class IctStaffPosition(Base):
+    """
+    Part IV.B: Relational mapping for the SUC ICT Organizational structure.
+    Tracks active staffing positions, classifications (Permanent, Casual, Contractual),
+    and headcounts to fulfill compliance reporting requirements.
+    """
+    __tablename__ = "ict_staff_positions"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    position_title: Mapped[str] = mapped_column(String(150), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="staff_positions_relation")
+
+
+# ==========================================================
+# CORE REGISTRIES & COLLABORATIVE MATRIX
+# ==========================================================
+
+class StrategicConcern(Base):
+    """
+    Table I.E: Relational Strategic Concerns KRA/MFO mapping directory.
+    """
+    __tablename__ = "strategic_concerns"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    mfo: Mapped[str] = mapped_column(String(255), nullable=False)
+    critical_system: Mapped[str] = mapped_column(String(255), nullable=False)
+    problems: Mapped[str] = mapped_column(Text, nullable=False)
+    intended_use: Mapped[str] = mapped_column(Text, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="strategic_concerns_relation")
+
+
+class CoreOfficeFunction(Base):
+    """
+    Annex A-3: Physical directory detailing authorized organizational functions of the SUC offices.
+    """
+    __tablename__ = "core_office_functions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    office_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    division: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="office_functions_relation")
+
+
+class CrossAgencyProject(Base):
+    """
+    Part III.B: Joint cross-government cooperative systems initiatives.
+    """
+    __tablename__ = "cross_agency_projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    objectives: Mapped[str] = mapped_column(Text, nullable=False)
+    duration: Mapped[str] = mapped_column(String(100), nullable=False)
+    deliverables: Mapped[str] = mapped_column(Text, nullable=False)
+    lead_agency: Mapped[str] = mapped_column(String(150), nullable=False)
+    implementing_agencies: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="cross_projects_relation")
+
+
+class PerformanceMetric(Base):
+    """
+    Part III.C: Performance Measurement Framework (PMF) milestones and verification indices.
+    """
+    __tablename__ = "performance_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    project_title: Mapped[str] = mapped_column(String(200), nullable=False)
+    result_hierarchy: Mapped[str] = mapped_column(String(100), nullable=False)
+    indicator: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline: Mapped[str] = mapped_column(String(200), nullable=False)
+    target: Mapped[str] = mapped_column(String(200), nullable=False)
+    collection_method: Mapped[str] = mapped_column(String(200), nullable=False)
+    responsibility: Mapped[str] = mapped_column(String(150), nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="performance_metrics_relation")
+
+
+class AnnualCostBreakdown(Base):
+    """
+    Part V.D / Annex A-5: Standard cost allocation matrix details for SUC CapEx, MOOE and Continuing programs.
+    """
+    __tablename__ = "annual_cost_breakdown"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    project_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    cost_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    item_description: Mapped[str] = mapped_column(String(200), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    yearly_quantities: Mapped[Dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
+
+    master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="annual_costs_relation")
+
+
+# ==========================================================
+# MASTER NARRATIVE ARCHITECTURE
+# ==========================================================
+
+class MasterNarrative(Base):
+    """
+    Central database table storing all MIS Admin authored narratives, 
+    diagram associations, matrices, and dynamic template layout parameters.
+    """
+    __tablename__ = "master_narratives"
+
+    issp_period: Mapped[str] = mapped_column(String(50), primary_key=True)
+    agency_name: Mapped[str] = mapped_column(
+        String(255), 
+        default="Camarines Sur Polytechnic Colleges", 
+        nullable=False
+    )
+    issp_period_from: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    issp_period_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    agency_website_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    scope_choice: Mapped[Optional[ScopeChoice]] = mapped_column(Enum(ScopeChoice), nullable=True)
+    scope_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    agency_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    cert_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    transmittal_recipient: Mapped[Optional[str]] = mapped_column(
+        String(255), 
+        default="ATTY. IVAN JOHN E. UY", 
+        nullable=True
+    )
+    transmittal_recipient_title: Mapped[Optional[str]] = mapped_column(
+        String(255), 
+        default="Secretary", 
+        nullable=True
+    )
+    transmittal_recipient_agency: Mapped[Optional[str]] = mapped_column(
+        String(255), 
+        default="Department of Information and Communications Technology", 
+        nullable=True
+    )
+    transmittal_recipient_address: Mapped[Optional[str]] = mapped_column(
+        Text, 
+        default="DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City", 
+        nullable=True
+    )
+    transmittal_date: Mapped[Optional[str]] = mapped_column(
+        String(50), 
+        default="22 February 2023", 
+        nullable=True
+    )
+
+    signatory_prepared_by: Mapped[str] = mapped_column(String(200), nullable=False)
+    preparer_position: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    preparer_tel: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    preparer_fax: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    preparer_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    signatory_approved_by: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    mandate_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    vision_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    mission_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    present_situation_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    planners_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    manpower_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    annual_ict_budget: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
+    org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    major_final_outputs: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    core_offices_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    strategic_concerns_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+    conceptual_framework_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    network_layout_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    systems_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    databases_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+    internal_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    cross_projects_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    pmf_matrix_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+    existing_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    proposed_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    placement_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    mithi_network_profile: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_special_solutions: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    mithi_data_center: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_hardware_inventory: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    
+    mithi_security_dr: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_data_archiving: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+    mithi_ict_issues: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
+
+    implementation_schedules: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    functional_interface_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    
+    site_development_plan_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    network_topology_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    process_flow_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    proposals: Mapped[List[Proposal]] = relationship(
+        "Proposal", 
+        back_populates="master_narrative",
+        cascade="save-update, merge",
+        passive_deletes=True
+    )
+    subscriptions: Mapped[List[SubscriptionProposal]] = relationship(
+        "SubscriptionProposal", 
+        back_populates="master_narrative",
+        cascade="save-update, merge",
+        passive_deletes=True
+    )
+    
+    strategic_concerns_relation: Mapped[List[StrategicConcern]] = relationship(
+        "StrategicConcern", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    office_functions_relation: Mapped[List[CoreOfficeFunction]] = relationship(
+        "CoreOfficeFunction", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    cross_projects_relation: Mapped[List[CrossAgencyProject]] = relationship(
+        "CrossAgencyProject", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    performance_metrics_relation: Mapped[List[PerformanceMetric]] = relationship(
+        "PerformanceMetric", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    annual_costs_relation: Mapped[List[AnnualCostBreakdown]] = relationship(
+        "AnnualCostBreakdown", 
+        back_populates="master_narrative", 
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+    staff_positions_relation: Mapped[List[IctStaffPosition]] = relationship(
+        "IctStaffPosition",
+        back_populates="master_narrative",
+        cascade="all, delete-orphan",
+        passive_deletes=True
+    )
+
+
+# ==========================================================
+# AUTOMATED PAYLOAD SYNCHRONIZATION EVENT LISTENERS
+# ==========================================================
+
+@event.listens_for(Proposal, 'before_insert')
+@event.listens_for(Proposal, 'before_update')
+def receive_before_save(mapper, connection, target):
+    if target.yearly_quantities:
+        target.total_qty = sum(int(qty) for qty in target.yearly_quantities.values() if qty is not None)
+    else:
+        target.total_qty = 0
+    target.sync_payload()
+
+
+@event.listens_for(SubscriptionProposal, 'before_insert')
+@event.listens_for(SubscriptionProposal, 'before_update')
+def receive_subscription_before_save(mapper, connection, target):
+    if target.yearly_users and target.annual_cost_per_user:
+        accumulated_mooe = Decimal("0.00")
+        for year, users in target.yearly_users.items():
+            if users is not None:
+                accumulated_mooe += Decimal(str(users)) * target.annual_cost_per_user
+        target.total_multiyear_mooe = accumulated_mooe
+    else:
+        target.total_multiyear_mooe = Decimal("0.00")
+    target.sync_payload()
+
+
+@event.listens_for(ExistingInventory, 'before_insert')
+@event.listens_for(ExistingInventory, 'before_update')
+def validate_inventory_state(mapper, connection, target):
+    if target.status in [AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR]:
+        if not target.unserviceable_report_url or not target.unserviceable_report_url.strip():
+            raise BusinessRuleViolation(
+                "An Unserviceable Report PDF URL is mandatory for Condemned or Needs Repair items."
+            )
 
 
 class AuditTrail(Base):
@@ -8197,6 +9275,7 @@ from app.schemas import (
     InventoryCreate, 
     InventoryResponse, 
     ProposalUpdatePayload, 
+    ProposalResponse,  # <--- Added ProposalResponse to the imports
     CommentCreate,
     CatalogItemResponse,
     NeedsAssessmentCreate, 
@@ -8662,7 +9741,7 @@ def get_existing_inventory(
     ).offset(skip).limit(limit).all()
 
 
-@router.get("/proposals")
+@router.get("/proposals", response_model=List[ProposalResponse])  # <--- Added response_model here
 def get_departmental_proposals(
     issp_period_filter: Optional[str] = Query(None, alias="issp_period"),
     status_filter: Optional[ProposalStatus] = Query(None),
@@ -8684,7 +9763,7 @@ def get_departmental_proposals(
     return query.offset(skip).limit(limit).all()
 
 
-@router.get("/proposals/{proposal_id}")
+@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)  # <--- Added response_model here
 def get_proposal_detail(
     proposal_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -9258,6 +10337,42 @@ async def upload_unserviceable_evidence(
 # ==========================================================
 # INLINE DISCUSSION AND ACTION-REQUIRED COMMENT THREADS
 # ==========================================================
+
+@router.get("/action-items/summary")
+def get_action_items_summary(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """ Returns a lightweight summary of unresolved action items and returned proposals. """
+    unread_actions = 0
+    returned_proposals = 0
+
+    dept_id = user["department_id"]
+
+    # Fetch User's Capex and MOOE items
+    capex_items = db.query(Proposal).filter(Proposal.department_id == dept_id).all()
+    mooe_items = db.query(SubscriptionProposal).filter(SubscriptionProposal.department_id == dept_id).all()
+    
+    all_items = capex_items + mooe_items
+
+    for item in all_items:
+        # 1. Check for Returned Status
+        if item.status == ProposalStatus.RETURNED:
+            returned_proposals += 1
+
+        # 2. Check Payload for Unresolved Actionable Comments
+        payload = item.payload or {}
+        comments = payload.get("comments", [])
+        
+        for comment in comments:
+            if comment.get("requires_department_action") is True and comment.get("is_resolved") is False:
+                unread_actions += 1
+
+    return {
+        "unread_actions": unread_actions,
+        "returned_proposals": returned_proposals
+    }
+
 
 @router.post("/proposals/{proposal_id}/comments")
 def post_inline_comment(
@@ -10249,7 +11364,9 @@ class ISSPStorageClient:
                 logger.error(f"Failed generating download link for key {object_key}: {e}")
                 return None
         else:
-            return f"/static/uploads/{object_key}"
+            # FIX: Prepend the Backend API URL to resolve local frontend port routing issues
+            base_url = settings.API_BASE_URL.rstrip('/')
+            return f"{base_url}/static/uploads/{object_key}"
 
     def upload_compiled_pdf(self, file_data: bytes, issp_id: str) -> bool:
         key = self.get_generated_pdf_key(issp_id)
@@ -10297,7 +11414,10 @@ class ISSPStorageClient:
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 with open(local_path, "wb") as f:
                     f.write(file_data)
-                return f"/static/uploads/{key}"
+                    
+                # FIX: Prepend the Backend API URL to resolve local frontend port routing issues
+                base_url = settings.API_BASE_URL.rstrip('/')
+                return f"{base_url}/static/uploads/{key}"
             except IOError as e:
                 logger.error(f"Failed writing unserviceable report {filename} to disk: {e}")
                 return None
@@ -15704,6 +16824,7 @@ import TransmittalLetterPreview from "./views/admin/Narrative/TransmittalLetterP
 import StaffPositionsManager from "./views/admin/Narrative/StaffPositionsManager";
 
 import { useAuth } from "./context/AuthContext";
+import { NotificationProvider } from "./context/NotificationContext";
 
 // --- ROLE-BASED ROUTE GUARD ---
 const ProtectedRoute = ({ children, allowedRoles }) => {
@@ -15760,80 +16881,82 @@ const RootRedirect = () => {
 export default function App() {
   return (
     <Router>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/" element={<RootRedirect />} />
+      <NotificationProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<RootRedirect />} />
 
-        {/* Department User Workspace Paths */}
-        <Route
-          path="/dept"
-          element={
-            <ProtectedRoute allowedRoles={["ROLE_DEPT_USER"]}>
-              <DashboardLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<Navigate to="dashboard" replace />} />
-          <Route path="dashboard" element={<DeptDashboard />} />
-          <Route path="inventory" element={<InventoryManager />} />
-          <Route path="needs" element={<NeedsAssessment />} />
-          <Route path="proposals" element={<CapExProposals />} />
-          <Route path="subscriptions" element={<MooeSubscriptions />} />
-          <Route path="quotations" element={<QuotationManager />} />
-          <Route path="glacier" element={<GlacierConsole />} />
-          <Route path="vault" element={<DocumentVault />} />
-          <Route path="inbox" element={<ActionInbox />} />
-          <Route path="catalog" element={<CatalogViewer />} />
-          <Route path="profile" element={<ProfileSettings />} />
-        </Route>
+          {/* Department User Workspace Paths */}
+          <Route
+            path="/dept"
+            element={
+              <ProtectedRoute allowedRoles={["ROLE_DEPT_USER"]}>
+                <DashboardLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route path="dashboard" element={<DeptDashboard />} />
+            <Route path="inventory" element={<InventoryManager />} />
+            <Route path="needs" element={<NeedsAssessment />} />
+            <Route path="proposals" element={<CapExProposals />} />
+            <Route path="subscriptions" element={<MooeSubscriptions />} />
+            <Route path="quotations" element={<QuotationManager />} />
+            <Route path="glacier" element={<GlacierConsole />} />
+            <Route path="vault" element={<DocumentVault />} />
+            <Route path="inbox" element={<ActionInbox />} />
+            <Route path="catalog" element={<CatalogViewer />} />
+            <Route path="profile" element={<ProfileSettings />} />
+          </Route>
 
-        {/* Administrator & Governance Paths */}
-        <Route
-          path="/admin"
-          element={
-            <ProtectedRoute allowedRoles={["ROLE_MIS_ADMIN"]}>
-              <DashboardLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<Navigate to="dashboard" replace />} />
-          <Route path="dashboard" element={<Dashboard />} />
-          <Route path="queue" element={<ConsolidatedQueue />} />
-          <Route path="budget" element={<CeilingControl />} />
-          <Route path="analytics" element={<ComplianceAnalytics />} />
-          
-          <Route path="narratives" element={<NarrativeManager />} />
-          <Route path="diagrams" element={<DiagramVault />} />
-          <Route path="mithi" element={<MithiSurveys />} />
-          <Route path="users" element={<UserWhitelisting />} />
-          <Route path="catalog" element={<CatalogManager />} />
-          <Route path="audit" element={<AuditTrails />} />
-          <Route path="vault" element={<DocumentVault />} />
+          {/* Administrator & Governance Paths */}
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute allowedRoles={["ROLE_MIS_ADMIN"]}>
+                <DashboardLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route path="dashboard" element={<Dashboard />} />
+            <Route path="queue" element={<ConsolidatedQueue />} />
+            <Route path="budget" element={<CeilingControl />} />
+            <Route path="analytics" element={<ComplianceAnalytics />} />
+            
+            <Route path="narratives" element={<NarrativeManager />} />
+            <Route path="diagrams" element={<DiagramVault />} />
+            <Route path="mithi" element={<MithiSurveys />} />
+            <Route path="users" element={<UserWhitelisting />} />
+            <Route path="catalog" element={<CatalogManager />} />
+            <Route path="audit" element={<AuditTrails />} />
+            <Route path="vault" element={<DocumentVault />} />
 
-          {/* Newly Mapped Administrative Sub-Routes */}
-          <Route path="campuses" element={<CampusManager />} />
-          <Route path="glossary" element={<GlossaryManager />} />
-          <Route path="instructions" element={<InstructionsManager />} />
-          <Route path="inventory/server-capacity" element={<ServerCapacityManager />} />
-          <Route path="inventory/os-census" element={<OsCensusManager />} />
-          <Route path="inventory/software-census" element={<OfficeSoftwareManager />} />
-          <Route path="narratives/offices" element={<CoreOfficesManager />} />
-          <Route path="narratives/costs" element={<CostBreakdownManager />} />
-          <Route path="narratives/cross-projects" element={<CrossProjectsManager />} />
-          <Route path="narratives/degrees" element={<DegreeOfferings />} />
-          <Route path="narratives/gaa" element={<GaaTargets />} />
-          <Route path="narratives/gantt" element={<GanttScheduleManager />} />
-          <Route path="narratives/metrics" element={<PerformanceMetricsManager />} />
-          <Route path="narratives/concerns" element={<StrategicConcernsManager />} />
-          <Route path="narratives/transmittal" element={<TransmittalLetterPreview />} />
-          <Route path="narratives/staff-positions" element={<StaffPositionsManager />} />
-          
-          {/* Administrator profile routing configuration */}
-          <Route path="profile" element={<ProfileSettings />} />
-        </Route>
+            {/* Newly Mapped Administrative Sub-Routes */}
+            <Route path="campuses" element={<CampusManager />} />
+            <Route path="glossary" element={<GlossaryManager />} />
+            <Route path="instructions" element={<InstructionsManager />} />
+            <Route path="inventory/server-capacity" element={<ServerCapacityManager />} />
+            <Route path="inventory/os-census" element={<OsCensusManager />} />
+            <Route path="inventory/software-census" element={<OfficeSoftwareManager />} />
+            <Route path="narratives/offices" element={<CoreOfficesManager />} />
+            <Route path="narratives/costs" element={<CostBreakdownManager />} />
+            <Route path="narratives/cross-projects" element={<CrossProjectsManager />} />
+            <Route path="narratives/degrees" element={<DegreeOfferings />} />
+            <Route path="narratives/gaa" element={<GaaTargets />} />
+            <Route path="narratives/gantt" element={<GanttScheduleManager />} />
+            <Route path="narratives/metrics" element={<PerformanceMetricsManager />} />
+            <Route path="narratives/concerns" element={<StrategicConcernsManager />} />
+            <Route path="narratives/transmittal" element={<TransmittalLetterPreview />} />
+            <Route path="narratives/staff-positions" element={<StaffPositionsManager />} />
+            
+            {/* Administrator profile routing configuration */}
+            <Route path="profile" element={<ProfileSettings />} />
+          </Route>
 
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </NotificationProvider>
     </Router>
   );
 }
@@ -16986,6 +18109,7 @@ import React, { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useCycle } from '../../context/CycleContext';
+import { useNotifications } from '../../context/NotificationContext';
 import { 
   FileText, ShieldCheck, Database, ClipboardList, 
   FolderKanban, LogOut, FileBarChart, LayoutDashboard, UserCheck, 
@@ -17000,6 +18124,7 @@ export default function DashboardLayout() {
   const navigate = useNavigate();
   const { user, logoutSession } = useAuth();
   const { activeCycle } = useCycle();
+  const { actionCount } = useNotifications();
   const [headroom, setHeadroom] = useState(null);
 
   // Submenu open states
@@ -17124,9 +18249,25 @@ export default function DashboardLayout() {
                   </button>
                   {workflowOpen && (
                     <div className="mt-1 space-y-0.5">
-                      <NavLink to="/dept/inbox" className={subNavLinkClass}>
-                        <Inbox className="w-3.5 h-3.5 text-red-400" />
-                        <span>Remarks & Action Items</span>
+                      <NavLink 
+                        to="/dept/inbox" 
+                        className={({ isActive }) => 
+                          `flex items-center justify-between w-full pl-8 pr-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${
+                            isActive 
+                              ? "text-blue-400 font-bold" 
+                              : "text-slate-500 hover:text-slate-200"
+                          }`
+                        }
+                      >
+                        <div className="flex items-center space-x-3">
+                          <Inbox className="w-3.5 h-3.5 text-red-400" />
+                          <span>Remarks & Action Items</span>
+                        </div>
+                        {actionCount > 0 && (
+                          <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-red-600 px-1 text-[9px] font-bold text-white animate-pulse">
+                            {actionCount}
+                          </span>
+                        )}
                       </NavLink>
                       <NavLink to="/dept/catalog" className={subNavLinkClass}>
                         <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
@@ -17342,7 +18483,7 @@ export default function DashboardLayout() {
       </aside>
 
       {/* Main Workspace Frame */}
-      <main className="flex-1 flex flex-col overflow-hidden bg-slate-950">
+      <main className="flex-1 flex flex-col overflow-hidden bg-slate-955">
         <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-8 flex-shrink-0">
           <div className="flex items-center space-x-4">
             <span className="text-xs text-slate-500 font-semibold">Active Planning Framework:</span>
@@ -17556,27 +18697,77 @@ export const useCycle = () => {
 CORE SYSTEM FILE: .\frontend\src\context\NotificationContext.jsx
 =========================================
 
-import React, { createContext, useContext, useState } from 'react';
+// frontend/src/context/NotificationContext.jsx
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { useAuth } from './AuthContext';
+
 const NotificationContext = createContext(null);
 
 export function NotificationProvider({ children }) {
-  const [notifications, setNotifications] = useState([
-    { id: 1, text: "Budget ceiling limit updated for CAS.", type: "warning" },
-    { id: 2, text: "Proposal for Heavy Duty Printer approved.", type: "success" }
-  ]);
+  const { user } = useAuth();
+  const [actionCount, setActionCount] = useState(0);
+  const [returnedCount, setReturnedCount] = useState(0);
 
-  const addNotification = (text, type = "info") => {
-    setNotifications(prev => [{ id: Date.now(), text, type }, ...prev]);
-  };
+  const fetchNotifications = useCallback(async () => {
+    // Only poll the backend if the active user is a Department User with a valid token
+    if (user?.role === 'ROLE_DEPT_USER' && user?.token) {
+      try {
+        const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+        const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+        const token = user.token;
+
+        const response = await fetch(`${apiUrl}/api/dept/action-items/summary`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        if (!response.ok) {
+          throw new Error("Failed to fetch notification summary");
+        }
+
+        const data = await response.json();
+        setActionCount(data.unread_actions || 0);
+        setReturnedCount(data.returned_proposals || 0);
+      } catch (error) {
+        console.error("Failed to fetch notification summary:", error);
+      }
+    }
+  }, [user]);
+
+  useEffect(() => {
+    // If the user logs out or does not have the department role, clear counts and skip polling
+    if (user?.role !== 'ROLE_DEPT_USER') {
+      setActionCount(0);
+      setReturnedCount(0);
+      return;
+    }
+
+    // Fetch immediately upon mount or when the user context changes
+    fetchNotifications();
+
+    // Set up polling interval to check every 30 seconds
+    const intervalId = setInterval(() => {
+      fetchNotifications();
+    }, 30000);
+
+    // Cleanup the interval when the component unmounts or dependencies change
+    return () => clearInterval(intervalId);
+  }, [user, fetchNotifications]);
 
   return (
-    <NotificationContext.Provider value={{ notifications, addNotification }}>
+    <NotificationContext.Provider value={{ actionCount, returnedCount, fetchNotifications }}>
       {children}
     </NotificationContext.Provider>
   );
 }
-export const useNotifications = () => useContext(NotificationContext);
 
+export const useNotifications = () => {
+  const context = useContext(NotificationContext);
+  if (!context) {
+    // Fallback safe defaults to prevent runtime errors if used outside of Provider
+    return { actionCount: 0, returnedCount: 0, fetchNotifications: async () => {} };
+  }
+  return context;
+};
 
 =========================================
 CORE SYSTEM FILE: .\frontend\src\views\admin\Analytics\ComplianceAnalytics.jsx
@@ -17726,7 +18917,7 @@ CORE SYSTEM FILE: .\frontend\src\views\admin\Audit\AuditTrails.jsx
 // frontend/src/views/admin/Audit/AuditTrails.jsx
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
-import { History, RefreshCw, AlertCircle, Search } from "lucide-react";
+import { History, RefreshCw, AlertCircle, Search, ArrowRight, Shield } from "lucide-react";
 
 export default function AuditTrails() {
   const { user } = useAuth();
@@ -17766,26 +18957,53 @@ export default function AuditTrails() {
     const action = (log.action || "").toLowerCase();
     const proposalId = (log.proposal_id || "").toLowerCase();
     const subscriptionId = (log.subscription_id || "").toLowerCase();
+    const oldStr = JSON.stringify(log.old_value || "").toLowerCase();
+    const newStr = JSON.stringify(log.new_value || "").toLowerCase();
     
-    return action.includes(term) || proposalId.includes(term) || subscriptionId.includes(term);
+    return action.includes(term) || proposalId.includes(term) || subscriptionId.includes(term) || oldStr.includes(term) || newStr.includes(term);
   });
 
+  // Renders JSON payloads into clean, readable key-value lists
+  const renderPayload = (payload, isOld = false) => {
+    if (!payload) return <span className="text-slate-600 italic font-mono text-[9px]">-</span>;
+    if (typeof payload === 'string') return <span className="font-mono text-[10px] break-all">{payload}</span>;
+    
+    return (
+      <div className="space-y-1 bg-slate-950/40 p-2 rounded border border-slate-800/60 max-h-48 overflow-y-auto w-full">
+        {Object.entries(payload).map(([key, val]) => {
+          let displayVal = val;
+          if (typeof val === 'object' && val !== null) {
+            displayVal = JSON.stringify(val);
+          }
+          return (
+            <div key={key} className="flex flex-col text-[10px] font-mono leading-tight">
+              <span className="text-slate-500 uppercase tracking-wider">{key.replace(/_/g, ' ')}:</span>
+              <span className={`font-bold break-all ${isOld ? "text-rose-400" : "text-emerald-400"}`}>
+                {String(displayVal)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
-    <div className="space-y-6 text-xs text-slate-100">
+    <div className="space-y-6 text-xs text-slate-100 max-w-7xl mx-auto select-none">
       <div className="flex justify-between items-center bg-slate-900 p-6 rounded-xl border border-slate-800">
         <div>
           <h2 className="text-white font-bold text-base flex items-center gap-2">
-            <History className="text-yellow-400 w-5 h-5" />
+            <History className="text-amber-400 w-5 h-5" />
             <span>COA Immutable Audit Security Trails</span>
           </h2>
           <p className="text-slate-400 text-xs mt-1">
-            Tamper-proof transactional security ledger. Captures system changes, price modifications, and state adjustments.
+            Tamper-proof transactional security ledger. Captures system changes, price modifications, and administrative state adjustments.
           </p>
         </div>
         <button
           onClick={fetchLogs}
           disabled={loading}
-          className="p-2 px-3.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-1.5 disabled:opacity-50 transition-colors cursor-pointer"
+          className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-1.5 disabled:opacity-50 transition-colors cursor-pointer"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           <span>Refresh Ledger</span>
@@ -17793,7 +19011,7 @@ export default function AuditTrails() {
       </div>
 
       {error && (
-        <div className="p-4 bg-red-955/4 border border-red-900/30 text-red-300 rounded-lg flex items-start gap-2">
+        <div className="p-4 bg-red-955/40 border border-red-900/30 text-red-300 rounded-lg flex items-start gap-2.5">
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{error}</span>
         </div>
@@ -17806,7 +19024,7 @@ export default function AuditTrails() {
           type="text"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          placeholder="Search by Action or Document ID..."
+          placeholder="Search actions, JSON payloads, or Target IDs..."
           className="w-full bg-transparent outline-none border-none text-xs text-white"
         />
       </div>
@@ -17817,47 +19035,73 @@ export default function AuditTrails() {
           {loading ? (
             <div className="flex flex-col items-center justify-center py-20 text-slate-500">
               <RefreshCw className="w-6 h-6 animate-spin text-blue-500 mb-2" />
-              <span>Querying transaction records...</span>
+              <span>Querying transactional security ledger...</span>
             </div>
           ) : filteredLogs.length > 0 ? (
-            <table className="w-full text-left border-collapse text-[10px] font-mono">
+            <table className="w-full text-left border-collapse text-[11px]">
               <thead>
-                <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 font-semibold uppercase">
-                  <th className="p-3.5">Timestamp</th>
-                  <th className="p-3.5">Target ID</th>
-                  <th className="p-3.5">Action Type</th>
-                  <th className="p-3.5">Operator ID</th>
-                  <th className="p-3.5">Old Value</th>
-                  <th className="p-3.5">New Value</th>
+                <tr className="border-b border-slate-800 bg-slate-950 text-slate-500 font-bold uppercase tracking-wider text-[9px]">
+                  <th className="p-4 w-32">Timestamp</th>
+                  <th className="p-4 w-[20%]">Operator & Target</th>
+                  <th className="p-4 w-[20%]">Action Execution</th>
+                  <th className="p-4 w-1/4 text-center">Previous State</th>
+                  <th className="p-4 w-1/4 text-center">Updated State</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-850 text-slate-300">
-                {filteredLogs.map((log) => (
-                  <tr key={log.id} className="hover:bg-slate-800/20 transition-colors">
-                    <td className="p-3.5 text-slate-500 whitespace-nowrap">
-                      {new Date(log.timestamp).toLocaleString()}
-                    </td>
-                    <td className="p-3.5 text-blue-400 select-all font-bold">
-                      {log.proposal_id || log.subscription_id || "SYSTEM"}
-                    </td>
-                    <td className="p-3.5 font-bold text-slate-200">
-                      {log.action}
-                    </td>
-                    <td className="p-3.5 text-slate-400">
-                      User: {log.user_id}
-                    </td>
-                    <td className="p-3.5 text-red-400 max-w-[200px] truncate select-all">
-                      {JSON.stringify(log.old_value)}
-                    </td>
-                    <td className="p-3.5 text-emerald-400 max-w-[200px] truncate select-all">
-                      {JSON.stringify(log.new_value)}
-                    </td>
-                  </tr>
-                ))}
+                {filteredLogs.map((log) => {
+                  const isSystem = !log.proposal_id && !log.subscription_id;
+                  const targetId = log.proposal_id || log.subscription_id || "SYSTEM_ENVIRONMENT";
+                  
+                  return (
+                    <tr key={log.id} className="hover:bg-slate-955/20 transition-colors group">
+                      {/* Timestamp */}
+                      <td className="p-4 text-slate-400 align-top">
+                        <div className="font-mono text-slate-300">{new Date(log.timestamp).toLocaleDateString()}</div>
+                        <div className="text-[10px] text-slate-500">{new Date(log.timestamp).toLocaleTimeString()}</div>
+                      </td>
+                      
+                      {/* Operator & Target context */}
+                      <td className="p-4 align-top space-y-2">
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-slate-500 block mb-0.5 tracking-wider">Operator ID:</span>
+                          <span className="font-mono text-slate-300 px-2 py-0.5 bg-slate-950 rounded border border-slate-800">
+                            {log.user_id || "Unknown"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] uppercase font-bold text-slate-500 block mb-0.5 tracking-wider">Target Node:</span>
+                          <span className={`font-mono text-[9px] font-bold select-all ${isSystem ? "text-amber-400" : "text-blue-400"}`}>
+                            {targetId}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Action Type */}
+                      <td className="p-4 align-top">
+                        <div className="flex items-center gap-1.5 font-bold text-slate-200">
+                          {isSystem && <Shield className="w-3.5 h-3.5 text-amber-500" />}
+                          <span className="uppercase tracking-wide">{log.action.replace(/_/g, ' ')}</span>
+                        </div>
+                        <div className="text-[9px] text-slate-500 font-mono mt-1 select-all">{log.action}</div>
+                      </td>
+
+                      {/* Previous State JSON */}
+                      <td className="p-4 align-top">
+                        {renderPayload(log.old_value, true)}
+                      </td>
+
+                      {/* Arrow Spacer (Visual only on wide screens) */}
+                      <td className="p-4 align-top">
+                        {renderPayload(log.new_value, false)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           ) : (
-            <div className="text-center py-20 text-slate-500">
+            <div className="text-center py-20 text-slate-500 italic">
               No matching security ledger records found.
             </div>
           )}
@@ -17866,6 +19110,7 @@ export default function AuditTrails() {
     </div>
   );
 }
+
 
 =========================================
 CORE SYSTEM FILE: .\frontend\src\views\admin\Budget\CeilingControl.jsx
@@ -18999,28 +20244,32 @@ export default function CatalogManager() {
 
             <div className="border-t border-slate-800/80 pt-3 mt-2 space-y-3">
               <div>
-                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-                  Authorized Supplier Reference Name
+                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5 flex justify-between">
+                  <span>Authorized Supplier Reference Name</span>
+                  <span className="text-[9px] text-blue-400">Auto-Linked</span>
                 </label>
                 <input
                   type="text"
                   value={form.supplier_name}
                   onChange={(e) => setForm({ ...form, supplier_name: e.target.value })}
-                  placeholder="e.g. CSPC Central Procurement"
-                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white text-xs outline-none"
+                  readOnly
+                  placeholder="Auto-filled from referenced proposal..."
+                  className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 text-xs outline-none cursor-not-allowed"
                 />
               </div>
 
               <div>
-                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
-                  Canvas Proof S3 URL Link
+                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5 flex justify-between">
+                  <span>Canvas Proof S3 URL Link</span>
+                  <span className="text-[9px] text-blue-400">Auto-Linked</span>
                 </label>
                 <input
                   type="url"
                   value={form.canvas_evidence_url}
                   onChange={(e) => setForm({ ...form, canvas_evidence_url: e.target.value })}
-                  placeholder="https://cspc-compliance.s3.amazonaws.com/..."
-                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white text-xs outline-none font-mono"
+                  readOnly
+                  placeholder="Auto-filled from referenced proposal..."
+                  className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 text-xs outline-none font-mono cursor-not-allowed"
                 />
               </div>
             </div>
@@ -19123,8 +20372,6 @@ export default function CatalogManager() {
     </div>
   );
 }
-
-
 
 =========================================
 CORE SYSTEM FILE: .\frontend\src\views\admin\Dashboard\Dashboard.jsx
@@ -28183,12 +29430,14 @@ CORE SYSTEM FILE: .\frontend\src\views\department\Proposals\ActionInbox.jsx
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
+import { useNotifications } from "../../../context/NotificationContext";
 import { getProposals, getSubscriptions } from "../../../api/dept";
 import { Inbox, RefreshCw, AlertCircle, HelpCircle, History } from "lucide-react";
 
 export default function ActionInbox() {
   const { user } = useAuth();
   const { activeCycle } = useCycle();
+  const { fetchNotifications } = useNotifications();
   
   const [actionItems, setActionItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -28236,6 +29485,11 @@ export default function ActionInbox() {
       // Sort chronologically (newest entries first)
       items.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       setActionItems(items);
+      
+      // Update global counter indicator immediately
+      if (fetchNotifications) {
+        fetchNotifications();
+      }
     } catch (err) {
       setError(err.message || "Failed to load department action items.");
     } finally {
@@ -28256,10 +29510,10 @@ export default function ActionInbox() {
         <div>
           <h2 className="text-white font-bold text-base flex items-center gap-2">
             <Inbox className="w-5 h-5 text-blue-400" />
-            <span>Administrative Remarks & Audit Log</span>
+            <span>Feedback & Revisions Inbox</span>
           </h2>
           <p className="text-slate-400 text-xs mt-1">
-            Read-only ledger of feedback, administrative corrections, and dynamic evaluation notes logged by the MIS Administrator.
+            Dynamic ledger of feedback, required modifications, and administrative evaluation notes logged by the MIS Administrator.
           </p>
         </div>
         <button

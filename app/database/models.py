@@ -23,6 +23,7 @@ from sqlalchemy import (
     func,
     event,
     text,
+    UniqueConstraint,
 )
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -71,7 +72,7 @@ class GUID(TypeDecorator):
     Compiles cleanly to PostgreSQL's native UUID, falling back to CHAR(36)
     on SQLite development and testing environments to avoid schema mismatches.
     """
-    impl = CHAR
+    impl = CHAR(36)
     cache_ok = True
 
     def load_dialect_impl(self, dialect):
@@ -344,7 +345,8 @@ class Department(Base):
         back_populates="department", 
         cascade="all, delete-orphan"
     )
-    budget_ceiling: Mapped[Optional["BudgetCeiling"]] = relationship(
+    
+    budget_ceilings: Mapped[List["BudgetCeiling"]] = relationship(
         "BudgetCeiling", 
         back_populates="department", 
         cascade="all, delete-orphan"
@@ -363,7 +365,6 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     role_tag: Mapped[RoleTag] = mapped_column(Enum(RoleTag), nullable=False)
     
-    # Nullable department reassignment uses SET NULL on delete to safeguard audit trail logs
     department_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("departments.id", ondelete="SET NULL"), 
         nullable=True, 
@@ -421,7 +422,6 @@ class ExistingInventory(Base):
     status: Mapped[AssetStatus] = mapped_column(Enum(AssetStatus), default=AssetStatus.FUNCTIONAL, nullable=False)
     unserviceable_report_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     
-    # Track device lifecycle acquisition date
     date_acquired: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     department: Mapped[Department] = relationship("Department", back_populates="inventory")
@@ -454,17 +454,14 @@ class Proposal(Base):
     item_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    # DYNAMIC JSON COLUMN
     yearly_quantities: Mapped[Dict[str, int]] = mapped_column(
         MutableDict.as_mutable(JSON), 
         default=dict, 
         nullable=False
     )
     
-    # Flat column preserved for database query/index optimization; kept in sync via listeners
     total_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
 
-    # Project Alignment Map
     project_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
 
     payload: Mapped[Dict[str, Any]] = mapped_column(
@@ -490,7 +487,6 @@ class Proposal(Base):
         back_populates="proposals"
     )
     
-    # Relational deployment mapping configurations
     deployments_relation: Mapped[List["ProposalDeployment"]] = relationship(
         "ProposalDeployment", 
         back_populates="proposal", 
@@ -528,7 +524,7 @@ class Proposal(Base):
 
 class SubscriptionProposal(Base):
     """
-    Handles Annex A-2 / MOOE Software and Cloud Subscriptions.
+    Handles Annex a-2 / MOOE Software and Cloud Subscriptions.
     Provides structured setters to automatically synchronize flat database columns
     with the nested encrypted payload dictionary to prevent state drift.
     """
@@ -552,7 +548,6 @@ class SubscriptionProposal(Base):
     software_name: Mapped[str] = mapped_column(String(255), nullable=False)
     justification: Mapped[str] = mapped_column(Text, nullable=False)
     
-    # DYNAMIC JSON COLUMN
     yearly_users: Mapped[Dict[str, int]] = mapped_column(
         MutableDict.as_mutable(JSON), 
         default=dict, 
@@ -561,10 +556,8 @@ class SubscriptionProposal(Base):
     
     annual_cost_per_user: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    # Flat column preserved for database query/index optimization; kept in sync via listeners
     total_multiyear_mooe: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False, index=True)
     
-    # Project Alignment Map
     project_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
 
     status: Mapped[ProposalStatus] = mapped_column(Enum(ProposalStatus), default=ProposalStatus.DRAFT, nullable=False)
@@ -671,12 +664,15 @@ class BudgetCeiling(Base):
     to prevent budget race conditions across departments.
     """
     __tablename__ = "budget_ceilings"
+    
+    __table_args__ = (
+        UniqueConstraint("department_id", "issp_period", name="uq_budget_ceilings_dept_period"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     department_id: Mapped[int] = mapped_column(
         ForeignKey("departments.id", ondelete="CASCADE"), 
-        unique=True, 
-        nullable=False, 
+        nullable=False,
         index=True
     )
     allocated_capex: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
@@ -690,7 +686,7 @@ class BudgetCeiling(Base):
         index=True
     )
 
-    department: Mapped[Department] = relationship("Department", back_populates="budget_ceiling")
+    department: Mapped[Department] = relationship("Department", back_populates="budget_ceilings")
 
     @hybrid_property
     def sub_ceiling(self) -> Decimal:
@@ -705,14 +701,13 @@ class BudgetCeiling(Base):
     @sub_ceiling.setter
     def sub_ceiling(self, value: Decimal) -> None:
         """
-        Fix (Anomaly 1): Calculates CapEx first, then subtracts it from the consolidated sub-ceiling
+        Calculates CapEx first, then subtracts it from the consolidated sub-ceiling
         value to determine MOOE, avoiding independent quantization rounding/precision loss.
         """
         if value is None:
             value = Decimal("0.00")
         elif not isinstance(value, Decimal):
             value = Decimal(str(value))
-        # Ensure the total sub-ceiling is quantized to 1.00 to avoid fractional cents
         quantized_total = value.quantize(Decimal("1.00"))
         self.allocated_capex = (quantized_total * Decimal("0.70")).quantize(Decimal("1.00"))
         self.allocated_mooe = quantized_total - self.allocated_capex
