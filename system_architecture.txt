@@ -1862,35 +1862,32 @@ async def lifespan(app: FastAPI):
     logger.info("INITIALIZING CSPC E-ISSP COMPLIANCE ENGINE")
     logger.info("=" * 70)
     
-    # Pre-emptively verify and create database schema tables to prevent missing relation anomalies
-    try:
-        logger.info("Verifying and creating base tables via SQLAlchemy metadata...")
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database base tables verified successfully.")
-    except Exception as e:
-        logger.error(f"Base schema verification encountered an issue: {str(e)}", exc_info=True)
-
-    # Run Alembic migrations programmatically to sync SQLite database models on server startup
-    try:
-        logger.info("Running database migrations via Alembic head upgrade...")
-        import alembic.config
-        import alembic.command
-        
-        alembic_ini_path = os.path.join(settings.BASE_DIR, "alembic.ini")
-        if os.path.exists(alembic_ini_path):
+    # Run database migrations first to prevent metadata/Alembic version conflicts
+    alembic_ini_path = os.path.join(settings.BASE_DIR, "alembic.ini")
+    if os.path.exists(alembic_ini_path):
+        try:
+            logger.info("Running database migrations via Alembic head upgrade...")
+            import alembic.config
+            import alembic.command
+            
             alembic_cfg = alembic.config.Config(alembic_ini_path)
             alembic.command.upgrade(alembic_cfg, "head")
             logger.info("Database schema migrations completed successfully.")
-        else:
-            logger.warning("alembic.ini not found. Falling back to metadata.create_all.")
-            Base.metadata.create_all(bind=engine)
-    except Exception as e:
-        logger.error(f"Failed to auto-upgrade database schema via Alembic: {str(e)}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Failed to auto-upgrade database schema via Alembic: {str(e)}", exc_info=True)
+            try:
+                logger.warning("Attempting database metadata creation fallback...")
+                Base.metadata.create_all(bind=engine)
+                logger.info("Fallback database metadata creation completed successfully.")
+            except Exception as fallback_err:
+                logger.critical(f"Failed to run database metadata creation fallback: {str(fallback_err)}")
+    else:
         try:
+            logger.info("alembic.ini not found. Creating tables via metadata...")
             Base.metadata.create_all(bind=engine)
-            logger.info("Fallback database metadata creation completed successfully.")
-        except Exception as fallback_err:
-            logger.critical(f"Failed to run database metadata creation fallback: {str(fallback_err)}")
+            logger.info("Database base tables verified successfully.")
+        except Exception as e:
+            logger.critical(f"Failed to initialize metadata tables: {str(e)}")
     
     # Route Diagnosis Table
     logger.info("Scanning and mapping active API routing tables...")
