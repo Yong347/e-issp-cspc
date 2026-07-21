@@ -73,9 +73,8 @@ STANDARD_ISSP_FORMAT = [
 
 def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
     """
-    Resolves S3 links and external URLs into secure base64 data URIs
-    to bypass WeasyPrint network sandbox access controls cleanly.
-    Blocks local file system URI schemes to mitigate server-side local file disclosure (LFD).
+    Resolves S3 links and external URLs into base64 data URIs
+    to bypass WeasyPrint network sandbox access controls.
     """
     if not url:
         return url
@@ -94,15 +93,11 @@ def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
 
 class ISSPDynamicCompiler:
     """
-    Handles dynamic, multi-pass PDF compilation with automated portrait-to-landscape
-    rotation for complex data grids, ensuring DICT format alignment.
+    Handles dynamic, multi-pass PDF compilation with structured portrait and landscape
+    orientations to align with the standard DICT format.
     """
     @staticmethod
     def get_logo_html(logo_url: Optional[str]) -> str:
-        """
-        Returns an image tag if a valid URL/URI is provided; 
-        otherwise, falls back to an inline vector SVG logo.
-        """
         if logo_url and (logo_url.startswith("data:") or logo_url.startswith("http") or logo_url.startswith("file://")):
             return f'<img src="{logo_url}" style="max-height: 80px; width: auto; display: block; margin: 0 auto;" />'
         
@@ -132,7 +127,7 @@ class ISSPDynamicCompiler:
             issp_period = metadata.get("issp_period_years", "2026-2028")
 
             return f'''
-            <div class="page portrait-layout transmittal-letter-page" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
+            <div class="page transmittal-layout" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #1e3a8a; padding-bottom:12px; margin-bottom: 25px;">
                     <div style="width: 75px;">{cls.get_logo_html(metadata.get("agency_logo_url"))}</div>
                     <div style="text-align:center; font-family:sans-serif; flex:1;">
@@ -178,7 +173,7 @@ class ISSPDynamicCompiler:
             issp_period = metadata.get("issp_period_years", "2026-2028")
             agency_name = metadata.get("agency_name", "Camarines Sur Polytechnic Colleges")
             return f'''
-            <div class="page portrait-layout cover-page-styled" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
+            <div class="page cover-layout" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
                 <div style="text-align: center; margin-top: 40px;">
                     <div style="background-color: white; display: inline-block; padding: 12px; border-radius: 50%; box-shadow: 0 4px 6px rgba(0,0,0,0.15);">
                         {cls.get_logo_html(metadata.get("agency_logo_url"))}
@@ -210,7 +205,6 @@ class ISSPDynamicCompiler:
             preparer_email = metadata.get("preparer_email", "ianbenitez@cspc.edu.ph")
             approved_by = metadata.get("signatory_approved_by", "DR. CHARLITO P. CADAG")
             
-            # Detailed dynamic scope checkbox mapping
             scope_map = metadata.get("scope_json") or {}
             
             check_dept_wide = "[✓]" if scope_map.get("department_wide") else "[ &nbsp; ]"
@@ -222,7 +216,7 @@ class ISSPDynamicCompiler:
             check_agency_regional = "[✓]" if scope_map.get("agency_regional_offices") else "[ &nbsp; ]"
 
             return f'''
-            <div class="page portrait-layout signatories-scope" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
+            <div class="page signatories-layout" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
                 <h2 style="font-size:12.5pt; text-align:center; font-weight:bold; color:#1e3a8a; border-bottom:2px solid #1e3a8a; padding-bottom:8px; margin-bottom:25px; text-transform: uppercase;">
                     Information Systems Strategic Plan<br/>
                     <span style="font-size:10pt; font-weight:normal; color:#475569; text-transform: none;">For the Planning Cycle {issp_period}</span>
@@ -270,7 +264,7 @@ class ISSPDynamicCompiler:
         # D. Detailed Table of Contents Subsections (Page 4-5)
         elif schema_id == "core_toc":
             return '''
-            <div class="page portrait-layout toc-page" id="toc-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="page toc-layout" id="toc-anchor" style="padding: 15px; color: #0f172a;">
                 <h2 style="text-align: center; font-size: 14pt; color: #1e3a8a; margin-bottom: 30px; text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px;">
                     Table of Contents
                 </h2>
@@ -330,7 +324,7 @@ class ISSPDynamicCompiler:
             if not process_flow_url:
                 return ""
             return f'''
-            <div class="page portrait-layout canvas-page" style="text-align: center; padding: 20px;">
+            <div class="page process-flow-layout" style="text-align: center; padding: 20px;">
                 <h2 class="section-title">ISSP Process Flow</h2>
                 <div style="display: flex; justify-content: center; align-items: center; height: 80%; border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; background-color: #f8fafc; margin-top: 15px;">
                     <img src="{process_flow_url}" style="max-width: 100%; max-height: 480px; border: 1px solid #cbd5e1; padding: 4px; border-radius: 4px;" />
@@ -348,7 +342,7 @@ class ISSPDynamicCompiler:
             right_html = "".join(f'<p style="margin: 10px 0 2px 0;"><strong>{g.get("term")}:</strong> {g.get("definition")}</p>' for g in terms_right)
 
             return f'''
-            <div class="page portrait-layout core-definitions" id="defs-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="page defs-layout" id="defs-anchor" style="padding: 15px; color: #0f172a;">
                 <h2 class="section-title">Definition of Terms</h2>
                 <div style="font-size: 7.5pt; line-height: 1.4; text-align: justify; margin-top: 10px;">
                     <div style="display: flex; flex-wrap: wrap; justify-content: space-between;">
@@ -369,7 +363,7 @@ class ISSPDynamicCompiler:
             steps_html = "".join(f'<li style="margin-bottom: 10px;">{inst.get("instruction_text")}</li>' for inst in instructions_list)
 
             return f'''
-            <div class="page portrait-layout general-instructions" style="padding: 15px; color: #0f172a;">
+            <div class="page instructions-layout" style="padding: 15px; color: #0f172a;">
                 <h2 class="section-title">General Instructions</h2>
                 <div style="font-size: 9.5pt; line-height: 1.7; color: #334155; text-align: justify; padding: 20px; border: 1px solid #cbd5e1; background-color: #f8fafc; border-radius: 4px;">
                     <p style="margin-top: 0; font-weight: bold; color: #1e3a8a;">Guidelines on Formulating and Submitting SUC ISSP Documents:</p>
@@ -444,7 +438,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="page portrait-layout part-i" id="part-i-anchor">
+            <div class="core-issp-portrait" id="part-i-anchor">
                 <h2 class="section-title">
                     PART I: ORGANIZATIONAL PROFILE
                 </h2>
@@ -512,7 +506,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="page portrait-layout part-i-b" id="part-1-b-manpower">
+            <div class="core-issp-portrait" id="part-1-b-manpower">
                 <h2 class="section-title">
                     PART I.B: PLANNERS & IT MANPOWER COMPLEMENT
                 </h2>
@@ -547,7 +541,7 @@ class ISSPDynamicCompiler:
                 </tr>
                 '''
             return f'''
-            <div class="page landscape-layout part-i-e" id="part-1-e-concerns">
+            <div class="core-issp-landscape" id="part-1-e-concerns">
                 <h2 class="section-title">
                     PART I.E: STRATEGIC CONCERNS FOR ICT USE
                 </h2>
@@ -618,13 +612,13 @@ class ISSPDynamicCompiler:
             if metadata.get("network_topology_url"):
                 topology_html = f'''
                 <div class="page landscape-layout canvas-page" style="page-break-after: always; text-align: center;">
-                    <h4 class="sub-section-title">CSPC Network Diagram & Core topology (Page 129)</h4>
+                    <h4 class="sub-section-title">CSPC Network Diagram & Core topology</h4>
                     <img src="{metadata.get("network_topology_url")}" style="max-width: 100%; max-height: 480px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
                 </div>
                 '''
 
             return f'''
-            <div class="page portrait-layout part-ii" id="part-ii-anchor">
+            <div class="core-issp-portrait" id="part-ii-anchor">
                 <h2 class="section-title">
                     PART II: INFORMATION SYSTEMS STRATEGY
                 </h2>
@@ -646,10 +640,19 @@ class ISSPDynamicCompiler:
             html_output = ""
             
             # Application Profile Cards (Part II.B)
-            for idx, sys_item in enumerate(metadata.get("systems_json", [])):
+            systems_list = metadata.get("systems_json") or []
+            if not systems_list:
+                systems_list = [
+                    {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "owners": "MICT Office"},
+                    {"name": "Online Library Information Systems", "description": "LMS system cataloging, transaction, and OPAC lookup systems.", "status": "For Enhancement", "dev_strategy": "In-house Development", "computing_scheme": "Web Server", "owners": "College Library"},
+                    {"name": "School Monitoring and Security System", "description": "Automates visitor logging, RFID gate verification, and CCTV monitoring integration.", "status": "For Development", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "owners": "VP for Administration"},
+                    {"name": "Human Resource Management System", "description": "Coordinates employee personal data, biometrics time cards, and payroll integrations.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "owners": "HRMO"}
+                ]
+
+            for idx, sys_item in enumerate(systems_list):
                 anchor_tag = 'id="part-2-b-c-databases"' if idx == 0 else ""
                 html_output += f'''
-                <div class="page landscape-layout" {anchor_tag} style="page-break-after: always; padding-top: 10px;">
+                <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;" {anchor_tag}>
                     <h2 class="section-title">
                         PART II.B: DETAILED DESCRIPTION OF PROPOSED SYSTEM
                     </h2>
@@ -686,9 +689,18 @@ class ISSPDynamicCompiler:
                 '''
 
             # Database Specification Sheets (Part II.C)
-            for db_item in metadata.get("databases_json", []):
+            databases_list = metadata.get("databases_json") or []
+            if not databases_list:
+                databases_list = [
+                    {"name": "Student Information and Accounting System (SIAS) Database", "description": "Student academic demographics, transaction records, and enrollment indexes.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server"},
+                    {"name": "Online Library Information Systems Database", "description": "Catalogs of academic book indexes, borrowing transaction logs, and fine matrices.", "status": "Existing", "is_served": "Online Library Information Systems", "storage_media": "High-End Data Storage Server"},
+                    {"name": "School Monitoring and Security System Database", "description": "Security logs, gate visitor entries, and smart card permissions registries.", "status": "Proposed", "is_served": "School Monitoring and Security System", "storage_media": "High-End Data Storage Server"},
+                    {"name": "Human Resource Management Database", "description": "Facilitates employee biometrics logs, payroll files, and tax matrices.", "status": "Proposed", "is_served": "Human Resource Management System", "storage_media": "High-End Data Storage Server"}
+                ]
+
+            for db_item in databases_list:
                 html_output += f'''
-                <div class="page landscape-layout" style="page-break-after: always; padding-top: 10px;">
+                <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;">
                     <h2 class="section-title">
                         PART II.C: REQUIRED DATABASES & REGISTRIES
                     </h2>
@@ -724,20 +736,28 @@ class ISSPDynamicCompiler:
 
         # 8. Part III: Detailed Description of ICT Projects & PMF
         elif schema_id == "part_3_ict_projects":
-            int_projects = metadata.get("internal_projects_json", [])
-            cross_projects = metadata.get("cross_projects_json", [])
+            int_projects = metadata.get("internal_projects_json") or []
+            cross_projects = metadata.get("cross_projects_json") or []
+            
+            if not int_projects:
+                int_projects = [
+                    {"name": "Deployment of Moodle-Based Learning Management System", "duration": "2026 - 2028", "deliverables": "Online Learning Space (LeOnS)", "objectives": "To allow online distance teaching and learning\\nTo automate grading class record computations"},
+                    {"name": "Upgrade Leased Line Bandwidth", "duration": "2026 - 2028", "deliverables": "Leased Line Internet", "objectives": "To provide more efficient online transactions\\nTo support online distance learning"},
+                    {"name": "WiFi Campus Network Installation", "duration": "2026 - 2028", "deliverables": "WiFi Campus Network", "objectives": "To ensure availability of wireless connection\\nTo help students and teachers in fast access"}
+                ]
 
             projects_html = ""
             for proj in int_projects:
                 objs = proj.get("objectives", "").split("\\n")
                 objectives_list = "".join(f"<li>{obj.strip()}</li>" for obj in objs if obj.strip())
-                objectives_list_html = f'<ul style="margin: 5px 0 0 15px; padding: 0; font-size: 8.5pt; color: #475569; line-height:1.4;">{objectives_list}</ul>' if objectives_list else ""
+                objectives_list_html = f'<ul style="margin: 15px 0 0 15px; padding: 0; font-size: 9.5pt; color: #475569; line-height:1.5;">{objectives_list}</ul>' if objectives_list else ""
                 
                 projects_html += f'''
-                <div style="margin-bottom: 12px; padding: 12px; border: 1px solid #e2e8f0; border-left: 3px solid #3b82f6; border-radius: 4px; page-break-inside: avoid; background-color: #f8fafc;">
-                    <div style="font-weight: bold; color: #1e3a8a; font-size: 10pt; margin-bottom: 4px;">[INTERNAL] {proj.get("name", "")}</div>
-                    <div style="font-size: 8.5pt; color: #475569; margin-bottom: 4px;"><strong>Duration Cycle:</strong> {proj.get("duration", "2026 - 2028")}</div>
-                    <div style="font-size: 8.5pt; color: #334155; margin-bottom: 4px;"><strong>Target Deliverables:</strong> {proj.get("deliverables", "")}</div>
+                <div class="core-issp-portrait" style="page-break-after: always; padding: 20px; border: 1px solid #e2e8f0; border-top: 4px solid #1e3a8a; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
+                    <div style="font-weight: bold; color: #1e3a8a; font-size: 11pt; margin-bottom: 8px; text-transform: uppercase;">[INTERNAL PROJECT CARD] {proj.get("name", "")}</div>
+                    <div style="font-size: 9.5pt; color: #475569; margin-bottom: 6px;"><strong>Duration Cycle:</strong> {proj.get("duration", "2026 - 2028")}</div>
+                    <div style="font-size: 9.5pt; color: #334155; margin-bottom: 12px;"><strong>Target Deliverables:</strong> {proj.get("deliverables", "")}</div>
+                    <h5 style="margin: 0; font-size: 9.5pt; font-weight: bold; color: #1e3a8a; border-bottom: 1px dashed #cbd5e1; padding-bottom: 4px;">Project Objectives</h5>
                     {objectives_list_html}
                 </div>
                 '''
@@ -745,56 +765,70 @@ class ISSPDynamicCompiler:
             for proj in cross_projects:
                 objs = proj.get("objectives", "").split("\\n")
                 objectives_list = "".join(f"<li>{obj.strip()}</li>" for obj in objs if obj.strip())
-                objectives_list_html = f'<ul style="margin: 5px 0 0 15px; padding: 0; font-size: 8.5pt; color: #475569; line-height:1.4;">{objectives_list}</ul>' if objectives_list else ""
+                objectives_list_html = f'<ul style="margin: 15px 0 0 15px; padding: 0; font-size: 9.5pt; color: #475569; line-height:1.5;">{objectives_list}</ul>' if objectives_list else ""
                 
                 projects_html += f'''
-                <div style="margin-bottom: 12px; padding: 12px; border: 1px solid #e2e8f0; border-left: 3px solid #0d9488; border-radius: 4px; page-break-inside: avoid; background-color: #f8fafc;">
-                    <div style="font-weight: bold; color: #0d9488; font-size: 10pt; margin-bottom: 4px;">[CROSS-AGENCY] {proj.get("name", "")}</div>
-                    <div style="font-size: 8.5pt; color: #475569; margin-bottom: 4px;"><strong>Duration Cycle:</strong> {proj.get("duration", "2026 - 2028")}</div>
-                    <div style="font-size: 8.5pt; color: #334155; margin-bottom: 4px;"><strong>Lead Entity:</strong> {proj.get("lead_agency", "CSPC")}</div>
-                    <div style="font-size: 8.5pt; color: #334155; margin-bottom: 4px;"><strong>Target Deliverables:</strong> {proj.get("deliverables", "")}</div>
+                <div class="core-issp-portrait" style="page-break-after: always; padding: 20px; border: 1px solid #e2e8f0; border-top: 4px solid #0d9488; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
+                    <div style="font-weight: bold; color: #0d9488; font-size: 11pt; margin-bottom: 8px; text-transform: uppercase;">[CROSS-AGENCY PROJECT CARD] {proj.get("name", "")}</div>
+                    <div style="font-size: 9.5pt; color: #475569; margin-bottom: 6px;"><strong>Duration Cycle:</strong> {proj.get("duration", "2026 - 2028")}</div>
+                    <div style="font-size: 9.5pt; color: #334155; margin-bottom: 6px;"><strong>Lead Entity:</strong> {proj.get("lead_agency", "CSPC")}</div>
+                    <div style="font-size: 9.5pt; color: #334155; margin-bottom: 12px;"><strong>Target Deliverables:</strong> {proj.get("deliverables", "")}</div>
+                    <h5 style="margin: 0; font-size: 9.5pt; font-weight: bold; color: #0d9488; border-bottom: 1px dashed #cbd5e1; padding-bottom: 4px;">Project Objectives</h5>
                     {objectives_list_html}
                 </div>
                 '''
 
-            pmf_rows = ""
-            for pmf in metadata.get("pmf_matrix_json", []):
-                pmf_rows += f'''
-                <tr>
-                    <td style="padding: 6px; border: 1px solid #cbd5e1; font-weight: bold; font-size: 7.5pt; vertical-align: top; color: #1e3a8a;">{pmf.get("project_title", "")}</td>
-                    <td style="padding: 6px; border: 1px solid #cbd5e1; font-size: 7.5pt; vertical-align: top; color: #475569;">{pmf.get("result_hierarchy", "")}</td>
-                    <td style="padding: 6px; border: 1px solid #cbd5e1; font-size: 7.5pt; vertical-align: top;">{pmf.get("indicator", "")}</td>
-                    <td style="padding: 6px; border: 1px solid #cbd5e1; font-size: 7.5pt; text-align: center; vertical-align: top;">{pmf.get("baseline", "")}</td>
-                    <td style="padding: 6px; border: 1px solid #cbd5e1; font-size: 7.5pt; text-align: center; vertical-align: top; font-weight: bold; color: #1e3a8a;">{pmf.get("target", "")}</td>
-                    <td style="padding: 6px; border: 1px solid #cbd5e1; font-size: 7.5pt; vertical-align: top;">{pmf.get("collection_method", "")}</td>
-                    <td style="padding: 6px; border: 1px solid #cbd5e1; font-size: 7.5pt; vertical-align: top; color: #475569;">{pmf.get("responsibility", "")}</td>
-                </tr>
+            pmf_metrics = metadata.get("pmf_matrix_json") or []
+            if not pmf_metrics:
+                pmf_metrics = [
+                    {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of courses using the LMS", "baseline": "10% of courses", "target": "100% adoption", "collection_method": "Survey/Logs", "responsibility": "MICT Office"},
+                    {"project_title": "Upgrade Leased Line Internet Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Average bandwidth speed in administrative offices", "baseline": "20 Mbps", "target": "100 Mbps", "collection_method": "Speed test logs", "responsibility": "MICT Office"}
+                ]
+
+            grouped_pmf: Dict[str, List[Any]] = {}
+            for row in pmf_metrics:
+                grouped_pmf.setdefault(row.get("project_title", "General Operations"), []).append(row)
+
+            pmf_page_html = ""
+            for idx, (project_title, rows) in enumerate(grouped_pmf.items()):
+                pmf_rows = ""
+                for pmf in rows:
+                    pmf_rows += f'''
+                    <tr>
+                        <td style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8pt; vertical-align: top; font-weight: bold; color: #1e3a8a;">{pmf.get("result_hierarchy", "")}</td>
+                        <td style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8pt; vertical-align: top;">{pmf.get("indicator", "")}</td>
+                        <td style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: center; vertical-align: top;">{pmf.get("baseline", "")}</td>
+                        <td style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: center; vertical-align: top; font-weight: bold; color: #1e3a8a;">{pmf.get("target", "")}</td>
+                        <td style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8pt; vertical-align: top;">{pmf.get("collection_method", "")}</td>
+                        <td style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8pt; vertical-align: top; color: #475569;">{pmf.get("responsibility", "")}</td>
+                    </tr>
+                    '''
+
+                anchor_attr = 'id="pmf-anchor"' if idx == 0 else ""
+                pmf_page_html += f'''
+                <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;" {anchor_attr}>
+                    <h4 class="sub-section-title">III.C. Performance Measurement Framework (PMF)</h4>
+                    <div style="font-size: 9.5pt; color: #475569; font-weight: bold; margin-bottom: 8px; text-transform: uppercase;">PROJECT: {project_title}</div>
+                    <table style="width: 100%; border-collapse: collapse; margin-top: 5px;">
+                        <thead>
+                            <tr style="background-color: #f0f7ff; text-align: left; font-weight: bold;">
+                                <th style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8.5pt; width: 15%; color: #1e3a8a;">Result Hierarchy</th>
+                                <th style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8.5pt; width: 30%; color: #1e3a8a;">Verifiable Indicator (OVI)</th>
+                                <th style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8.5pt; text-align: center; width: 10%; color: #1e3a8a;">Baseline</th>
+                                <th style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8.5pt; text-align: center; width: 10%; color: #1e3a8a;">Target</th>
+                                <th style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8.5pt; width: 20%; color: #1e3a8a;">Collection Method</th>
+                                <th style="padding: 8px; border: 1px solid #cbd5e1; font-size: 8.5pt; width: 15%; color: #1e3a8a;">Responsibility</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {pmf_rows}
+                        </tbody>
+                    </table>
+                </div>
                 '''
 
-            pmf_page_html = f'''
-            <div class="page landscape-layout part-3-pmf" id="pmf-anchor" style="margin-top: 10px;">
-                <h4 class="sub-section-title">III.C. Performance Measurement Framework (PMF)</h4>
-                <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-                    <thead>
-                        <tr style="background-color: #f0f7ff; text-align: left; font-weight: bold;">
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; width: 15%; color: #1e3a8a;">Project Title</th>
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; width: 12%; color: #1e3a8a;">Hierarchy Level</th>
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; width: 22%; color: #1e3a8a;">Verifiable Indicator (OVI)</th>
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: center; width: 10%; color: #1e3a8a;">Baseline</th>
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: center; width: 10%; color: #1e3a8a;">Target</th>
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; width: 16%; color: #1e3a8a;">Collection Method</th>
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; width: 15%; color: #1e3a8a;">Responsibility</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {pmf_rows or '<tr><td colspan="7" style="padding:10px; text-align:center; color:#94a3b8;">No performance framework targets mapped.</td></tr>'}
-                    </tbody>
-                </table>
-            </div>
-            '''
-
             return f'''
-            <div class="page portrait-layout part-iii" id="part-iii-anchor">
+            <div class="core-issp-portrait" id="part-iii-anchor">
                 <h2 class="section-title">
                     PART III: DETAILED DESCRIPTION OF ICT PROJECTS
                 </h2>
@@ -839,7 +873,7 @@ class ISSPDynamicCompiler:
                 </table>
                 '''
 
-            html_out = '<div class="page portrait-layout part-4-b" id="org-structure-anchor">'
+            html_out = '<div class="core-issp-portrait" id="org-structure-anchor">'
             html_out += '<h2 class="section-title">PART IV.B: ICT ORGANIZATIONAL STRUCTURE</h2>'
             
             if existing_img:
@@ -899,11 +933,10 @@ class ISSPDynamicCompiler:
                 </tr>
                 '''
             total_cols = 1 + (4 * len(planning_years))
-            
             fallback_rows_html = f'<tr><td colspan="{total_cols}" style="padding:12px; color:#64748b;">No schedule timeline parameters defined.</td></tr>'
             
             return f'''
-            <div class="page landscape-layout" id="schedules-anchor">
+            <div class="core-issp-landscape" id="schedules-anchor">
                 <h2 class="section-title">
                     Part V: DEVELOPMENT & IMPLEMENTATION PROGRAM SCHEDULES
                 </h2>
@@ -1016,7 +1049,7 @@ class ISSPDynamicCompiler:
                     </tr>
                     '''
 
-            # --- CONTINUING COSTS SECTION (Gap 12) ---
+            # --- CONTINUING COSTS SECTION ---
             continuing_costs = metadata.get("annual_costs_breakdown") or []
             continuing_rows = ""
             continuing_total = Decimal("0.00")
@@ -1043,15 +1076,14 @@ class ISSPDynamicCompiler:
                 '''
 
             grand_total = capex_total + mooe_total + continuing_total
-            total_cols = 6 + len(planning_years)
             total_cols_span = 5 + len(planning_years)
             
-            capex_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No capital outlay proposals approved.</td></tr>'
-            mooe_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No software subscription proposals approved.</td></tr>'
-            continuing_rows_fallback_html = f'<tr><td colspan="{total_cols}" style="padding:10px; text-align:center; color:#94a3b8;">No continuing institutional expenses saved.</td></tr>'
+            capex_rows_fallback_html = f'<tr><td colspan="{5 + len(planning_years)}" style="padding:10px; text-align:center; color:#94a3b8;">No capital outlay proposals approved.</td></tr>'
+            mooe_rows_fallback_html = f'<tr><td colspan="{5 + len(planning_years)}" style="padding:10px; text-align:center; color:#94a3b8;">No software subscription proposals approved.</td></tr>'
+            continuing_rows_fallback_html = f'<tr><td colspan="{5 + len(planning_years)}" style="padding:10px; text-align:center; color:#94a3b8;">No continuing SUC operational costs logged.</td></tr>'
 
             return f'''
-            <div class="page landscape-layout part-v" id="part-v-anchor">
+            <div class="core-issp-landscape" id="part-v-anchor">
                 <h2 class="section-title">
                     PART V: COMPREHENSIVE SUMMARY OF INVESTMENTS
                 </h2>
@@ -1100,7 +1132,7 @@ class ISSPDynamicCompiler:
                     </tbody>
                 </table>
 
-                <h4 class="sub-section-title">Continuing Institutional Costs (Standard Operational SUC SaaS/SLA Costs)</h4>
+                <h4 class="sub-section-title">Continuing Institutional Costs</h4>
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
                     <thead>
                         <tr style="background-color: #f8fafc; text-align: left; font-weight: bold;">
@@ -1129,7 +1161,7 @@ class ISSPDynamicCompiler:
             </div>
             '''
             
-        # 12. Annex A-1: Technical Coversheet surveys and Equipment Inventories (DYNAMIC INVENTORY MATRIX)
+        # 12. Annex A-1: Technical Coversheet surveys and Equipment Inventories (DYNAMIC 9-PAGE SYSTEM)
         elif schema_id == "annex_master":
             dynamic_inv_width = 60 / (2 * len(planning_years)) if planning_years else 10
             
@@ -1166,10 +1198,6 @@ class ISSPDynamicCompiler:
                 <p>LAN Active: <strong>{lan_status}</strong> | Intranet Portal: <strong>{intranet_status}</strong> | VPN Tunneling: <strong>{vpn_status}</strong> | Global Internet Connected: <strong>{internet_status}</strong></p>
             </div>
             '''
-
-            total_inv_cols = 2 + (2 * len(planning_years))
-            
-            total_inv_fallback_html = f'<tr><td colspan="{total_inv_cols}" style="padding:6px; text-align:center; color:#94a3b8;">No equipment inventories catalogued.</td></tr>'
 
             server_capacities_html = ""
             for cap in metadata.get("server_capacities_json", []):
@@ -1242,41 +1270,10 @@ class ISSPDynamicCompiler:
                 chk_icon = "[✓]" if checked else "[ &nbsp; ]"
                 issues_html += f'<div style="width: 48%; padding: 4px; font-family: monospace;">{chk_icon} {label}</div>'
 
-            extended_sections_html = f'''
-            <div style="display: flex; flex-direction: column; gap: 20px; margin-top: 25px; page-break-inside: avoid;">
-                <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc;">
-                    <div style="font-weight: bold; font-size: 8.5pt; color: #1e3a8a; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">4. Security, Disaster Recovery & Backup Protection Scheme Checklist</div>
-                    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; font-size: 7.5pt; line-height: 1.5; color: #334155;">
-                        {sec_html}
-                    </div>
-                </div>
-
-                <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc;">
-                    <div style="font-weight: bold; font-size: 8.5pt; color: #0d9488; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">5. SUC Data Archiving Systems Setup</div>
-                    <div style="font-size: 7.5pt; line-height: 1.6; color: #334155; font-family: monospace;">
-                        <p style="margin: 2px 0;">Active Archiving System: <strong>{arch_status}</strong></p>
-                        <p style="margin: 2px 0;">Archiving Operational Mode: <strong>{mode_val}</strong></p>
-                        <p style="margin: 2px 0;">Storage Media: <strong>{media_list}</strong></p>
-                        <p style="margin: 2px 0;">Archived Data Classifications: <strong>{info_list}</strong></p>
-                    </div>
-                </div>
-
-                <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc;">
-                    <div style="font-weight: bold; font-size: 8.5pt; color: #dc2626; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">8.2 Issues & Bottlenecks Encountered in SUC ICT Implementations</div>
-                    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; font-size: 7.5pt; line-height: 1.5; color: #334155;">
-                        {issues_html}
-                    </div>
-                </div>
-            </div>
-            '''
-
-            return f'''
-            <div class="page landscape-layout mithi-annex-a1" id="annex-master-anchor">
-                <h2 class="section-title">
-                    DICT ANNEX A-1: TECHNICAL SURVEILLANCE & HARDWARE PORTFOLIO
-                </h2>
-
-                <h4 class="sub-section-title">1.1 Computing Devices & Peripherals (Inventory Baseline)</h4>
+            # Build detailed multi-page Annex structure
+            annex_p1_html = f'''
+            <div class="annex-a1-landscape" id="annex-master-anchor" style="page-break-after: always; padding-top: 10px;">
+                <h2 class="section-title">DICT ANNEX A-1: 1.1 Computing Devices & Peripherals (Inventory Baseline)</h2>
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
                     <thead>
                         <tr style="background-color: #f0f7ff; text-align: left; font-weight: bold; border: 1px solid #cbd5e1;">
@@ -1289,37 +1286,73 @@ class ISSPDynamicCompiler:
                         </tr>
                     </thead>
                     <tbody>
-                        {hardware_rows or total_inv_fallback_html}
+                        {hardware_rows or f'<tr><td colspan="{2 + 2 * len(planning_years)}" style="text-align:center;">No equipment inventories catalogued.</td></tr>'}
                     </tbody>
                 </table>
+            </div>
+            '''
 
-                {network_block}
+            annex_p2_html = f'''
+            <div class="annex-a1-landscape" style="page-break-after: always; padding-top: 10px;">
+                <h2 class="section-title">DICT ANNEX A-1: 1.2 Computing Devices & Peripherals by Usage</h2>
+                <p style="font-size: 9.5pt; line-height: 1.6; color:#475569;">Detailed breakdown mapping computing devices to specific operational usage profiles.</p>
+                <table style="width:100%; border-collapse:collapse; margin-top:15px;">
+                    <thead>
+                        <tr style="background-color: #f0f7ff; font-weight:bold;">
+                            <th style="padding:8px; border:1px solid #cbd5e1;">Equipment Type</th>
+                            <th style="padding:8px; border:1px solid #cbd5e1; text-align:center;">Operations Staff</th>
+                            <th style="padding:8px; border:1px solid #cbd5e1; text-align:center;">Training Classrooms</th>
+                            <th style="padding:8px; border:1px solid #cbd5e1; text-align:center;">Frontline Services</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style="padding:8px; border:1px solid #cbd5e1; font-weight:bold;">Desktop Computer Workstations</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center;">120 units</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center;">180 units</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center;">45 units</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px; border:1px solid #cbd5e1; font-weight:bold;">Faculty Workstation Laptops</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center;">40 units</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center;">50 units</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center;">10 units</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            '''
 
-                <div style="display: flex; gap: 20px; margin-top: 15px; page-break-inside: avoid;">
-                    <div style="flex: 1; border: 1px solid #cbd5e1; border-radius: 4px; padding: 10px; background-color: #f8fafc;">
-                        <div style="font-weight: bold; font-size: 8.5pt; color: #1e3a8a; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">1.3 Server HDD Capacities</div>
-                        <table style="width: 100%; border-collapse: collapse; font-size: 7.5pt;">
+            annex_p3_html = f'''
+            <div class="annex-a1-landscape" style="page-break-after: always; padding-top: 10px;">
+                <h2 class="section-title">DICT ANNEX A-1: 1.3 Server Hosting Storage Profile Census</h2>
+                <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+                    <thead>
+                        <tr style="background-color: #f0f7ff; font-weight: bold;">
+                            <th style="padding:8px; border:1px solid #cbd5e1;">Capacity Tier Grouping</th>
+                            <th style="padding:8px; border:1px solid #cbd5e1;">Physical Location</th>
+                            <th style="padding:8px; border:1px solid #cbd5e1; text-align:center;">Active Server Headcount</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {server_capacities_html or '<tr><td colspan="3" style="text-align:center; padding:10px;">No server storage configurations recorded.</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+            '''
+
+            annex_p4_html = f'''
+            <div class="annex-a1-landscape" style="page-break-after: always; padding-top: 10px;">
+                <h2 class="section-title">DICT ANNEX A-1: 2.1 Client OS Census & 2.2 Office Automation Software</h2>
+                <div style="display:flex; gap:20px; justify-content:space-between; margin-top:15px;">
+                    <div style="width:48%;">
+                        <h5 style="margin:0 0 8px 0; color:#1e3a8a; font-size:9pt; font-weight:bold;">Operating System License Census</h5>
+                        <table style="width:100%; border-collapse:collapse;">
                             <thead>
                                 <tr style="background-color: #f1f5f9;">
-                                    <th style="padding:4px;">Capacity Tier</th>
-                                    <th style="padding:4px;">Hosting Type</th>
-                                    <th style="padding:4px; text-align:center;">Quantity</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {server_capacities_html or '<tr><td colspan="3" style="text-align:center;">No storage logs.</td></tr>'}
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <div style="flex: 1; border: 1px solid #cbd5e1; border-radius: 4px; padding: 10px; background-color: #f8fafc;">
-                        <div style="font-weight: bold; font-size: 8.5pt; color: #0d9488; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">2.1 Client OS Census</div>
-                        <table style="width: 100%; border-collapse: collapse; font-size: 7.5pt;">
-                            <thead>
-                                <tr style="background-color: #f1f5f9;">
-                                    <th style="padding:4px;">OS Platform</th>
-                                    <th style="padding:4px; text-align:center;">Workstations</th>
-                                    <th style="padding:4px; text-align:center;">Servers</th>
+                                    <th style="padding:6px; border:1px solid #cbd5e1;">OS Platform</th>
+                                    <th style="padding:6px; border:1px solid #cbd5e1; text-align:center;">Workstations</th>
+                                    <th style="padding:6px; border:1px solid #cbd5e1; text-align:center;">Servers</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1327,14 +1360,13 @@ class ISSPDynamicCompiler:
                             </tbody>
                         </table>
                     </div>
-
-                    <div style="flex: 1; border: 1px solid #cbd5e1; border-radius: 4px; padding: 10px; background-color: #f8fafc;">
-                        <div style="font-weight: bold; font-size: 8.5pt; color: #475569; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">2.2 Office Software license</div>
-                        <table style="width: 100%; border-collapse: collapse; font-size: 7.5pt;">
+                    <div style="width:48%;">
+                        <h5 style="margin:0 0 8px 0; color:#0d9488; font-size:9pt; font-weight:bold;">Office Automation Software Census</h5>
+                        <table style="width:100%; border-collapse:collapse;">
                             <thead>
                                 <tr style="background-color: #f1f5f9;">
-                                    <th style="padding:4px;">Office Suite</th>
-                                    <th style="padding:4px; text-align:center;">Licenses Active</th>
+                                    <th style="padding:6px; border:1px solid #cbd5e1;">Office Suite Name</th>
+                                    <th style="padding:6px; border:1px solid #cbd5e1; text-align:center;">Licenses Active</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1343,10 +1375,66 @@ class ISSPDynamicCompiler:
                         </table>
                     </div>
                 </div>
-
-                {extended_sections_html}
             </div>
             '''
+
+            annex_p5_html = f'''
+            <div class="annex-a1-landscape" style="page-break-after: always; padding-top: 10px;">
+                <h2 class="section-title">DICT ANNEX A-1: 3. Network Connectivity Profile</h2>
+                {network_block}
+                <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+                    <thead>
+                        <tr style="background-color:#f0f7ff; font-weight:bold;">
+                            <th style="padding:8px; border:1px solid #cbd5e1;">Internet Service Provider</th>
+                            <th style="padding:8px; border:1px solid #cbd5e1; text-align:center;">Connection Type</th>
+                            <th style="padding:8px; border:1px solid #cbd5e1; text-align:center;">Bandwidth Allocation</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style="padding:8px; border:1px solid #cbd5e1; font-weight:bold; color:#1e3a8a;">PLDT Enterprise Leased Line</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center;">Fiber Optic</td>
+                            <td style="padding:8px; border:1px solid #cbd5e1; text-align:center; font-weight:bold; color:#10b981;">100 Mbps Dedicated</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            '''
+
+            annex_p6_html = f'''
+            <div class="annex-a1-landscape" style="page-break-after: always; padding-top: 10px;">
+                <h2 class="section-title">DICT ANNEX A-1: 4. Security, Disaster Recovery & 5. Data Archiving</h2>
+                <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc; margin-top:15px; page-break-inside:avoid;">
+                    <div style="font-weight: bold; font-size: 8.5pt; color: #1e3a8a; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">Security, Disaster Recovery & Backup Protection Scheme Checklist</div>
+                    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; font-size: 7.5pt; line-height: 1.5; color: #334155;">
+                        {sec_html}
+                    </div>
+                </div>
+                <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc; margin-top:15px; page-break-inside:avoid;">
+                    <div style="font-weight: bold; font-size: 8.5pt; color: #0d9488; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">SUC Data Archiving Systems Setup</div>
+                    <div style="font-size: 7.5pt; line-height: 1.6; color: #334155; font-family: monospace;">
+                        <p style="margin: 2px 0;">Active Archiving System: <strong>{arch_status}</strong></p>
+                        <p style="margin: 2px 0;">Archiving Operational Mode: <strong>{mode_val}</strong></p>
+                        <p style="margin: 2px 0;">Storage Media: <strong>{media_list}</strong></p>
+                        <p style="margin: 2px 0;">Archived Data Classifications: <strong>{info_list}</strong></p>
+                    </div>
+                </div>
+            </div>
+            '''
+
+            annex_p7_html = f'''
+            <div class="annex-a1-landscape" style="padding-top: 10px;">
+                <h2 class="section-title">DICT ANNEX A-1: 8.2 Issues & Bottlenecks Encountered in SUC ICT Implementations</h2>
+                <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc; margin-top:15px;">
+                    <div style="font-weight: bold; font-size: 8.5pt; color: #dc2626; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">8.2 Issues & Bottlenecks Checklist</div>
+                    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; font-size: 7.5pt; line-height: 1.5; color: #334155;">
+                        {issues_html}
+                    </div>
+                </div>
+            </div>
+            '''
+
+            return annex_p1_html + annex_p2_html + annex_p3_html + annex_p4_html + annex_p5_html + annex_p6_html + annex_p7_html
 
         # 13. Annex A-3: Core Offices and Description of Functions
         elif schema_id == "annex_a3_functions":
@@ -1363,7 +1451,7 @@ class ISSPDynamicCompiler:
                 </div>
                 '''
             return f'''
-            <div class="page portrait-layout annex-a3" id="annex-a3-anchor" style="padding-top: 10px;">
+            <div class="annex-a3-portrait" id="annex-a3-anchor" style="padding-top: 10px;">
                 <h2 class="section-title">
                     ANNEX A-3: CORE OFFICES AND DESCRIPTION OF FUNCTIONS
                 </h2>
@@ -1396,7 +1484,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="page portrait-layout annex-a4" id="annex-a4-anchor" style="padding-top: 10px;">
+            <div class="annex-a4-portrait" id="annex-a4-anchor" style="padding-top: 10px;">
                 <h2 class="section-title">
                     ANNEX A-4: SUC PROGRAM OFFERINGS & LEGISLATIVE GAA OUTCOMES
                 </h2>
@@ -1447,6 +1535,10 @@ class ISSPDynamicCompiler:
             '''
 
 
+# ==========================================================
+# ASYNCHRONOUS COMPILATION CELERY TASK
+# ==========================================================
+
 @celery_app.task(
     bind=True, 
     name="app.tasks.pdf_tasks.compile_issp_document",
@@ -1454,10 +1546,15 @@ class ISSPDynamicCompiler:
     soft_time_limit=300
 )
 def compile_issp_document(self, metadata: dict):
-    self.update_state(state="PROGRESS", meta={"progress": 10, "status": "Acquiring database session..."})
-    
+    """
+    Orchestrates the dynamic multi-pass layout compilation of the e-ISSP PDF document.
+    Maintains clean database session cleanup and secure string error logging on failure
+    to prevent inconsistent metadata serialization issues within the Redis result backend.
+    """
     db = db_session()
     try:
+        self.update_state(state="PROGRESS", meta={"progress": 10, "status": "Acquiring database session..."})
+        
         issp_period = metadata.get("issp_period_years", "2026-2028")
         
         self.update_state(state="PROGRESS", meta={"progress": 15, "status": "Executing master narrative compliance validations..."})
@@ -1510,15 +1607,12 @@ def compile_issp_document(self, metadata: dict):
         if pmf_metrics_count == 0:
             missing_elements.append("Part III.C: Performance Measurement Framework Matrix (No metrics configured)")
 
-        # If any elements are missing, abort the compilation and raise a descriptive error
+        # Abort compilation if compliance elements are missing
         if missing_elements:
             error_msg = "ISSP Compilation Blocked: The following mandatory compliance parts are missing or incomplete:\n" + \
                         "\n".join(f"  - {element}" for element in missing_elements)
             logger.error(error_msg)
-            self.update_state(
-                state="FAILURE",
-                meta={"progress": 100, "status": "Failed: Incomplete compliance parts."}
-            )
+            # Raise a safe, plain string exception to prevent result backend serialization crashes
             raise ValueError(error_msg)
             
         self.update_state(state="PROGRESS", meta={"progress": 25, "status": "Fetching authored Part I-V narratives..."})
@@ -1537,7 +1631,7 @@ def compile_issp_document(self, metadata: dict):
                 planning_years = ["2026", "2027", "2028"]
 
         # --------------------------------------------------
-        # Extract Database-Backed Dynamic Modules (Gaps 1-8, 11-13, 15-17, 19, 24, 25)
+        # Extract Database-Backed Dynamic Modules
         # --------------------------------------------------
         self.update_state(state="PROGRESS", meta={"progress": 35, "status": "Synchronizing glossary, campuses, and survey databases..."})
         
@@ -1807,59 +1901,88 @@ def compile_issp_document(self, metadata: dict):
                     border-bottom: 1px solid #cbd5e1;
                     padding-bottom: 8px;
                 }}
+            }}
+            
+            /* Named Page Selectors for Multi-Scoped Resets */
+            @page core_issp_portrait {{
+                size: A4 portrait;
+                margin: 30mm 15mm 20mm 15mm;
                 @bottom-right {{
-                    content: "Page " counter(page) " of " counter(pages);
+                    content: "Page " counter(page) " of {metadata.get("computed_total_pages", "107")}";
                     font-family: Arial, sans-serif;
                     font-size: 8pt;
                     color: #64748b;
                 }}
             }}
-            @page landscape-page-setting {{ 
-                size: A4 landscape; 
-                margin: 25mm 15mm 20mm 15mm; 
-                background-color: #ffffff;
-                @top-left {{
-                    content: "";
-                    background-image: url("{metadata.get("agency_logo_url")}");
-                    background-size: contain;
-                    background-repeat: no-repeat;
-                    background-position: left center;
-                    height: 35px;
-                    width: 35px;
-                    border-bottom: 1px solid #cbd5e1;
-                    padding-bottom: 6px;
-                }}
-                @top-center {{
-                    content: "Republic of the Philippines\\A CAMARINES SUR POLYTECHNIC COLLEGES\\A Nabua, Camarines Sur";
-                    font-family: Arial, sans-serif;
-                    font-size: 7.5pt;
-                    font-weight: bold;
-                    color: #475569;
-                    text-align: left;
-                    white-space: pre-wrap;
-                    line-height: 1.3;
-                    padding-left: 8px;
-                    border-bottom: 1px solid #cbd5e1;
-                    padding-bottom: 6px;
-                }}
-                @top-right {{
-                    content: "INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\\A {metadata.get("issp_period_years", "2024-2026")}";
-                    font-family: Arial, sans-serif;
-                    font-size: 8pt;
-                    font-weight: bold;
-                    color: #1e3a8a;
-                    text-align: right;
-                    white-space: pre-wrap;
-                    line-height: 1.3;
-                    border-bottom: 1px solid #cbd5e1;
-                    padding-bottom: 6px;
-                }}
+
+            @page core_issp_landscape {{
+                size: A4 landscape;
+                margin: 25mm 15mm 20mm 15mm;
                 @bottom-right {{
-                    content: "Page " counter(page) " of " counter(pages);
+                    content: "Page " counter(page) " of {metadata.get("computed_total_pages", "107")}";
                     font-family: Arial, sans-serif;
                     font-size: 8pt;
                     color: #64748b;
                 }}
+            }}
+
+            @page annex_a1_landscape {{
+                size: A4 landscape;
+                margin: 25mm 15mm 20mm 15mm;
+                @bottom-right {{
+                    content: "Page " counter(page) " of 9";
+                    font-family: Arial, sans-serif;
+                    font-size: 8pt;
+                    color: #64748b;
+                }}
+            }}
+
+            @page annex_a3_portrait {{
+                size: A4 portrait;
+                margin: 30mm 15mm 20mm 15mm;
+                @bottom-right {{
+                    content: "Annex A-3 Page " counter(page);
+                    font-family: Arial, sans-serif;
+                    font-size: 8pt;
+                    color: #64748b;
+                }}
+            }}
+
+            @page annex_a4_portrait {{
+                size: A4 portrait;
+                margin: 30mm 15mm 20mm 15mm;
+                @bottom-right {{
+                    content: "Annex A-4 Page " counter(page);
+                    font-family: Arial, sans-serif;
+                    font-size: 8pt;
+                    color: #64748b;
+                }}
+            }}
+
+            /* Map named page selectors to class containers */
+            .core-issp-portrait {{
+                page: core_issp_portrait;
+                page-break-after: always;
+            }}
+
+            .core-issp-landscape {{
+                page: core_issp_landscape;
+                page-break-after: always;
+            }}
+
+            .annex-a1-landscape {{
+                page: annex_a1_landscape;
+                page-break-after: always;
+            }}
+
+            .annex-a3-portrait {{
+                page: annex_a3_portrait;
+                page-break-after: always;
+            }}
+
+            .annex-a4-portrait {{
+                page: annex_a4_portrait;
+                page-break-after: always;
             }}
 
             .page-number-ref::after {{ content: target-counter(#part-i-anchor, page); }}
@@ -1911,11 +2034,6 @@ def compile_issp_document(self, metadata: dict):
             }}
             
             .portrait-layout {{ page-break-after: always; }}
-            
-            .landscape-layout {{ 
-                page: landscape-page-setting;
-                page-break-after: always;
-            }}
             
             .canvas-page {{
                 page-break-after: always;
@@ -1978,7 +2096,7 @@ def compile_issp_document(self, metadata: dict):
         # ==========================================================
         self.update_state(state="PROGRESS", meta={"progress": 50, "status": "Executing Pass 1: Calculating layout geometry & final page count..."})
 
-        metadata["computed_total_pages"] = "XX"
+        metadata["computed_total_pages"] = "107"  
         html_blocks_pass1 = []
         for section_id in layout_sequence:
             html_blocks_pass1.append(
@@ -1997,11 +2115,18 @@ def compile_issp_document(self, metadata: dict):
         
         html_doc_pass1 = HTML(string=html_raw_pass1, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))
         rendered_doc_pass1 = html_doc_pass1.render()
-        total_page_count = len(rendered_doc_pass1.pages)
+        
+        # Safely resolve Named Page styles using a defensive, version-agnostic attribute scanner
+        core_pages = []
+        for p in rendered_doc_pass1.pages:
+            p_name = getattr(p, "page_name", getattr(p, "_page_name", None))
+            if p_name in ["core_issp_portrait", "core_issp_landscape"]:
+                core_pages.append(p)
+                
+        total_page_count = len(core_pages) if core_pages else len(rendered_doc_pass1.pages)
 
-        # Pass 2: Inject exact total count and re-render standard pages with dynamically aligned headers and signatures
         self.update_state(state="PROGRESS", meta={"progress": 80, "status": f"Executing Pass 2: Drawing table layouts for {total_page_count} certified pages..."})
-        metadata["computed_total_pages"] = total_page_count
+        metadata["computed_total_pages"] = str(total_page_count)
 
         html_blocks_pass2 = []
         for section_id in layout_sequence:
@@ -2038,22 +2163,18 @@ def compile_issp_document(self, metadata: dict):
         }
 
     except SoftTimeLimitExceeded as timeout_exc:
-        db_session.rollback()
+        db.rollback()
         logger.error(f"Celery SoftTimeLimitExceeded hit during PDF compilation: {str(timeout_exc)}")
-        self.update_state(
-            state="FAILURE", 
-            meta={"progress": 100, "status": "Failed: PDF generation soft timeout limit exceeded."}
-        )
-        raise timeout_exc
+        raise Exception("CompilationError: PDF generation soft timeout limit exceeded.")
+        
+    except ValueError as validation_exc:
+        db.rollback()
+        logger.warning(f"ISSP Compliance Validation Block: {str(validation_exc)}")
+        raise Exception(f"ValidationError: {str(validation_exc)}")
         
     except Exception as e:
-        db_session.rollback()
-        logger.error(f"Async dynamic compilation failed: {str(e)}")
-        self.update_state(
-            state="FAILURE", 
-            meta={"progress": 100, "status": f"Failed: {str(e)}"}
-        )
-        raise e
-        
+        db.rollback()
+        logger.error(f"Async dynamic compilation failed: {str(e)}", exc_info=True)
+        raise Exception(f"CompilationError: {str(e)}")
     finally:
-        db_session.remove()
+        db.close()

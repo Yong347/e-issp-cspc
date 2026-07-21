@@ -1831,28 +1831,53 @@ def get_task_status(
         from app.celery_app import celery_app
         res = AsyncResult(task_id, app=celery_app)
         
+        # Gracefully handle the pending/queued state instead of raising a 404 error
         if res.state == "PENDING" and res.info is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Task ID is invalid, untracked, or has expired from cache."
-            )
+            return {
+                "state": "PENDING",
+                "progress_percent": 10,
+                "current_step_message": "Queued in background worker..."
+            }
 
         if res.state == "PROGRESS":
-            return {"state": res.state, "meta": res.info}
+            # Extract progress metadata safely
+            meta = res.info or {}
+            progress = meta.get("progress", 50)
+            status_msg = meta.get("status", "Processing layout components...")
+            return {
+                "state": "PROGRESS",
+                "progress_percent": progress,
+                "current_step_message": status_msg
+            }
+            
         elif res.state == "SUCCESS":
-            return {"state": res.state, "result": res.result}
+            return {
+                "state": "SUCCESS",
+                "progress_percent": 100,
+                "current_step_message": "Compilation Complete",
+                "result": res.result
+            }
+            
         elif res.state == "FAILURE":
-            return {"state": res.state, "error": str(res.info)}
-        return {"state": res.state}
-    except HTTPException:
-        raise
+            return {
+                "state": "FAILURE",
+                "progress_percent": 100,
+                "current_step_message": "Compilation Failed",
+                "error": str(res.info)
+            }
+            
+        return {
+            "state": res.state,
+            "progress_percent": 0,
+            "current_step_message": f"Task state: {res.state}"
+        }
+        
     except Exception as e:
         logger.error(f"Failed to query asynchronous task status {task_id}: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to query background task state parameters: {str(e)}"
+            detail="Failed to query background task state parameters."
         )
-
 
 # ==========================================================
 # MASTER NARRATIVES & COVERSHEET MANAGER

@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def bootstrap_metadata(db):
     """
-    Seeds static institutional metadata including academic/support departments,
+    Seeds detailed institutional metadata including academic/support departments,
     baseline standardized DICT catalog items, and the master planning narrative.
     """
     logger.info("Seeding physical SUC campuses...")
@@ -64,6 +64,8 @@ def bootstrap_metadata(db):
         "College of Arts & Sciences",
         "College of Health Sciences",
         "College of Tourism",
+        "College of Business Administration",
+        "College of Education",
         "Human Resources Management"
     ]
 
@@ -83,15 +85,30 @@ def bootstrap_metadata(db):
     # ==========================================================
     logger.info("Seeding Annex A-4 Graduate and Undergraduate Degree offerings...")
     academic_programs = [
+        # Graduate
+        {"department_name": "College of Health Sciences", "degree_name": "Master of Arts in Nursing (MAN)", "level": "Graduate", "accreditation_status": "Level III Re-Accredited"},
         {"department_name": "College of Engineering", "degree_name": "Master of Engineering (ME)", "level": "Graduate", "accreditation_status": "Level III Re-Accredited"},
+        {"department_name": "College of Business Administration", "degree_name": "Master in Business Management (MBM)", "level": "Graduate", "accreditation_status": "Level II Re-Accredited"},
+        {"department_name": "College of Tourism", "degree_name": "Master in Hospitality Management", "level": "Graduate", "accreditation_status": "Candidate Status"},
+        {"department_name": "College of Computer Studies", "degree_name": "Master in Information Technology (MIT)", "level": "Graduate", "accreditation_status": "Candidate Status"},
+        {"department_name": "College of Business Administration", "degree_name": "Doctor of Philosophy in Business Management", "level": "Graduate", "accreditation_status": "Candidate Status"},
+        
+        # Undergraduate - Engineering
         {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Civil Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
         {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Electrical Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Mechanical Engineering", "level": "Undergraduate", "accreditation_status": "Level II Re-Accredited"},
-        {"department_name": "College of Computer Studies", "degree_name": "Master in Information Technology (MIT)", "level": "Graduate", "accreditation_status": "Candidate Status"},
+        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Mechanical Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
+        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Electronics Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
+        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Architecture", "level": "Undergraduate", "accreditation_status": "Candidate Status"},
+        
+        # Undergraduate - Computer Studies
         {"department_name": "College of Computer Studies", "degree_name": "Bachelor of Science in Information Technology", "level": "Undergraduate", "accreditation_status": "Level IV Re-Accredited"},
-        {"department_name": "College of Computer Studies", "degree_name": "Bachelor of Science in Computer Science", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Health Sciences", "degree_name": "Bachelor of Science in Nursing", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Tourism", "degree_name": "Bachelor of Science in Tourism Management", "level": "Undergraduate", "accreditation_status": "Level II Re-Accredited"}
+        {"department_name": "College of Computer Studies", "degree_name": "Bachelor of Science in Computer Science", "level": "Undergraduate", "accreditation_status": "Level II Re-Accredited"},
+        {"department_name": "College of Computer Studies", "degree_name": "Bachelor of Science in Information Systems", "level": "Undergraduate", "accreditation_status": "Candidate Status"},
+        
+        # Undergraduate - Other Colleges
+        {"department_name": "College of Health Sciences", "degree_name": "Bachelor of Science in Nursing", "level": "Undergraduate", "accreditation_status": "Level IV Re-Accredited"},
+        {"department_name": "College of Tourism", "degree_name": "Bachelor of Science in Tourism Management", "level": "Undergraduate", "accreditation_status": "Level II Re-Accredited"},
+        {"department_name": "College of Business Administration", "degree_name": "Bachelor of Science in Office Administration", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"}
     ]
     for prog in academic_programs:
         existing = db.query(DegreeOffering).filter(DegreeOffering.degree_name == prog["degree_name"]).first()
@@ -104,7 +121,10 @@ def bootstrap_metadata(db):
         {"indicator_name": "Percentage of first-time licensure exam passers that pass the licensure exams", "target_value": "50%"},
         {"indicator_name": "Percentage of graduates (2 years prior) that are employed", "target_value": "67%"},
         {"indicator_name": "Percentage of undergraduate student population enrolled in CHED-identified priority courses", "target_value": "70%"},
-        {"indicator_name": "Percentage of undergraduate programs with COPC or accreditation status", "target_value": "90%"}
+        {"indicator_name": "Percentage of undergraduate programs with COPC or accreditation status", "target_value": "100%"},
+        {"indicator_name": "Percentage of graduate school faculty engaged in research work", "target_value": "53%"},
+        {"indicator_name": "Number of research outputs completed within the year", "target_value": "32"},
+        {"indicator_name": "Number of active partnerships with LGUs, industries, NGOs, NGAs, and SMEs", "target_value": "46"}
     ]
     for metric in gaa_metrics:
         existing = db.query(GaaPerformance).filter(GaaPerformance.indicator_name == metric["indicator_name"]).first()
@@ -149,6 +169,15 @@ def bootstrap_metadata(db):
             "allowed_offices": ["College of Engineering", "College of Computer Studies", "College of Arts & Sciences"],
             "canvas_evidence_url": "/static/uploads/catalog/ap_wifi6_canvas.pdf",
             "supplier_name": "CSPC Cisco Network Partner"
+        },
+        {
+            "item_key": "heavy_duty_printer",
+            "display_name": "Heavy Duty Network Workgroup Printer",
+            "standard_unit_cost": Decimal("25000.00"),
+            "category": "printers_imaging",
+            "allowed_offices": ["College of Engineering", "College of Computer Studies", "College of Arts & Sciences", "College_of_Tourism", "Human Resources Management"],
+            "canvas_evidence_url": "/static/uploads/catalog/printer_heavy_canvas.pdf",
+            "supplier_name": "CSPC Copier-Printer Hub"
         }
     ]
     
@@ -169,7 +198,7 @@ def bootstrap_metadata(db):
             logger.info(f"Catalog Item seeded: '{item['display_name']}'")
 
     # ==========================================================
-    # COMPLETE COMPLIANCE CORE OFFICE FUNCTIONS (ANNEX A-3)
+    # ANNEX A-3 STRUCTURAL SEEDS
     # ==========================================================
     logger.info("Seeding Annex A-3 Complete Core Offices functions registry...")
     core_offices_registry = [
@@ -199,12 +228,35 @@ def bootstrap_metadata(db):
         {"mfo": "Enrollment Services", "systems": "Student Information and Accounting System (SIAS)", "problems": "Delayed student enrollment processing and grading sync latency during semesters.", "intended_use": "SIAS Cloud deployment and local caching layers."},
         {"mfo": "Library Management", "systems": "Online Library Information System", "problems": "Difficulty tracking missing book circulation records in real-time.", "intended_use": "OPAC and Library Information DB integration."},
         {"mfo": "Monitoring & Security", "systems": "Security Management System", "problems": "Manual check-ins causing queues at entrances and parking spaces.", "intended_use": "Smart Card reader gates and central log DB."},
-        {"mfo": "Human Resources", "systems": "HRMS / Payroll System", "problems": "Biometrics mismatch requiring manual DTR corrections.", "intended_use": "Central biometrics verification system."}
+        {"mfo": "Human Resources", "systems": "HRMS / Payroll System", "problems": "Biometrics mismatch requiring manual DTR corrections.", "intended_use": "Central biometrics verification system."},
+        {"mfo": "Supply Management", "systems": "Supplies Management System", "problems": "Archival and retrieval of records are slow, stock room is small.", "intended_use": "Database tracking of inventory requisitions."}
     ]
 
     pmf_matrix_data = [
         {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of courses using the LMS", "baseline": "10% of courses", "target": "100% adoption", "collection_method": "Survey/Logs", "responsibility": "MICT Office"},
-        {"project_title": "Upgrade Leased Line Internet Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Average bandwidth speed in administrative offices", "baseline": "20 Mbps", "target": "100 Mbps", "collection_method": "Speed test logs", "responsibility": "MICT Office"}
+        {"project_title": "Upgrade Leased Line Internet Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Average bandwidth speed in administrative offices", "baseline": "20 Mbps", "target": "100 Mbps", "collection_method": "Speed test logs", "responsibility": "MICT Office"},
+        {"project_title": "WiFi Campus Network Installation", "result_hierarchy": "Outputs", "indicator": "Percentage of using WiFi for teaching-learning process", "baseline": "30%", "target": "100%", "collection_method": "Network logs", "responsibility": "MICT Office"}
+    ]
+
+    systems_data = [
+        {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Students, Faculty, Registrars", "users_external": "DICT, CHED", "owners": "MICT Office"},
+        {"name": "Online Library Information Systems", "description": "System to manage the books library collections, records tracking, and online OPAC search access.", "status": "For Enhancement", "dev_strategy": "In-house Development", "computing_scheme": "Web Server", "users_internal": "Librarian, Library Staff", "users_external": "Students, Faculty, Outside Researches", "owners": "CSPC Library"},
+        {"name": "School Monitoring and Security System", "description": "System using CCTV cameras, RFIDs, and smart cards to secure facilities and monitor vehicles.", "status": "For Development", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Guards, MIS Staff, Administrators", "users_external": "None", "owners": "VP for Administration"},
+        {"name": "Human Resource Management System", "description": "Directly links biometric attendance data, automatically calculates time cards, and interfaces with the payroll system.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "HRMO, HRMO Staff, Accountant, Accounting Staff", "users_external": "CHED, CSC", "owners": "Human Resource Management Office"}
+    ]
+
+    databases_data = [
+        {"name": "SIAS Database", "description": "Stores student demographics, grades, accounting receipts, and curriculum mapping.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server", "owners": "Registrar's Office"},
+        {"name": "Online Library Information Systems Database", "description": "Stores book metadata, borrow transactions, registries, and fine calculations.", "status": "Existing", "is_served": "Online Library Information Systems", "storage_media": "High-End Data Storage Server", "owners": "Library Services Unit"},
+        {"name": "School Monitoring and Security Database", "description": "Stores security footage logs, gate visitor logs, RFID associations, and access permissions.", "status": "Proposed", "is_served": "School Monitoring and Security System", "storage_media": "High-End Data Storage Server", "owners": "Office of the VP for Administration"},
+        {"name": "Human Resource Management Database", "description": "Stores employee profiles, biometric signatures, tax records, and payroll sheets.", "status": "Proposed", "is_served": "Human Resource Management System", "storage_media": "High-End Data Storage Server", "owners": "Human Resource Management Office"}
+    ]
+
+    internal_projects_data = [
+        {"name": "Deployment of Moodle LMS", "objectives": "To allow distance teaching and learning\\nTo automate grade computations", "duration": "2026 - 2028", "deliverables": "Online Learning Space (LeOnS)"},
+        {"name": "Upgrade Leased Line Bandwidth", "objectives": "To provide more efficient online transactions\\nTo support online distance learning", "duration": "2026 - 2028", "deliverables": "Leased Line Internet"},
+        {"name": "WiFi Campus Network Installation", "objectives": "To ensure the availability of wireless connection\\nTo help students and teachers in fast access", "duration": "2026 - 2028", "deliverables": "WiFi Campus Network"},
+        {"name": "Technology for Education Installation", "objectives": "To support the learning of students through easily accessible resources", "duration": "2026 - 2028", "deliverables": "Technology for Education"}
     ]
 
     if not narrative:
@@ -249,16 +301,9 @@ def bootstrap_metadata(db):
             core_offices_json=core_offices_registry,
             strategic_concerns_json=strategic_concerns_data,
             pmf_matrix_json=pmf_matrix_data,
-            
-            systems_json=[
-                {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Students, Faculty, Registrars", "users_external": "DICT, CHED", "owners": "MICT Office"}
-            ],
-            databases_json=[
-                {"name": "SIAS Database", "description": "Stores student demographics, grades, accounting receipts, and curriculum mapping.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server", "owners": "Registrar's Office"}
-            ],
-            internal_projects_json=[
-                {"name": "Deployment of Moodle LMS", "objectives": "To allow distance teaching and learning\\nTo automate grade computations", "duration": "2026 - 2028", "deliverables": "Online Learning Space (LeOnS)"}
-            ],
+            systems_json=systems_data,
+            databases_json=databases_data,
+            internal_projects_json=internal_projects_data,
             cross_projects_json=[],
             
             # Connectivity Details
@@ -313,7 +358,6 @@ def bootstrap_metadata(db):
         ).first()
         if not existing_office:
             db_office = CoreOfficeFunction(
-                # REMOVED: id=office["id"], let the DB auto-increment IDs natively
                 issp_period=baseline_period,
                 office_name=office["office_name"],
                 division=office["division"],
@@ -362,7 +406,11 @@ def bootstrap_metadata(db):
     glossary_terms = [
         {"term": "ISSP", "definition": "Information Systems Strategic Plan - a blueprint mapping out an agency's target IT layout frameworks.", "order_index": 1},
         {"term": "MITHI", "definition": "Medium-Term Information and Communications Technology Harmonization Initiative.", "order_index": 2},
-        {"term": "COA", "definition": "Commission on Audit - the supreme auditing institution of the Republic of the Philippines.", "order_index": 3}
+        {"term": "COA", "definition": "Commission on Audit - the supreme auditing institution of the Republic of the Philippines.", "order_index": 3},
+        {"term": "Agency", "definition": "Refers to any bureau, office, commission, authority, or instrumentality of the national government.", "order_index": 4},
+        {"term": "Biometrics", "definition": "The science and technology of measuring and statistically analyzing biological data for authentication.", "order_index": 5},
+        {"term": "Client-Server", "definition": "A logical split architecture partitioning tasks between front-end clients and back-end servers.", "order_index": 6},
+        {"term": "Database", "definition": "An organized group or set of inter-related information stored and managed electronically.", "order_index": 7}
     ]
     for term in glossary_terms:
         existing = db.query(GlossaryTerm).filter(GlossaryTerm.term == term["term"]).first()
@@ -372,7 +420,8 @@ def bootstrap_metadata(db):
     logger.info("Seeding General Submission Guidelines (Page 11)...")
     guidelines = [
         {"step_number": 1, "instruction_text": "Ensure all physical hardware inventories (Annex A-5) are documented cleanly before proposing replacements."},
-        {"step_number": 2, "instruction_text": "Verify market canvas quotation values. Standard catalog prices act as absolute ceiling blocks."}
+        {"step_number": 2, "instruction_text": "Verify market canvas quotation values. Standard catalog prices act as absolute ceiling blocks."},
+        {"step_number": 3, "instruction_text": "Secure official signatures of the Agency Head on the transmittal cover sheet prior to DICT upload."}
     ]
     for step in guidelines:
         existing = db.query(GeneralInstruction).filter(GeneralInstruction.step_number == step["step_number"]).first()
@@ -387,7 +436,8 @@ def bootstrap_metadata(db):
     logger.info("Seeding baseline OS census tracking metrics (Gap 16)...")
     standard_os = [
         {"os_name": "Windows 11 Professional", "workstations_count": 120, "servers_count": 0},
-        {"os_name": "Ubuntu Server 22.04 LTS", "workstations_count": 0, "servers_count": 5}
+        {"os_name": "Ubuntu Server 22.04 LTS", "workstations_count": 0, "servers_count": 5},
+        {"os_name": "Windows Server 2022", "workstations_count": 0, "servers_count": 3}
     ]
     for os_data in standard_os:
         existing = db.query(ClientOsCensus).filter(ClientOsCensus.os_name == os_data["os_name"]).first()
@@ -397,7 +447,8 @@ def bootstrap_metadata(db):
     logger.info("Seeding office software productivity census metrics (Gap 17)...")
     standard_soft = [
         {"software_name": "Microsoft Office 2021 LTSC", "license_count": 150},
-        {"software_name": "Adobe Creative Cloud", "license_count": 25}
+        {"software_name": "Adobe Creative Cloud", "license_count": 25},
+        {"software_name": "AutoCAD 2024", "license_count": 50}
     ]
     for soft_data in standard_soft:
         existing = db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.software_name == soft_data["software_name"]).first()
@@ -408,7 +459,8 @@ def bootstrap_metadata(db):
     positions = [
         {"position_title": "Database Administrator", "status": "Permanent", "count": 1},
         {"position_title": "Information Technology Officer I", "status": "Permanent", "count": 2},
-        {"position_title": "Systems Analyst", "status": "Contractual", "count": 1}
+        {"position_title": "Systems Analyst", "status": "Contractual", "count": 1},
+        {"position_title": "Network Engineer", "status": "Permanent", "count": 1}
     ]
     for pos in positions:
         existing = db.query(IctStaffPosition).filter(
@@ -430,6 +482,8 @@ def bootstrap_metadata(db):
         "College of Arts & Sciences": Decimal("5000000.00"),
         "College of Health Sciences": Decimal("4000000.00"),
         "College of Tourism": Decimal("3000000.00"),
+        "College of Business Administration": Decimal("5000000.00"),
+        "College of Education": Decimal("4000000.00"),
         "Human Resources Management": Decimal("2000000.00")
     }
 
