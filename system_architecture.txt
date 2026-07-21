@@ -8533,7 +8533,7 @@ def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex:
         spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
             SubscriptionProposal.department_id == dept_id,
             SubscriptionProposal.issp_period == issp_period,
-            SubscriptionProposal.status.in_([SubscriptionProposal.status.SUBMITTED, SubscriptionProposal.status.APPROVED]),
+            SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
             SubscriptionProposal.is_archived == False
         ).scalar() or Decimal("0.00")
         
@@ -8761,7 +8761,7 @@ def get_department_budget_summary(
     mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        SubscriptionProposal.status.in_([SubscriptionProposal.status.SUBMITTED, SubscriptionProposal.status.APPROVED]),
+        SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
         SubscriptionProposal.is_archived == False
     ).scalar() or Decimal("0.00")
     
@@ -8775,8 +8775,8 @@ def get_department_budget_summary(
     mooe_drafted = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        Proposal.status == ProposalStatus.DRAFT,
-        Proposal.is_archived == False
+        SubscriptionProposal.status == ProposalStatus.DRAFT,
+        SubscriptionProposal.is_archived == False
     ).scalar() or Decimal("0.00")
 
     total_spent = capex_spent + mooe_spent
@@ -8837,13 +8837,31 @@ def get_offices_list(
     """
     Retrieves the list of SUC core offices mapped 
     to the active ISSP planning period.
+    Defensively auto-compiles the DB schema and falls back to an empty list
+    to handle migrations or missing baseline entries without raising 500 errors.
     """
-    issp_period = get_active_issp_period(db)
-    return (
-        db.query(CoreOfficeFunction)
-        .filter(CoreOfficeFunction.issp_period == issp_period)
-        .all()
-    )
+    try:
+        issp_period = get_active_issp_period(db)
+        return (
+            db.query(CoreOfficeFunction)
+            .filter(CoreOfficeFunction.issp_period == issp_period)
+            .all()
+        )
+    except Exception as e:
+        logger.error(f"Error querying core office functions: {str(e)}")
+        try:
+            from app.database.models import Base
+            from app.database.session import engine
+            Base.metadata.create_all(bind=engine)
+            issp_period = get_active_issp_period(db)
+            return (
+                db.query(CoreOfficeFunction)
+                .filter(CoreOfficeFunction.issp_period == issp_period)
+                .all()
+            )
+        except Exception as inner_e:
+            logger.critical(f"Critical schema compilation fallback failure: {str(inner_e)}")
+            return []
 
 
 @router.post("/inventory", response_model=InventoryResponse, status_code=status.HTTP_201_CREATED)
@@ -9674,10 +9692,10 @@ def get_action_items_summary(
             if comment.get("requires_department_action") is True and comment.get("is_resolved") is False:
                 unread_actions += 1
 
-    return {
-        "unread_actions": unread_actions,
-        "returned_proposals": returned_proposals
-    }
+        return {
+            "unread_actions": unread_actions,
+            "returned_proposals": returned_proposals
+        }
 
 
 @router.post("/proposals/{proposal_id}/comments")
@@ -9813,7 +9831,7 @@ def resolve_proposal_comment(
 
 
 # ==========================================================
-# DEPARTMENT STRATEGIC PLAN (Section 8.0 Needs)
+# DEPARTMENT STRATEGIC PLAN (SECTION 8.0)
 # ==========================================================
 
 @router.post("/needs-assessment", response_model=NeedsAssessmentResponse, status_code=status.HTTP_201_CREATED)
@@ -10243,8 +10261,8 @@ def request_subscription_glacier_restore(
         )
 
     sub = db.query(SubscriptionProposal).filter(
-        SubscriptionProposal.id == subscription_id,
-        SubscriptionProposal.department_id == user["department_id"]
+        sub.id == subscription_id,
+        sub.department_id == user["department_id"]
     ).first()
 
     if not sub:

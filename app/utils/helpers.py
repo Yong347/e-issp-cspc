@@ -114,12 +114,20 @@ def get_active_issp_period(db: Session) -> str:
     Falls back to the latest cycle if no active coversheet is flagged.
     """
     from app.database.models import MasterNarrative
-    active_narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
-    if active_narrative:
-        return active_narrative.issp_period
-    latest_narrative = db.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
-    if latest_narrative:
-        return latest_narrative.issp_period
+    try:
+        active_narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
+        if active_narrative:
+            return active_narrative.issp_period
+    except Exception as e:
+        logger.warning(f"Defensive check: Failed to query active MasterNarrative issp_period: {str(e)}")
+        
+    try:
+        latest_narrative = db.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
+        if latest_narrative:
+            return latest_narrative.issp_period
+    except Exception as e:
+        logger.warning(f"Defensive check: Failed to query latest MasterNarrative issp_period: {str(e)}")
+        
     return "2026-2028"
 
 

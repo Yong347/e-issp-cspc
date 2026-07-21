@@ -111,6 +111,12 @@ class CatalogItemResponse(CatalogItemSchema):
     is_active: bool
     allowed_offices: List[str]
 
+    @field_validator('allowed_offices', mode='before')
+    @classmethod
+    def deserialize_fields(cls, v: Any) -> Any:
+        """Resolves stringified JSON outputs returned by SQLite driver implementations"""
+        return deserialize_json_if_string(v)
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -314,14 +320,22 @@ class ProposalResponse(BaseModel):
     canvas_evidence_url: Optional[str] = None
     target_offices_json: List[str] = []
     s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks AWS S3 storage lifecycle tier")
-    is_restoring: bool = Field(False, description="True if a cold archival retrieval is currently processing")
-    is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
+    is_restoring: Optional[bool] = Field(False, description="True if a cold archival retrieval is currently processing")
+    is_expansion: Optional[bool] = Field(False, description="Explicitly flags if this is an expansion project")
 
     @field_validator('yearly_quantities', 'target_offices_json', mode='before')
     @classmethod
     def deserialize_fields(cls, v: Any) -> Any:
         """Resolves stringified JSON outputs returned by SQLite driver implementations"""
         return deserialize_json_if_string(v)
+
+    @field_validator('is_restoring', 'is_expansion', mode='before')
+    @classmethod
+    def coerce_bool(cls, v: Any) -> bool:
+        """Defensively coerces database NULL values to False"""
+        if v is None:
+            return False
+        return bool(v)
 
     @field_validator('s3_storage_class', mode='before')
     @classmethod
@@ -416,7 +430,7 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
     is_archived: bool = False
     target_offices_json: List[str] = []
     s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks active storage tier for COA retrieval")
-    is_restoring: bool = Field(False, description="True if a cold archival retrieval is currently active")
+    is_restoring: Optional[bool] = Field(False, description="True if a cold archival retrieval is currently active")
 
     @field_validator('s3_storage_class', mode='before')
     @classmethod
@@ -425,6 +439,14 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
         if getattr(settings, "STORAGE_TYPE", "local").lower() == "local":
             return "LOCAL"
         return v or "STANDARD"
+
+    @field_validator('is_restoring', mode='before')
+    @classmethod
+    def coerce_bool(cls, v: Any) -> bool:
+        """Defensively coerces database NULL values to False"""
+        if v is None:
+            return False
+        return bool(v)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -955,7 +977,7 @@ class MasterNarrativeUpdate(BaseModel):
     transmittal_date: Optional[str] = Field("22 February 2023", description="Specific formal transmittal document authorization date")
     
     signatory_prepared_by: Optional[str] = Field(None, description="Printed Name & credentials of preparer", example="Engr. John Doe, MSCS")
-    preparer_position: Optional[str] = Field(None, example="Director, MIS")
+    preparer_position: Optional[str] = Field(None, example="Director, MICT")
     preparer_tel: Optional[str] = Field(None, example="(054) 471-1234")
     preparer_fax: Optional[str] = Field(None, example="(054) 471-1235")
     preparer_email: Optional[EmailStr] = Field(None, example="mis_director@cspc.edu.ph")
@@ -970,6 +992,7 @@ class MasterNarrativeUpdate(BaseModel):
     
     planners_json: Optional[List[ISPlannerSchema]] = Field([], description="Array of planning team profiles")
     manpower_json: Optional[ManpowerSchema] = Field(None, description="Detailed IT manpower demographic metrics")
+    authoring_cycle_duration: Optional[int] = Field(None, description="Cycle duration parameter used by layout managers")
     annual_ict_budget: Optional[Decimal] = Field(Decimal("0.00"), description="Starting/Baseline annual allocation")
     
     # Nested lists mapping out sections
@@ -1133,7 +1156,7 @@ class MasterNarrativeResponse(BaseModel):
 # ==========================================================
 
 class DepartmentAnalyticsResponse(BaseModel):
-    """Monitoring model flag parameters identifying potential resource abuse"""
+    """Mounting model flag parameters identifying potential resource abuse"""
     department_id: int
     department_name: str
     total_proposals: int

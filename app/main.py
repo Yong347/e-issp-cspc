@@ -50,13 +50,27 @@ async def lifespan(app: FastAPI):
     logger.info("INITIALIZING CSPC E-ISSP COMPLIANCE ENGINE")
     logger.info("=" * 70)
     
-    # Programmatically compile all database metadata tables on server startup
+    # Run Alembic migrations programmatically to sync SQLite database models on server startup
     try:
-        logger.info("Compiling and verifying database schema metadata...")
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database schema verification completed successfully.")
+        logger.info("Running database migrations via Alembic head upgrade...")
+        import alembic.config
+        import alembic.command
+        
+        alembic_ini_path = os.path.join(settings.BASE_DIR, "alembic.ini")
+        if os.path.exists(alembic_ini_path):
+            alembic_cfg = alembic.config.Config(alembic_ini_path)
+            alembic.command.upgrade(alembic_cfg, "head")
+            logger.info("Database schema migrations completed successfully.")
+        else:
+            logger.warning("alembic.ini not found. Falling back to metadata.create_all.")
+            Base.metadata.create_all(bind=engine)
     except Exception as e:
-        logger.error(f"Failed to auto-compile database schema: {str(e)}", exc_info=True)
+        logger.error(f"Failed to auto-upgrade database schema via Alembic: {str(e)}", exc_info=True)
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("Fallback database metadata creation completed successfully.")
+        except Exception as fallback_err:
+            logger.critical(f"Failed to run database metadata creation fallback: {str(fallback_err)}")
     
     # Route Diagnosis Table
     logger.info("Scanning and mapping active API routing tables...")
