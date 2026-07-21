@@ -8392,7 +8392,7 @@ import uuid
 import logging
 from decimal import Decimal
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -8420,7 +8420,7 @@ from app.schemas import (
     InventoryCreate, 
     InventoryResponse, 
     ProposalUpdatePayload, 
-    ProposalResponse,  # <--- Added ProposalResponse to the imports
+    ProposalResponse,
     CommentCreate,
     CatalogItemResponse,
     NeedsAssessmentCreate, 
@@ -8429,7 +8429,7 @@ from app.schemas import (
     SubscriptionProposalResponse,
     DeploymentCreate,   # Gap 13 Pydantic Request Schema
     DeploymentResponse,
-    CoreOfficeFunctionResponse  # <--- Add this import
+    CoreOfficeFunctionResponse
 )
 from app.auth.router import require_user, require_dept_user
 from app.storage.s3_client import storage_client
@@ -8761,7 +8761,7 @@ def get_department_budget_summary(
     mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
+        SubscriptionProposal.status.in_([SubscriptionProposal.status.SUBMITTED, SubscriptionProposal.status.APPROVED]),
         SubscriptionProposal.is_archived == False
     ).scalar() or Decimal("0.00")
     
@@ -8775,8 +8775,8 @@ def get_department_budget_summary(
     mooe_drafted = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        SubscriptionProposal.status == ProposalStatus.DRAFT,
-        SubscriptionProposal.is_archived == False
+        Proposal.status == ProposalStatus.DRAFT,
+        Proposal.is_archived == False
     ).scalar() or Decimal("0.00")
 
     total_spent = capex_spent + mooe_spent
@@ -8886,7 +8886,7 @@ def get_existing_inventory(
     ).offset(skip).limit(limit).all()
 
 
-@router.get("/proposals", response_model=List[ProposalResponse])  # <--- Added response_model here
+@router.get("/proposals", response_model=List[ProposalResponse])
 def get_departmental_proposals(
     issp_period_filter: Optional[str] = Query(None, alias="issp_period"),
     status_filter: Optional[ProposalStatus] = Query(None),
@@ -8908,7 +8908,7 @@ def get_departmental_proposals(
     return query.offset(skip).limit(limit).all()
 
 
-@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)  # <--- Added response_model here
+@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)
 def get_proposal_detail(
     proposal_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -9103,7 +9103,7 @@ def update_proposal_item(
     proposal.target_offices_json = payload.target_offices_json
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.custom_specification = payload.custom_specification
-    proposal.is_expansion = payload.is_expansion
+    proposal.is_expansion = proposal.is_expansion
 
     old_payload = dict(proposal.payload) if proposal.payload else {}
     old_payload["supplier_name"] = resolved_supplier
@@ -9121,7 +9121,7 @@ def update_proposal_item(
         "yearly_quantities": payload.yearly_quantities,
         "custom_specification": payload.custom_specification,
         "target_offices_json": proposal.target_offices_json,
-        "is_expansion": payload.is_expansion
+        "is_expansion": proposal.is_expansion
     }
 
     audit = AuditTrail(
@@ -9196,6 +9196,7 @@ def delete_proposal(
                     Bucket=storage_client.bucket_name,
                     Key=key
                 )
+                    
                 logger.info(f"S3 asset deleted successfully: {key}")
             except Exception as s3_err:
                 logger.critical(f"Failed to delete S3 asset '{key}': {str(s3_err)}")
@@ -9317,7 +9318,7 @@ def submit_proposal(
 # ==========================================================
 
 @router.post("/upload/canvas")
-async def upload_canvas_evidence(
+async def upload_canvas(
     proposal_id: str = Form(...),
     supplier_name: str = Form(...),
     file: UploadFile = File(...),
@@ -9480,6 +9481,166 @@ async def upload_unserviceable_evidence(
 
 
 # ==========================================================
+# UNIFIED NOTIFICATIONS FEED ENDPOINT
+# ==========================================================
+
+@router.get("/notifications", response_model=List[Dict[str, Any]])
+def get_department_notifications(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """
+    Retrieves and aggregates all workspace-relevant events for the calling department,
+    including proposal status updates, budget ceiling modifications, admin remarks,
+    and account security changes.
+    """
+    dept_id = user["department_id"]
+    user_id = user["id"]
+    active_cycle = get_active_issp_period(db)
+    notifications = []
+
+    # 1. Fetch relevant Proposal and Subscription IDs to filter audit logs
+    proposal_ids = [str(p.id) for p in db.query(Proposal.id).filter(Proposal.department_id == dept_id).all()]
+    sub_ids = [str(s.id) for s in db.query(SubscriptionProposal.id).filter(SubscriptionProposal.department_id == dept_id).all()]
+
+    # Query the most recent global audit trails
+    audit_trails = db.query(AuditTrail).order_by(AuditTrail.timestamp.desc()).limit(300).all()
+
+    for log in audit_trails:
+        is_relevant = False
+        title = "Workspace Event"
+        description = ""
+        type_ = "general"
+
+        log_prop_id = str(log.proposal_id) if log.proposal_id else None
+        log_sub_id = str(log.subscription_id) if log.subscription_id else None
+
+        # Case A: Directly associated with a proposal in this department
+        if log_prop_id in proposal_ids:
+            is_relevant = True
+            if log.action == "STATE_TRANSITION_SUBMITTED":
+                title = "Proposal Submitted"
+                description = "Your proposal has been successfully queued for MIS review."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_APPROVED":
+                title = "Proposal Approved"
+                description = "An administrator has approved your hardware proposal."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_RETURNED":
+                title = "Proposal Returned"
+                description = "Your proposal was returned to drafts. Check the comments for required actions."
+                type_ = "status_change"
+            elif log.action == "PROPOSAL_OVERRIDDEN_BY_ADMIN":
+                title = "Proposal Overridden"
+                description = "An administrator applied a compliance override to your proposal parameters."
+                type_ = "override"
+            else:
+                title = "Proposal Updated"
+                description = f"Activity logged: {log.action.replace('_', ' ').title()}"
+
+        # Case B: Directly associated with a software subscription in this department
+        elif log_sub_id in sub_ids:
+            is_relevant = True
+            if log.action == "STATE_TRANSITION_SUBMITTED":
+                title = "Subscription Submitted"
+                description = "Your software subscription request has been queued for review."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_APPROVED":
+                title = "Subscription Approved"
+                description = "An administrator has approved your software subscription."
+                type_ = "status_change"
+            elif log.action == "STATE_TRANSITION_RETURNED":
+                title = "Subscription Returned"
+                description = "Your subscription request was returned to drafts. Check comments for details."
+                type_ = "status_change"
+            elif log.action == "PROPOSAL_OVERRIDDEN_BY_ADMIN":
+                title = "Subscription Overridden"
+                description = "An administrator applied an override to your subscription parameters."
+                type_ = "override"
+            else:
+                title = "Subscription Updated"
+                description = f"Activity logged: {log.action.replace('_', ' ').title()}"
+
+        # Case C: Budget ceiling updates targeting this department
+        elif log.action == "SYSTEM_BUDGET_CEILING_UPDATED":
+            nv = log.new_value or {}
+            log_dept_id = nv.get("department_id")
+            if log_dept_id is not None and int(log_dept_id) == dept_id:
+                is_relevant = True
+                title = "Budget Ceiling Updated"
+                capex = nv.get("allocated_capex", "0.00")
+                mooe = nv.get("allocated_mooe", "0.00")
+                description = f"Your department budget ceiling was modified: CapEx Limit is now ₱{float(capex):,.2f} | MOOE Limit is ₱{float(mooe):,.2f}"
+                type_ = "budget"
+
+        elif log.action == "SYSTEM_BULK_BUDGET_CEILINGS_UPDATED":
+            is_relevant = True
+            title = "Bulk Budget Ceilings Restructured"
+            description = f"The administrator has adjusted the sub-ceiling parameters for the planning cycle: '{active_cycle}'."
+            type_ = "budget"
+
+        # Case D: Account security changes
+        elif log.action == "SYSTEM_SECURITY_PASSWORD_ROTATED" and log.user_id == user_id:
+            is_relevant = True
+            title = "Password Rotated"
+            description = "Your account password was updated successfully."
+            type_ = "security"
+
+        elif log.action == "SYSTEM_USER_WHITELIST_MODIFIED":
+            nv = log.new_value or {}
+            ov = log.old_value or {}
+            if nv.get("email") == user["email"] or ov.get("email") == user["email"]:
+                is_relevant = True
+                title = "Account Profile Altered"
+                description = "Your whitelisted user profile configurations were updated by the MIS division."
+                type_ = "security"
+
+        if is_relevant:
+            notifications.append({
+                "id": str(log.id),
+                "title": title,
+                "description": description,
+                "type": type_,
+                "timestamp": log.timestamp.isoformat(),
+                "ref_id": log_prop_id or log_sub_id or ""
+            })
+
+    # 2. Fetch unresolved comments needing action
+    proposals_list = db.query(Proposal).filter(Proposal.department_id == dept_id, Proposal.is_archived == False).all()
+    subs_list = db.query(SubscriptionProposal).filter(SubscriptionProposal.department_id == dept_id, SubscriptionProposal.is_archived == False).all()
+
+    for p in proposals_list:
+        comments_payload = p.payload.get("comments", []) if p.payload else []
+        for c in comments_payload:
+            if c.get("requires_department_action") and not c.get("is_resolved"):
+                notifications.append({
+                    "id": c.get("id"),
+                    "title": "Action Required: Pinned Feedback",
+                    "description": f"Remarks on '{p.item_name}': \"{c.get('text')}\"",
+                    "type": "comment",
+                    "timestamp": c.get("timestamp"),
+                    "ref_id": str(p.id)
+                })
+
+    for s in subs_list:
+        comments_payload = s.payload.get("comments", []) if s.payload else []
+        for c in comments_payload:
+            if c.get("requires_department_action") and not c.get("is_resolved"):
+                notifications.append({
+                    "id": c.get("id"),
+                    "title": "Action Required: Pinned Feedback",
+                    "description": f"Remarks on '{s.software_name}': \"{c.get('text')}\"",
+                    "type": "comment",
+                    "timestamp": c.get("timestamp"),
+                    "ref_id": str(s.id)
+                })
+
+    # Sort consolidated list by timestamp descending
+    notifications.sort(key=lambda x: x["timestamp"], reverse=True)
+    return notifications[:50]
+
+
+# ==========================================================
 # INLINE DISCUSSION AND ACTION-REQUIRED COMMENT THREADS
 # ==========================================================
 
@@ -9636,8 +9797,8 @@ def resolve_proposal_comment(
             comment_found = True
             break
 
-    if not comment_found:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
+        if not comment_found:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
 
     target.payload = current_payload
     try:
@@ -17146,6 +17307,15 @@ export async function postComment(proposalId, payload) {
 export async function resolveComment(proposalId, commentId) {
   const res = await fetch(`${API_BASE_URL}/api/dept/proposals/${proposalId}/comments/${commentId}/resolve`, { method: "POST", headers: getHeaders() });
   return handleResponse(res, "Failed to resolve comment");
+}
+
+// ==========================================================
+// 8. UNIFIED NOTIFICATIONS
+// ==========================================================
+
+export async function getNotifications() {
+  const res = await fetch(`${API_BASE_URL}/api/dept/notifications`, { headers: getHeaders() });
+  return handleResponse(res, "Failed to load notifications");
 }
 
 =========================================
@@ -28576,15 +28746,27 @@ import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { useNotifications } from "../../../context/NotificationContext";
-import { getProposals, getSubscriptions } from "../../../api/dept";
-import { Inbox, RefreshCw, AlertCircle, HelpCircle, History } from "lucide-react";
+import { getNotifications, resolveComment } from "../../../api/dept";
+import { 
+  Inbox, 
+  RefreshCw, 
+  AlertCircle, 
+  HelpCircle, 
+  Calendar, 
+  Coins, 
+  MessageSquare, 
+  Key, 
+  ShieldAlert, 
+  CheckSquare,
+  History
+} from "lucide-react";
 
 export default function ActionInbox() {
   const { user } = useAuth();
   const { activeCycle } = useCycle();
   const { fetchNotifications } = useNotifications();
   
-  const [actionItems, setActionItems] = useState([]);
+  const [notificationsList, setNotificationsList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -28592,51 +28774,15 @@ export default function ActionInbox() {
     setLoading(true);
     setError(null);
     try {
-      const [proposals, subscriptions] = await Promise.all([
-        getProposals(activeCycle),
-        getSubscriptions(activeCycle)
-      ]);
-
-      const items = [];
-
-      // Extract audit comments from CapEx Proposals
-      proposals.forEach(p => {
-        const comments = p.payload?.comments || [];
-        comments.forEach(c => {
-          items.push({
-            ...c,
-            parentId: p.id,
-            parentName: p.item_name,
-            parentType: "CapEx (Hardware)",
-            parentStatus: p.status
-          });
-        });
-      });
-
-      // Extract audit comments from MOOE Subscriptions
-      subscriptions.forEach(s => {
-        const comments = s.payload?.comments || [];
-        comments.forEach(c => {
-          items.push({
-            ...c,
-            parentId: s.id,
-            parentName: s.software_name,
-            parentType: "MOOE (Software)",
-            parentStatus: s.status
-          });
-        });
-      });
-
-      // Sort chronologically (newest entries first)
-      items.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      setActionItems(items);
+      const data = await getNotifications();
+      setNotificationsList(data);
       
-      // Update global counter indicator immediately
+      // Update global notification badge count
       if (fetchNotifications) {
         fetchNotifications();
       }
     } catch (err) {
-      setError(err.message || "Failed to load department action items.");
+      setError(err.message || "Failed to load department workspace updates.");
     } finally {
       setLoading(false);
     }
@@ -28648,6 +28794,63 @@ export default function ActionInbox() {
     }
   }, [user, activeCycle]);
 
+  const handleResolve = async (parentId, commentId) => {
+    if (!parentId || !commentId) return;
+    try {
+      await resolveComment(parentId, commentId);
+      await fetchActionItems();
+    } catch (err) {
+      alert(err.message || "Failed to resolve action item.");
+    }
+  };
+
+  // Maps notification types to distinctive styled badges and icons
+  const renderIconAndStyle = (type) => {
+    switch (type) {
+      case "budget":
+        return {
+          icon: <Coins className="w-4 h-4 text-emerald-400" />,
+          bgColor: "bg-emerald-950/20",
+          borderColor: "border-emerald-900/50",
+          tagColor: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+          label: "Budget Update"
+        };
+      case "comment":
+        return {
+          icon: <MessageSquare className="w-4 h-4 text-red-400" />,
+          bgColor: "bg-red-955/10",
+          borderColor: "border-red-900/40",
+          tagColor: "bg-red-500/10 text-red-400 border-red-500/20",
+          label: "Action Item"
+        };
+      case "security":
+        return {
+          icon: <Key className="w-4 h-4 text-amber-400" />,
+          bgColor: "bg-amber-950/10",
+          borderColor: "border-amber-900/40",
+          tagColor: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+          label: "Security Audit"
+        };
+      case "override":
+        return {
+          icon: <ShieldAlert className="w-4 h-4 text-purple-400" />,
+          bgColor: "bg-purple-950/10",
+          borderColor: "border-purple-900/40",
+          tagColor: "bg-purple-500/10 text-purple-400 border-purple-500/20",
+          label: "Admin Override"
+        };
+      case "status_change":
+      default:
+        return {
+          icon: <History className="w-4 h-4 text-blue-400" />,
+          bgColor: "bg-blue-955/10",
+          borderColor: "border-blue-900/40",
+          tagColor: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+          label: "Status Transition"
+        };
+    }
+  };
+
   return (
     <div className="space-y-6 text-xs max-w-4xl mx-auto select-none">
       {/* Header */}
@@ -28655,10 +28858,10 @@ export default function ActionInbox() {
         <div>
           <h2 className="text-white font-bold text-base flex items-center gap-2">
             <Inbox className="w-5 h-5 text-blue-400" />
-            <span>Feedback & Revisions Inbox</span>
+            <span>Workspace Notifications & Revisions Inbox</span>
           </h2>
           <p className="text-slate-400 text-xs mt-1">
-            Dynamic ledger of feedback, required modifications, and administrative evaluation notes logged by the MIS Administrator.
+            Track budget modifications, proposal status movements, whitelisting updates, and admin remarks.
           </p>
         </div>
         <button
@@ -28667,7 +28870,7 @@ export default function ActionInbox() {
           className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-1.5 cursor-pointer transition-colors"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>Refresh Logs</span>
+          <span>Sync Workspace</span>
         </button>
       </div>
 
@@ -28678,45 +28881,66 @@ export default function ActionInbox() {
         </div>
       )}
 
-      {/* Action Items List */}
+      {/* Notifications List */}
       <div className="space-y-4">
         {loading ? (
           <div className="text-center py-20 bg-slate-900 rounded-xl border border-slate-800 text-slate-500">
             <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-blue-500" />
-            <span>Syncing remarks log...</span>
+            <span>Synchronizing workspace notifications...</span>
           </div>
-        ) : actionItems.length > 0 ? (
-          actionItems.map((item, idx) => (
-            <div key={idx} className="p-5 rounded-xl border bg-slate-900 border-slate-800 space-y-3">
-              <div className="flex justify-between items-center border-b border-slate-850 pb-2">
-                <div>
-                  <span className="text-[10px] text-slate-500 font-mono font-bold uppercase">
-                    {item.parentType}
+        ) : notificationsList.length > 0 ? (
+          notificationsList.map((item) => {
+            const config = renderIconAndStyle(item.type);
+            return (
+              <div 
+                key={item.id} 
+                className={`p-5 rounded-xl border transition-all ${config.bgColor} ${config.borderColor} space-y-3`}
+              >
+                <div className="flex justify-between items-center border-b border-slate-850/40 pb-2">
+                  <div className="flex items-center gap-2">
+                    {config.icon}
+                    <h3 className="font-bold text-slate-200 text-sm">{item.title}</h3>
+                  </div>
+                  <span className={`text-[9px] px-2 py-0.5 border font-bold uppercase tracking-wider rounded ${config.tagColor}`}>
+                    {config.label}
                   </span>
-                  <h3 className="font-bold text-slate-200 text-sm">{item.parentName}</h3>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-1 text-[9px] px-2 py-0.5 bg-slate-500/10 border border-slate-500/20 text-slate-400 font-bold uppercase tracking-wider rounded">
-                    <History className="w-3 h-3" /> Logged Entry
-                  </span>
-                </div>
-              </div>
 
-              <div className="space-y-2">
-                <div className="flex justify-between items-center text-[10px] text-slate-500 font-mono">
-                  <span className="font-bold text-blue-400">{item.author_name} (Admin Operator)</span>
-                  <span>{new Date(item.timestamp).toLocaleString()}</span>
+                <div className="space-y-2">
+                  <p className="text-slate-300 leading-relaxed font-mono text-[11px] whitespace-pre-wrap">
+                    {item.description}
+                  </p>
+                  
+                  <div className="flex justify-between items-center text-[10px] text-slate-500 pt-1 border-t border-slate-850/20">
+                    <span className="flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5 text-slate-600" />
+                      <span>{new Date(item.timestamp).toLocaleString()}</span>
+                    </span>
+                    
+                    {item.ref_id && (
+                      <span className="font-mono text-[9px] text-slate-600">
+                        REF_ID: {item.ref_id}
+                      </span>
+                    )}
+
+                    {/* Resolve button for actionable pinned admin remarks */}
+                    {item.type === "comment" && (
+                      <button
+                        onClick={() => handleResolve(item.ref_id, item.id)}
+                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded cursor-pointer transition-colors text-[10px]"
+                      >
+                        Resolve Action
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <p className="text-slate-300 leading-relaxed bg-slate-955 p-3 rounded-lg border border-slate-850 font-mono text-[11px]">
-                  {item.text}
-                </p>
               </div>
-            </div>
-          ))
+            );
+          })
         ) : (
           <div className="text-center py-20 bg-slate-900 rounded-xl border border-slate-800 text-slate-500 flex flex-col items-center justify-center gap-2">
             <HelpCircle className="w-8 h-8 text-slate-700" />
-            <p className="italic">No remarks logged for your department.</p>
+            <p className="italic">No notifications or remarks found for your department.</p>
           </div>
         )}
       </div>
