@@ -11813,7 +11813,6 @@ class ISSPDynamicCompiler:
             
             # Application Profile Cards (Part II.B)
             systems_list = metadata.get("systems_json") or []
-            # Generate temporary fallbacks if data is missing, to strictly enforce the reference page limits
             if not systems_list:
                 systems_list = [
                     {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "owners": "MICT Office"},
@@ -12708,9 +12707,9 @@ class ISSPDynamicCompiler:
             '''
 
 
-# app/tasks/pdf_tasks.py (Task definition starting at @celery_app.task)
-
-# app/tasks/pdf_tasks.py (Task definition starting at @celery_app.task)
+# ==========================================================
+# ASYNCHRONOUS COMPILATION CELERY TASK
+# ==========================================================
 
 @celery_app.task(
     bind=True, 
@@ -12719,9 +12718,14 @@ class ISSPDynamicCompiler:
     soft_time_limit=300
 )
 def compile_issp_document(self, metadata: dict):
+    """
+    Orchestrates the dynamic multi-pass layout compilation of the e-ISSP PDF document.
+    Maintains clean database session cleanup and secure string error logging on failure
+    to prevent inconsistent metadata serialization issues within the Redis result backend.
+    """
+    db = db_session()
     try:
         self.update_state(state="PROGRESS", meta={"progress": 10, "status": "Acquiring database session..."})
-        db = db_session()
         
         issp_period = metadata.get("issp_period_years", "2026-2028")
         
@@ -12780,7 +12784,7 @@ def compile_issp_document(self, metadata: dict):
             error_msg = "ISSP Compilation Blocked: The following mandatory compliance parts are missing or incomplete:\n" + \
                         "\n".join(f"  - {element}" for element in missing_elements)
             logger.error(error_msg)
-            # Standard raise, Celery will transition to FAILURE automatically
+            # Raise a safe, plain string exception to prevent result backend serialization crashes
             raise ValueError(error_msg)
             
         self.update_state(state="PROGRESS", meta={"progress": 25, "status": "Fetching authored Part I-V narratives..."})
@@ -13264,7 +13268,7 @@ def compile_issp_document(self, metadata: dict):
         # ==========================================================
         self.update_state(state="PROGRESS", meta={"progress": 50, "status": "Executing Pass 1: Calculating layout geometry & final page count..."})
 
-        metadata["computed_total_pages"] = "107"  # Default fallback count to maintain layout calculations
+        metadata["computed_total_pages"] = "107"  
         html_blocks_pass1 = []
         for section_id in layout_sequence:
             html_blocks_pass1.append(
@@ -13284,11 +13288,15 @@ def compile_issp_document(self, metadata: dict):
         html_doc_pass1 = HTML(string=html_raw_pass1, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))
         rendered_doc_pass1 = html_doc_pass1.render()
         
-        # Determine page boundaries exclusively for pages containing the 'core-issp' class style rules
-        core_pages = [p for p in rendered_doc_pass1.pages if p.page_name in ["core_issp_portrait", "core_issp_landscape"]]
-        total_page_count = len(core_pages) if core_pages else 107
+        # Safely resolve Named Page styles using a defensive, version-agnostic attribute scanner
+        core_pages = []
+        for p in rendered_doc_pass1.pages:
+            p_name = getattr(p, "page_name", getattr(p, "_page_name", None))
+            if p_name in ["core_issp_portrait", "core_issp_landscape"]:
+                core_pages.append(p)
+                
+        total_page_count = len(core_pages) if core_pages else len(rendered_doc_pass1.pages)
 
-        # Pass 2: Inject exact total count and re-render standard pages with dynamically aligned headers and signatures
         self.update_state(state="PROGRESS", meta={"progress": 80, "status": f"Executing Pass 2: Drawing table layouts for {total_page_count} certified pages..."})
         metadata["computed_total_pages"] = str(total_page_count)
 
@@ -13327,19 +13335,22 @@ def compile_issp_document(self, metadata: dict):
         }
 
     except SoftTimeLimitExceeded as timeout_exc:
-        db_session.rollback()
-        db_session.remove()
+        db.rollback()
         logger.error(f"Celery SoftTimeLimitExceeded hit during PDF compilation: {str(timeout_exc)}")
-        raise Exception("SoftTimeLimitExceeded: PDF generation soft timeout limit exceeded.")
+        raise Exception("CompilationError: PDF generation soft timeout limit exceeded.")
+        
+    except ValueError as validation_exc:
+        db.rollback()
+        logger.warning(f"ISSP Compliance Validation Block: {str(validation_exc)}")
+        raise Exception(f"ValidationError: {str(validation_exc)}")
         
     except Exception as e:
-        db_session.rollback()
-        db_session.remove()
+        db.rollback()
         logger.error(f"Async dynamic compilation failed: {str(e)}", exc_info=True)
-        # Raise a safe serializable standard Exception
         raise Exception(f"CompilationError: {str(e)}")
     finally:
-        db_session.remove()
+        db.close()
+
 
 =========================================
 CORE SYSTEM FILE: .\app\tasks\__init__.py
@@ -32724,10 +32735,11 @@ export default function DocumentVault() {
         "cspc-issp-vault.s3.amazonaws.com"
       ];
       
-      const apiHost = new URL(API_BASE_URL).host;
+      // Use .hostname to strip ports and evaluate host origins safely
+      const apiHost = new URL(API_BASE_URL).hostname;
       allowedHosts.push(apiHost);
       
-      return allowedHosts.some(host => parsed.host === host || parsed.host.endsWith("." + host));
+      return allowedHosts.some(host => parsed.hostname === host || parsed.hostname.endsWith("." + host));
     } catch (e) {
       return false;
     }
@@ -32830,7 +32842,6 @@ export default function DocumentVault() {
           delay = Math.min(delay * 1.5, 5000);
           timeoutId = setTimeout(runPoll, delay);
         } else if (data.state === "PENDING" || data.state === "STARTED") {
-          // Keep polling while task waits in Celery queue
           const statusVal = data.current_step_message || "Queued in background worker...";
           setTaskStatusText(statusVal);
 
@@ -33018,7 +33029,6 @@ export default function DocumentVault() {
             />
           </div>
 
-          {/* Compilation Pipeline Steps checklist */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4 pt-4 border-t border-slate-800/60 text-[10px]">
             {compilationSteps.map((step) => {
               const isCompleted = taskProgress > step.minProgress;
@@ -33069,7 +33079,7 @@ export default function DocumentVault() {
             onClick={(e) => handleSecureDownload(e, downloadUrl)}
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 shrink-0"
+            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 shrink-0 animate-fadeIn"
           >
             Download Finalized PDF
           </a>
