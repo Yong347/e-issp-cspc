@@ -678,7 +678,7 @@ class BudgetCeiling(Base):
     allocated_capex: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     allocated_mooe: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    issp_period: Mapped[str] = mapped_column(
+    issp_period: Mapped[Optional[str]] = mapped_column(
         String(50),
         ForeignKey("master_narratives.issp_period", ondelete="SET NULL", onupdate="CASCADE"),
         default="2026-2028",

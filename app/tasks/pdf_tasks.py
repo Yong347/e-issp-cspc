@@ -127,7 +127,7 @@ class ISSPDynamicCompiler:
             issp_period = metadata.get("issp_period_years", "2026-2028")
 
             return f'''
-            <div class="page transmittal-layout" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
+            <div class="page transmittal-layout" id="transmittal-anchor" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #1e3a8a; padding-bottom:12px; margin-bottom: 25px;">
                     <div style="width: 75px;">{cls.get_logo_html(metadata.get("agency_logo_url"))}</div>
                     <div style="text-align:center; font-family:sans-serif; flex:1;">
@@ -173,7 +173,7 @@ class ISSPDynamicCompiler:
             issp_period = metadata.get("issp_period_years", "2026-2028")
             agency_name = metadata.get("agency_name", "Camarines Sur Polytechnic Colleges")
             return f'''
-            <div class="page cover-layout" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
+            <div class="page cover-layout" id="cover-anchor" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
                 <div style="text-align: center; margin-top: 40px;">
                     <div style="background-color: white; display: inline-block; padding: 12px; border-radius: 50%; box-shadow: 0 4px 6px rgba(0,0,0,0.15);">
                         {cls.get_logo_html(metadata.get("agency_logo_url"))}
@@ -216,7 +216,7 @@ class ISSPDynamicCompiler:
             check_agency_regional = "[✓]" if scope_map.get("agency_regional_offices") else "[ &nbsp; ]"
 
             return f'''
-            <div class="page signatories-layout" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
+            <div class="page signatories-layout" id="sig-scope-anchor" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
                 <h2 style="font-size:12.5pt; text-align:center; font-weight:bold; color:#1e3a8a; border-bottom:2px solid #1e3a8a; padding-bottom:8px; margin-bottom:25px; text-transform: uppercase;">
                     Information Systems Strategic Plan<br/>
                     <span style="font-size:10pt; font-weight:normal; color:#475569; text-transform: none;">For the Planning Cycle {issp_period}</span>
@@ -271,48 +271,48 @@ class ISSPDynamicCompiler:
                 <div style="font-size: 9pt; line-height: 1.8; color: #334155;">
                     <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART I. ORGANIZATIONAL PROFILE</p>
                     <div style="margin-left: 15px; margin-bottom: 12px;">
-                        <div style="display:flex; justify-content:space-between;"><span>A. Department/Agency Vision, Mission and Mandate</span><span class="page-number-ref"></span></div>
-                        <div style="display:flex; justify-content:space-between; margin-left:15px; color: #64748b;"><span>A.1. SUC Legal Mandate & Batas Pambansa Blg. 512 Basis</span><span></span></div>
-                        <div style="display:flex; justify-content:space-between; margin-left:15px; color: #64748b;"><span>A.2. Vision and Mission Statements</span><span></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>A. Department/Agency Vision, Mission and Mandate</span><span class="page-number-ref-part1"></span></div>
+                        <div style="display:flex; justify-content:space-between; margin-left:15px; color: #64748b;"><span>A.1. SUC Legal Mandate & BP 512 Basis</span><span class="page-number-ref-part1"></span></div>
+                        <div style="display:flex; justify-content:space-between; margin-left:15px; color: #64748b;"><span>A.2. Vision and Mission Statements</span><span class="page-number-ref-part1"></span></div>
                         <div style="display:flex; justify-content:space-between;"><span>B. SUC Designated Planners Profile Matrix (Table B-1)</span><span class="page-number-ref-part1b"></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>C. SUC Functional Interface Flowchart</span><span></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>D. Present SUC ICT Situation (Strategic Challenges)</span><span></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>C. SUC Functional Interface Flowchart</span><span class="page-number-ref-part1c"></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>D. Present SUC ICT Situation (Strategic Challenges)</span><span class="page-number-ref-part1d"></span></div>
                         <div style="display:flex; justify-content:space-between;"><span>E. Strategic Concerns for ICT Use (Table I.E)</span><span class="page-number-ref-part1e"></span></div>
                     </div>
 
                     <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART II. INFORMATION SYSTEMS STRATEGY</p>
                     <div style="margin-left: 15px; margin-bottom: 12px;">
                         <div style="display:flex; justify-content:space-between;"><span>A. Conceptual Framework of IS Interface</span><span class="page-number-ref-part2"></span></div>
-                        <div style="display:flex; justify-content:space-between; margin-left:15px; color: #64748b;"><span>A.1. site development plans & logical layouts</span><span></span></div>
+                        <div style="display:flex; justify-content:space-between; margin-left:15px; color: #64748b;"><span>A.1. Site Development Plans & Logical Layouts</span><span class="page-number-ref-part2"></span></div>
                         <div style="display:flex; justify-content:space-between;"><span>B. Detailed Proposed Systems Profile Cards</span><span class="page-number-ref-part2-cards"></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>C. Required Registries and Databases Specification Sheets</span><span></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>D. Segmented logical Network Layouts</span><span></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>C. Required Registries and Databases Sheets</span><span class="page-number-ref-part2-cards"></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>D. Segmented Logical Network Layouts</span><span class="page-number-ref-part2"></span></div>
                     </div>
 
                     <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART III. DETAILED DESCRIPTION OF ICT PROJECTS</p>
                     <div style="margin-left: 15px; margin-bottom: 12px;">
                         <div style="display:flex; justify-content:space-between;"><span>A. Internal SUC Projects Profiles</span><span class="page-number-ref-part3"></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>B. Cross-Agency Collaborative Projects</span><span></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>C. Performance Measurement Frameworks Matrix</span><span></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>B. Cross-Agency Collaborative Projects</span><span class="page-number-ref-part3"></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>C. Performance Measurement Frameworks Matrix</span><span class="page-number-ref-pmf"></span></div>
                     </div>
 
                     <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART IV. RESOURCE REQUIREMENTS</p>
                     <div style="margin-left: 15px; margin-bottom: 12px;">
                         <div style="display:flex; justify-content:space-between;"><span>A. Equipment Deployment Mapping (Table IV.A)</span><span class="page-number-ref-part4"></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>B. ICT Organizational Charts & Structures</span><span></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>B. ICT Organizational Charts & Structures</span><span class="page-number-ref-part4"></span></div>
                     </div>
 
                     <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART V. SUMMARY OF INVESTMENTS & SCHEDULES</p>
                     <div style="margin-left: 15px; margin-bottom: 12px;">
                         <div style="display:flex; justify-content:space-between;"><span>A. Quarterly Projects Implementation Gantt Schedules</span><span class="page-number-ref-schedules"></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>B. Summary of Investments (CapEx/MOOE)</span><span class="page-number-ref4"></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>B. Summary of Investments (CapEx/MOOE)</span><span class="page-number-ref-investments"></span></div>
                     </div>
 
                     <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">ANNEX REPOSITORIES</p>
                     <div style="margin-left: 15px;">
-                        <div style="display:flex; justify-content:space-between;"><span>Annex A-1: DICT Surveillance details & Baseline Equipment Surveys</span><span class="page-number-ref-annex1"></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>Annex A-3: Complete Core SUC Offices Functions Directory</span><span class="page-number-ref-annexa3"></span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>Annex A-4: Dynamic SUC degree programs offered & GAA target indicators</span><span class="page-number-ref-annexa4"></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>Annex A-1: DICT Baseline Equipment Surveys</span><span class="page-number-ref-annex1"></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>Annex A-3: Core SUC Offices Functions Directory</span><span class="page-number-ref-annexa3"></span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>Annex A-4: SUC Degree Programs & GAA Target Indicators</span><span class="page-number-ref-annexa4"></span></div>
                     </div>
                 </div>
             </div>
@@ -324,7 +324,7 @@ class ISSPDynamicCompiler:
             if not process_flow_url:
                 return ""
             return f'''
-            <div class="page process-flow-layout" style="text-align: center; padding: 20px;">
+            <div class="page process-flow-layout" id="process-flow-anchor" style="text-align: center; padding: 20px;">
                 <h2 class="section-title">ISSP Process Flow</h2>
                 <div style="display: flex; justify-content: center; align-items: center; height: 80%; border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; background-color: #f8fafc; margin-top: 15px;">
                     <img src="{process_flow_url}" style="max-width: 100%; max-height: 480px; border: 1px solid #cbd5e1; padding: 4px; border-radius: 4px;" />
@@ -363,7 +363,7 @@ class ISSPDynamicCompiler:
             steps_html = "".join(f'<li style="margin-bottom: 10px;">{inst.get("instruction_text")}</li>' for inst in instructions_list)
 
             return f'''
-            <div class="page instructions-layout" style="padding: 15px; color: #0f172a;">
+            <div class="page instructions-layout" id="instructions-anchor" style="padding: 15px; color: #0f172a;">
                 <h2 class="section-title">General Instructions</h2>
                 <div style="font-size: 9.5pt; line-height: 1.7; color: #334155; text-align: justify; padding: 20px; border: 1px solid #cbd5e1; background-color: #f8fafc; border-radius: 4px;">
                     <p style="margin-top: 0; font-weight: bold; color: #1e3a8a;">Guidelines on Formulating and Submitting SUC ISSP Documents:</p>
@@ -398,7 +398,7 @@ class ISSPDynamicCompiler:
             functional_interface_html = ""
             if metadata.get("functional_interface_url"):
                 functional_interface_html = f'''
-                <div class="canvas-page" style="text-align: center; margin-top: 25px; margin-bottom: 20px; page-break-inside: avoid;">
+                <div class="canvas-page" id="part-1-c-functional-chart" style="text-align: center; margin-top: 25px; margin-bottom: 20px; page-break-inside: avoid;">
                     <h4 class="sub-section-title">I.C. Agency Functional Interface Diagram</h4>
                     <img src="{metadata.get("functional_interface_url")}" style="max-width: 100%; max-height: 400px; height: auto; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px; margin-top: 5px;" />
                 </div>
@@ -457,7 +457,7 @@ class ISSPDynamicCompiler:
 
                 {org_structure_html}
 
-                <h4 class="sub-section-title">I.D. Present ICT Situation (Strategic Challenges)</h4>
+                <h4 class="sub-section-title" id="part-1-d-present-situation">I.D. Present ICT Situation (Strategic Challenges)</h4>
                 <div style="font-size: 9.5pt; text-align: justify; color: #334155; line-height: 1.6; margin-bottom: 20px;">
                     {metadata.get("present_situation_html") or '<p style="font-style:italic; color:#64748b;">No present ICT situation narratives declared.</p>'}
                 </div>
@@ -554,7 +554,7 @@ class ISSPDynamicCompiler:
                         </tr>
                     </thead>
                     <tbody>
-                        {concerns_html or '<tr><td colspan="3" style="padding:10px; text-align:center; color:#94a3b8;">No strategic concerns declared.</td></tr>'}
+                        {concerns_html or '<tr><td colspan="3" style="text-align:center;">No strategic concerns logged.</td></tr>'}
                     </tbody>
                 </table>
             </div>
@@ -698,9 +698,10 @@ class ISSPDynamicCompiler:
                     {"name": "Human Resource Management Database", "description": "Facilitates employee biometrics logs, payroll files, and tax matrices.", "status": "Proposed", "is_served": "Human Resource Management System", "storage_media": "High-End Data Storage Server"}
                 ]
 
-            for db_item in databases_list:
+            for idx, db_item in enumerate(databases_list):
+                anchor_attr = 'id="part-2-c-databases"' if idx == 0 else ""
                 html_output += f'''
-                <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;">
+                <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;" {anchor_attr}>
                     <h2 class="section-title">
                         PART II.C: REQUIRED DATABASES & REGISTRIES
                     </h2>
@@ -1985,17 +1986,47 @@ def compile_issp_document(self, metadata: dict):
                 page-break-after: always;
             }}
 
-            .page-number-ref::after {{ content: target-counter(#part-i-anchor, page); }}
+            /* Table of Contents Dynamic Leader Dot and Counter Alignments */
+            .toc-layout div div {{
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-end;
+                margin-bottom: 4px;
+            }}
+            .toc-layout div div span:first-child {{
+                position: relative;
+                overflow: hidden;
+                display: flex;
+                width: 100%;
+                align-items: flex-end;
+            }}
+            .toc-layout div div span:first-child::after {{
+                content: " .............................................................................................................................................................................................................................................................................................................";
+                white-space: nowrap;
+                overflow: hidden;
+                color: #cbd5e1;
+                margin-left: 5px;
+                margin-right: 5px;
+                flex-grow: 1;
+            }}
+            .toc-layout div div span:last-child {{
+                font-weight: bold;
+                color: #1e3a8a;
+                white-space: nowrap;
+            }}
+
+            .page-number-ref-part1::after {{ content: target-counter(#part-i-anchor, page); }}
             .page-number-ref-part1b::after {{ content: target-counter(#part-1-b-manpower, page); }}
+            .page-number-ref-part1c::after {{ content: target-counter(#part-1-c-functional-chart, page); }}
+            .page-number-ref-part1d::after {{ content: target-counter(#part-1-d-present-situation, page); }}
             .page-number-ref-part1e::after {{ content: target-counter(#part-1-e-concerns, page); }}
-            .page-number-ref2::after {{ content: target-counter(#part-ii-anchor, page); }}
             .page-number-ref-part2::after {{ content: target-counter(#part-ii-anchor, page); }}
             .page-number-ref-part2-cards::after {{ content: target-counter(#part-2-b-c-databases, page); }}
-            .page-number-ref3::after {{ content: target-counter(#part-iii-anchor, page); }}
             .page-number-ref-part3::after {{ content: target-counter(#part-iii-anchor, page); }}
+            .page-number-ref-pmf::after {{ content: target-counter(#pmf-anchor, page); }}
             .page-number-ref-part4::after {{ content: target-counter(#org-structure-anchor, page); }}
             .page-number-ref-schedules::after {{ content: target-counter(#schedules-anchor, page); }}
-            .page-number-ref4::after {{ content: target-counter(#part-v-anchor, page); }}
+            .page-number-ref-investments::after {{ content: target-counter(#part-v-anchor, page); }}
             .page-number-ref-annex1::after {{ content: target-counter(#annex-master-anchor, page); }}
             .page-number-ref-annexa3::after {{ content: target-counter(#annex-a3-anchor, page); }}
             .page-number-ref-annexa4::after {{ content: target-counter(#annex-a4-anchor, page); }}

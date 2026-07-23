@@ -37,7 +37,7 @@ export default function TransmittalLetterPreview() {
   const apiEndpoint = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
 
   const fetchTransmittalDetails = async () => {
-    if (!activeCycle) return;
+    if (!activeCycle || !user?.token) return;
     setLoading(true);
     setError(null);
     try {
@@ -71,6 +71,10 @@ export default function TransmittalLetterPreview() {
 
   const handleSave = async (e) => {
     e.preventDefault();
+    if (!user?.token || !activeCycle) {
+      setError("Session expired. Please log in again.");
+      return;
+    }
     setError(null);
     setSuccess(null);
     setSubmitting(true);
@@ -150,7 +154,7 @@ export default function TransmittalLetterPreview() {
               placeholder="e.g. Director General, DICT"
               value={form.transmittal_recipient}
               onChange={e => setForm({ ...form, transmittal_recipient: e.target.value })}
-              className="w-full p-2.5 bg-slate-950 border border-slate-850 rounded-lg text-white"
+              className="w-full p-2.5 bg-slate-955 border border-slate-855 rounded-lg text-white"
             />
           </div>
 
@@ -237,9 +241,9 @@ export default function TransmittalLetterPreview() {
             <div className="space-y-8 text-[11px] leading-relaxed">
               
               {/* Emulated SUC Header Letterhead */}
-              <div className="text-center border-b pb-4 border-slate-300">
-                <h2 className="font-bold text-sm tracking-wide text-blue-900 uppercase font-sans">Camarines Sur Polytechnic Colleges</h2>
-                <p className="text-[9px] text-slate-500 font-sans mt-0.5 font-semibold">Nabua, Camarines Sur | Republic of the Philippines</p>
+              <div className="text-center border-b pb-4 border-slate-300 font-sans">
+                <h2 className="font-bold text-sm tracking-wide text-blue-900 uppercase">Camarines Sur Polytechnic Colleges</h2>
+                <p className="text-[9px] text-slate-500 mt-0.5 font-semibold">Nabua, Camarines Sur | Republic of the Philippines</p>
               </div>
 
               {/* Date Block */}
@@ -272,9 +276,9 @@ export default function TransmittalLetterPreview() {
             <div className="text-slate-700 text-[11px] pt-8 border-t border-slate-100 flex justify-between items-end">
               <div>
                 <p className="italic">Very truly yours,</p>
-                <div className="mt-8">
-                  <span className="text-blue-900 font-bold underline uppercase block tracking-wide">{form.signatory_approved_by || "SUC PRESIDENT NAME"}</span>
-                  <span className="text-slate-400 text-[9px] block mt-0.5 font-sans font-semibold">SUC President III</span>
+                <div className="mt-8 font-sans">
+                  <span className="text-blue-900 font-bold underline uppercase block tracking-wide font-serif">{form.signatory_approved_by || "SUC PRESIDENT NAME"}</span>
+                  <span className="text-slate-400 text-[9px] block mt-0.5 font-semibold">SUC President III</span>
                 </div>
               </div>
               

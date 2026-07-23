@@ -819,7 +819,7 @@ class CoreOfficeRegistrySchema(BaseModel):
 class StrategicConcernSchema(BaseModel):
     """Section I.C/I.E - Mapping of Major Final Outputs (MFO) to strategic IT problems"""
     mfo: str = Field(..., description="Major Final Output description")
-    systems: str = Field(..., description="Critical Business Systems or platforms used")
+    critical_system: str = Field(..., description="Critical Business Systems or platforms used")
     problems: str = Field(..., description="Key technical or administrative problems encountered")
     intended_use: str = Field(..., description="Intended strategic use of ICT solutions")
 
@@ -1154,6 +1154,7 @@ class MasterNarrativeResponse(BaseModel):
     pmf_matrix_json: List[PMFRowSchema]
     
     org_chart_url: Optional[str] = Field(None, description="Part IV.B diagram mapping asset location")
+    authoring_cycle_duration: Optional[int] = None
     functional_interface_url: Optional[str] = Field(None, description="Part I.C diagram mapping asset location")
     conceptual_framework_url: Optional[str] = Field(None, description="Part II.A diagram mapping asset location")
     network_layout_url: Optional[str] = Field(None, description="Part II.D diagram mapping asset location")
@@ -1513,7 +1514,7 @@ class InvestmentSummaryRow(BaseModel):
 # --- Gap 11/12: Annual Cost Breakdown & Continuing Institutional Costs ---
 class AnnualCostBreakdownCreate(BaseModel):
     project_key: str = Field(..., example="WiFi")
-    text_type: str = Field(..., example="CapEx")
+    cost_type: str = Field(..., example="CapEx")  # Aligned to database cost_type attribute
     item_description: str = Field(..., example="Enterprise Access Point")
     unit_cost: Decimal = Field(..., ge=0)
     yearly_quantities: Dict[str, int] = Field(default_factory=dict, example={"2026": 5, "2027": 0, "2028": 0})
