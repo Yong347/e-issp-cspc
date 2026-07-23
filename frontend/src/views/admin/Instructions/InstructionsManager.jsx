@@ -16,9 +16,7 @@ import {
   X,
   AlertCircle,
   CheckCircle,
-  Hash,
-  ArrowUp,
-  ArrowDown
+  Hash
 } from "lucide-react";
 
 export default function InstructionsManager() {
@@ -153,7 +151,7 @@ export default function InstructionsManager() {
   };
 
   return (
-    <div className="space-y-6 text-xs text-slate-100 max-w-7xl mx-auto select-none">
+    <div className="space-y-6 text-xs text-slate-100 max-w-7xl mx-auto">
       {/* Title block */}
       <div className="flex justify-between items-center bg-slate-900 p-6 rounded-xl border border-slate-800">
         <div>
@@ -197,7 +195,7 @@ export default function InstructionsManager() {
               min="1"
               value={form.step_number}
               onChange={e => setForm({ ...form, step_number: parseInt(e.target.value, 10) || 1 })}
-              className="w-full p-2.5 bg-slate-950 border border-slate-855 rounded-lg text-white font-mono font-bold"
+              className="w-full p-2.5 bg-slate-955 border border-slate-855 rounded-lg text-white font-mono font-bold"
               required
             />
           </div>
@@ -268,14 +266,14 @@ export default function InstructionsManager() {
                     <div className="flex gap-1 shrink-0">
                       <button
                         onClick={() => handleEdit(inst)}
-                        className="p-1.5 bg-slate-900 hover:bg-slate-850 rounded border border-slate-800 text-slate-400 hover:text-blue-400 cursor-pointer transition-colors"
+                        className="p-1.5 bg-slate-900 hover:bg-slate-855 rounded border border-slate-800 text-slate-400 hover:text-blue-400 cursor-pointer transition-colors"
                         title="Edit Guideline"
                       >
                         <Edit className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => handleDelete(inst.id)}
-                        className="p-1.5 bg-slate-900 hover:bg-slate-850 rounded border border-slate-800 text-slate-400 hover:text-red-400 cursor-pointer transition-colors"
+                        className="p-1.5 bg-slate-900 hover:bg-slate-855 rounded border border-slate-800 text-slate-400 hover:text-red-400 cursor-pointer transition-colors"
                         title="Purge Guideline"
                       >
                         <Trash2 className="w-3.5 h-3.5" />

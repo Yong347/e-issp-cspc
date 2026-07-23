@@ -404,29 +404,37 @@ def bootstrap_metadata(db):
 
     logger.info("Seeding default Glossary Terms (Pages 6-10)...")
     glossary_terms = [
-        {"term": "ISSP", "definition": "Information Systems Strategic Plan - a blueprint mapping out an agency's target IT layout frameworks.", "order_index": 1},
-        {"term": "MITHI", "definition": "Medium-Term Information and Communications Technology Harmonization Initiative.", "order_index": 2},
-        {"term": "COA", "definition": "Commission on Audit - the supreme auditing institution of the Republic of the Philippines.", "order_index": 3},
-        {"term": "Agency", "definition": "Refers to any bureau, office, commission, authority, or instrumentality of the national government.", "order_index": 4},
-        {"term": "Biometrics", "definition": "The science and technology of measuring and statistically analyzing biological data for authentication.", "order_index": 5},
-        {"term": "Client-Server", "definition": "A logical split architecture partitioning tasks between front-end clients and back-end servers.", "order_index": 6},
-        {"term": "Database", "definition": "An organized group or set of inter-related information stored and managed electronically.", "order_index": 7}
+        {"term": "Agency", "definition": "Refers to any bureau, office, commission, authority, or instrumentality of the national government, including government-owned or-controlled corporations (GOCC), authorized by law or by their respective charters to contract for or undertake information and communications technology networks, databases, infrastructure or development projects.", "order_index": 1},
+        {"term": "Application System", "definition": "Refers to a group of related activities or processes designed to support a very specific function (e.g., Payroll System, Accounting System, etc.). It is referred to as a 'computer-based information system' prepared for the organization to process tasks that are unique to the particular needs or 'tailor fit' for the particular operation.", "order_index": 2},
+        {"term": "Biometrics", "definition": "The science and technology of measuring and statistically analyzing biological data. In ICT, it refers to technologies for measuring and analyzing human body characteristics such as fingerprints, eye retinas and irises, voice patterns, facial patterns and hand measurements, especially for the authentication of someone.", "order_index": 3},
+        {"term": "Business Process", "definition": "A collection of business transactions between business partners and/or internal activities within one business. These transactions and/or activities together support the objective of the business process.", "order_index": 4},
+        {"term": "Computing Scheme", "definition": "May be classified into two, namely stand-alone or independent systems, and networked systems.", "order_index": 5},
+        {"term": "Client-Server", "definition": "The most recent approach in networking wherein the logic of the application is divided between a front-end computer (called the client) and a back-end computer (called a server). The client generally provides and uses information while the server retrieves, selects, sorts, calculates, sends only needed data and manages the database.", "order_index": 6},
+        {"term": "Database (DB)", "definition": "An organized group or set of inter-related information about a subject that can be processed, retrieved, analyzed and used in drawing conclusions and making decisions.", "order_index": 7},
+        {"term": "ISSP", "definition": "Information Systems Strategic Plan - refers to a three (3) to five (5) year computerization framework of an agency which describes how the organization intends to strategically use ICT in pursuit of its mission and functions.", "order_index": 8},
+        {"term": "MITHI", "definition": "Medium-Term Information and Communications Technology Harmonization Initiative - a government-wide program to harmonize all ICT resources and programs.", "order_index": 9}
     ]
     for term in glossary_terms:
         existing = db.query(GlossaryTerm).filter(GlossaryTerm.term == term["term"]).first()
         if not existing:
             db.add(GlossaryTerm(**term))
+        else:
+            existing.definition = term["definition"]
+            existing.order_index = term["order_index"]
 
     logger.info("Seeding General Submission Guidelines (Page 11)...")
     guidelines = [
-        {"step_number": 1, "instruction_text": "Ensure all physical hardware inventories (Annex A-5) are documented cleanly before proposing replacements."},
-        {"step_number": 2, "instruction_text": "Verify market canvas quotation values. Standard catalog prices act as absolute ceiling blocks."},
-        {"step_number": 3, "instruction_text": "Secure official signatures of the Agency Head on the transmittal cover sheet prior to DICT upload."}
+        {"step_number": 1, "instruction_text": "This Template is prescribed primarily to guide government agencies to formulate and present its ISSP in brief. Government agencies may provide information that could add better clarity to the ISSP. The ISSP Template Revised contains the basic information that is required by the government and therefore does not inhibit the agency from making their ISSPs more complex for other purposes."},
+        {"step_number": 2, "instruction_text": "The agency must submit one hard copy of the initial ISSP to DICT for review and evaluation, together with a transmittal letter signed by the agency head and addressed to the Secretary, Department of Information and Communications Technology, DICT Bldg., C.P. Garcia Ave., U.P. Campus, Diliman, Quezon City."},
+        {"step_number": 3, "instruction_text": "Once the ISSP is complete and complied with requirements as per review and evaluation of DICT, then the agency must submit two (2) hard copies of the final ISSP to the DICT for endorsement and a soft copy in CD (pdf or doc file)."},
+        {"step_number": 4, "instruction_text": "Agencies are advised to use font size 12 and government sized (A4) bond paper, however, page margin may vary."}
     ]
     for step in guidelines:
         existing = db.query(GeneralInstruction).filter(GeneralInstruction.step_number == step["step_number"]).first()
         if not existing:
             db.add(GeneralInstruction(**step))
+        else:
+            existing.instruction_text = step["instruction_text"]
 
     logger.info("Seeding physical Server capacity tracks (Gap 15)...")
     existing_capacity = db.query(ServerCapacityTrack).filter(ServerCapacityTrack.capacity_tier == "Above 4TB").first()

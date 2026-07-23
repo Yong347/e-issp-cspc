@@ -139,12 +139,12 @@ export default function GlossaryManager() {
   };
 
   const filteredTerms = terms.filter(t =>
-    t.term.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    t.definition.toLowerCase().includes(searchQuery.toLowerCase())
+    (t.term || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (t.definition || "").toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (
-    <div className="space-y-6 text-xs text-slate-100 max-w-7xl mx-auto select-none">
+    <div className="space-y-6 text-xs text-slate-100 max-w-7xl mx-auto">
       {/* Title Header */}
       <div className="flex justify-between items-center bg-slate-900 p-6 rounded-xl border border-slate-800">
         <div>
@@ -240,7 +240,7 @@ export default function GlossaryManager() {
                 placeholder="Search vocabulary terms or definitions..."
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-850 rounded-lg text-white placeholder-slate-500 text-xs"
+                className="w-full pl-9 pr-3 py-2 bg-slate-955 border border-slate-850 rounded-lg text-white placeholder-slate-500 text-xs"
               />
             </div>
           </div>
