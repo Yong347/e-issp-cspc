@@ -5,6 +5,122 @@ const API_ROOT = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
 const BASE_URL = `${API_ROOT}/api/admin`;
 
 // ==========================================
+// Document Tree & Hierarchy Endpoints (Restructured)
+// ==========================================
+
+export const getIsspTree = async (token) => {
+  const res = await fetch(`${BASE_URL}/issp/document-tree`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("Failed to load document skeleton hierarchy.");
+  return res.json();
+};
+
+export const createIsspNode = async (token, payload) => {
+  const res = await fetch(`${BASE_URL}/issp/nodes`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to create document node.");
+  }
+  return res.json();
+};
+
+export const updateIsspNode = async (token, nodeId, payload) => {
+  const res = await fetch(`${BASE_URL}/issp/nodes/${nodeId}`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to update document node.");
+  }
+  return res.json();
+};
+
+export const deleteIsspNode = async (token, nodeId) => {
+  const res = await fetch(`${BASE_URL}/issp/nodes/${nodeId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("Failed to purge document node.");
+  return res.json();
+};
+
+export const reorderIsspNodes = async (token, payload) => {
+  const res = await fetch(`${BASE_URL}/issp/reorder`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to restructure hierarchy nodes.");
+  }
+  return res.json();
+};
+
+export const updateIsspVocabulary = async (token, nodeId, payload) => {
+  const res = await fetch(`${BASE_URL}/issp/nodes/${nodeId}/vocabulary`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to update DICT vocabulary titles.");
+  }
+  return res.json();
+};
+
+export const updateIsspContent = async (token, nodeId, payload) => {
+  const res = await fetch(`${BASE_URL}/issp/nodes/${nodeId}/contents`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to update node contents.");
+  }
+  return res.json();
+};
+
+export const uploadIsspAsset = async (token, formData) => {
+  const res = await fetch(`${BASE_URL}/issp/assets`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to upload asset illustration.");
+  }
+  return res.json();
+};
+
+// ==========================================
 // Existing Endpoints (Preserved)
 // ==========================================
 

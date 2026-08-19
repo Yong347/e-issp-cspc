@@ -11,7 +11,9 @@ import {
   ChevronDown, ChevronRight, FileSignature, ImageIcon, Map,
   UploadCloud, Snowflake, Inbox, BookOpen, MapPin, HardDrive, 
   Layers, FileCode, Building, Coins, Network, GraduationCap, 
-  Target, Calendar, TrendingUp, ShieldAlert, Mail, Users
+  Target, Calendar, TrendingUp, ShieldAlert, Mail, Users,
+  FolderTree // <-- Add this icon import
+
 } from 'lucide-react';
 
 export default function DashboardLayout() {
@@ -259,6 +261,11 @@ export default function DashboardLayout() {
                       <NavLink to="/admin/narratives/staff-positions" className={subNavLinkClass}>
                         <Users className="w-3.5 h-3.5 text-blue-400" />
                         <span>IT Staffing (Part IV.B)</span>
+                      </NavLink>
+                      {/* Add the missing link here */}
+                      <NavLink to="/admin/narratives/structure" className={subNavLinkClass}>
+                        <FolderTree className="w-3.5 h-3.5 text-blue-400" />
+                        <span>Document Structure Manager</span>
                       </NavLink>
                       <NavLink to="/admin/diagrams" className={subNavLinkClass}>
                         <ImageIcon className="w-3.5 h-3.5 text-blue-400" />

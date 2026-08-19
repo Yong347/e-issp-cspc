@@ -50,17 +50,28 @@ async def lifespan(app: FastAPI):
     logger.info("INITIALIZING CSPC E-ISSP COMPLIANCE ENGINE")
     logger.info("=" * 70)
     
-    # Run database migrations first to prevent metadata/Alembic version conflicts
+    # Run database migrations/initialization safely
     alembic_ini_path = os.path.join(settings.BASE_DIR, "alembic.ini")
     if os.path.exists(alembic_ini_path):
         try:
-            logger.info("Running database migrations via Alembic head upgrade...")
+            from sqlalchemy import inspect
             import alembic.config
             import alembic.command
             
             alembic_cfg = alembic.config.Config(alembic_ini_path)
-            alembic.command.upgrade(alembic_cfg, "head")
-            logger.info("Database schema migrations completed successfully.")
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            
+            # If the database is completely empty, build the base schema and stamp it
+            if not tables:
+                logger.info("Fresh database detected. Creating tables via metadata and stamping Alembic head...")
+                Base.metadata.create_all(bind=engine)
+                alembic.command.stamp(alembic_cfg, "head")
+                logger.info("Database initialized and stamped successfully.")
+            else:
+                logger.info("Existing database detected. Running database migrations via Alembic head upgrade...")
+                alembic.command.upgrade(alembic_cfg, "head")
+                logger.info("Database schema migrations completed successfully.")
         except Exception as e:
             logger.error(f"Failed to auto-upgrade database schema via Alembic: {str(e)}", exc_info=True)
             try:

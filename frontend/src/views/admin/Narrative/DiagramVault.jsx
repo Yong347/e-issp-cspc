@@ -2,7 +2,19 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
-import { ImageIcon, Upload, CheckCircle, AlertCircle, RefreshCw, FileImage } from "lucide-react";
+import { 
+  ImageIcon, 
+  Upload, 
+  CheckCircle, 
+  AlertCircle, 
+  RefreshCw, 
+  FileImage, 
+  Maximize, 
+  Minimize, 
+  Layout, 
+  Settings2,
+  FileText
+} from "lucide-react";
 
 export default function DiagramVault() {
   const { user } = useAuth();
@@ -12,8 +24,12 @@ export default function DiagramVault() {
   const [success, setSuccess] = useState(null);
   const [error, setError] = useState(null);
 
-  // Tracks localized upload loaders per category key instead of locking the entire workspace
+  // Card-specific operational states
   const [uploading, setUploading] = useState({});
+  const [assetRoles, setAssetRoles] = useState({});
+  const [customTitles, setCustomTitles] = useState({});
+  const [aspectPreserve, setAspectPreserve] = useState({});
+  const [aspectWarnings, setAspectWarnings] = useState({});
 
   const [diagrams, setDiagrams] = useState({
     agency_logo: null,
@@ -61,6 +77,19 @@ export default function DiagramVault() {
           system_architecture: data.system_architecture_url,
           network_topology: data.network_topology_url
         });
+
+        // Initialize layout properties from metadata dynamically
+        const initialRoles = {};
+        const initialPreserve = {};
+        const initialTitles = {};
+        categories.forEach(cat => {
+          initialRoles[cat.key] = cat.defaultRole;
+          initialPreserve[cat.key] = true;
+          initialTitles[cat.key] = cat.title;
+        });
+        setAssetRoles(initialRoles);
+        setAspectPreserve(initialPreserve);
+        setCustomTitles(initialTitles);
       } else {
         const errData = await res.json();
         throw new Error(errData.detail || "Failed to retrieve existing diagram paths.");
@@ -78,16 +107,54 @@ export default function DiagramVault() {
     }
   }, [token, activeCycle]);
 
+  // Evaluates image files on the client side to verify aspect-ratio parameters
+  const validateImageAspect = (category, file) => {
+    if (!file) return;
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      const width = img.naturalWidth;
+      const height = img.naturalHeight;
+      const ratio = width / height;
+
+      let hasWarning = false;
+      let warningText = "";
+
+      const activeRole = assetRoles[category];
+
+      if (activeRole === "full_page_diagram") {
+        // Enforce landscape aspect bounds (ideal ratio ~ 1.414 for landscape A4 layouts)
+        if (ratio < 1.2) {
+          hasWarning = true;
+          warningText = `Sizing Warning: This diagram has a portrait-leaning aspect ratio (${ratio.toFixed(2)}). Full-Page Charts must be landscape oriented to prevent layout overflows.`;
+        }
+      } else if (category === "agency_logo" || category === "cert_logo") {
+        // Enforce square/clerical aspect bounds
+        if (ratio < 0.8 || ratio > 1.2) {
+          hasWarning = true;
+          warningText = `Sizing Warning: Branding logos should ideally have a 1:1 aspect ratio. High variance (${ratio.toFixed(2)}) may cause header line shifts.`;
+        }
+      }
+
+      setAspectWarnings(prev => ({
+        ...prev,
+        [category]: hasWarning ? warningText : null
+      }));
+    };
+  };
+
   const handleUpload = async (category, file) => {
     if (!file) return;
     setError(null);
     setSuccess(null);
 
-    // Assert localized card-level loading state
     setUploading(prev => ({ ...prev, [category]: true }));
 
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("asset_role", assetRoles[category]);
+    formData.append("custom_title", customTitles[category]);
+    formData.append("aspect_ratio_preserve", aspectPreserve[category] ? "true" : "false");
 
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${activeCycle}/upload-diagram?category=${category}`, {
@@ -112,20 +179,20 @@ export default function DiagramVault() {
   };
 
   const categories = [
-    { key: "agency_logo", title: "Institutional Brand Logo" },
-    { key: "cert_logo", title: "Certification Badge (TUV SUD)" },
-    { key: "process_flow_diagram", title: "ISSP Process Flow Diagram (Section iii)" },
-    { key: "org_chart", title: "General College Org Structure" },
-    { key: "functional_interface", title: "I.C. SUC Functional Interface Diagram" },
-    { key: "conceptual_framework", title: "Conceptual IS Architecture" },
-    { key: "network_layout", title: "Logical LAN Network Layout" },
-    { key: "existing_ict_org", title: "Part IV.B: Existing ICT Organizational Chart" },
-    { key: "proposed_ict_org", title: "Part IV.B: Proposed ICT Organizational Structure" },
-    { key: "placement_ict_org", title: "Part IV.B: Placement of Proposed ICT in Institutional Chart" },
-    { key: "site_development_plan", title: "Annex A-2 Campus Site Development Plan" },
-    { key: "network_topology", title: "CSPC Network Diagram & Core Topology (Page 129)" },
-    { key: "fiber_backbone", title: "Fiber Optic Backbone Cabling Layout (Page 130)" },
-    { key: "system_architecture", title: "CSPC Unified System Architecture (Page 131)" }
+    { key: "agency_logo", title: "Institutional Brand Logo", defaultRole: "logo" },
+    { key: "cert_logo", title: "Certification Badge (TUV SUD)", defaultRole: "logo" },
+    { key: "process_flow_diagram", title: "ISSP Process Flow Diagram", defaultRole: "full_page_diagram" },
+    { key: "org_chart", title: "General College Org Structure", defaultRole: "full_page_diagram" },
+    { key: "functional_interface", title: "I.C. SUC Functional Interface Diagram", defaultRole: "full_page_diagram" },
+    { key: "conceptual_framework", title: "Conceptual IS Architecture", defaultRole: "full_page_diagram" },
+    { key: "network_layout", title: "Logical LAN Network Layout", defaultRole: "full_page_diagram" },
+    { key: "existing_ict_org", title: "Part IV.B: Existing ICT Organizational Chart", defaultRole: "full_page_diagram" },
+    { key: "proposed_ict_org", title: "Part IV.B: Proposed ICT Organizational Structure", defaultRole: "full_page_diagram" },
+    { key: "placement_ict_org", title: "Part IV.B: Placement of Proposed ICT in Institutional Chart", defaultRole: "full_page_diagram" },
+    { key: "site_development_plan", title: "Annex A-2 Campus Site Development Plan", defaultRole: "full_page_diagram" },
+    { key: "network_topology", title: "CSPC Network Diagram & Core Topology (Page 129)", defaultRole: "full_page_diagram" },
+    { key: "fiber_backbone", title: "Fiber Optic Backbone Cabling Layout (Page 130)", defaultRole: "full_page_diagram" },
+    { key: "system_architecture", title: "CSPC Unified System Architecture (Page 131)", defaultRole: "full_page_diagram" }
   ];
 
   return (
@@ -140,6 +207,14 @@ export default function DiagramVault() {
             Store and manage high-resolution architecture diagrams. File sizes are capped at 5MB per upload.
           </p>
         </div>
+        <button
+          onClick={fetchDiagrams}
+          disabled={loading}
+          className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-colors flex items-center gap-1.5 text-xs disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          <span>Refresh Lists</span>
+        </button>
       </div>
 
       {error && (
@@ -163,40 +238,125 @@ export default function DiagramVault() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {categories.map((cat) => (
-            <div key={cat.key} className="bg-slate-900 p-5 rounded-xl border border-slate-800 space-y-4 flex flex-col justify-between">
-              <div>
-                <h3 className="font-bold text-slate-200 text-sm flex items-center gap-1.5 uppercase tracking-wide">
-                  <FileImage className="w-4 h-4 text-blue-400" />
-                  <span>{cat.title}</span>
-                </h3>
-                <p className="text-[10px] text-slate-500 font-mono mt-0.5">S3 target path: diagrams/{cat.key}/*</p>
-              </div>
+          {categories.map((cat) => {
+            const isFullPage = assetRoles[cat.key] === "full_page_diagram";
+            const warningText = aspectWarnings[cat.key];
 
-              {uploading[cat.key] ? (
-                <div className="bg-slate-955 border border-slate-850 h-40 flex flex-col items-center justify-center rounded-lg">
-                  <RefreshCw className="w-5 h-5 animate-spin text-blue-500 mb-2" />
-                  <span className="text-[10px] text-slate-500">Uploading diagram binary...</span>
+            return (
+              <div key={cat.key} className="bg-slate-900 p-5 rounded-xl border border-slate-800 space-y-4 flex flex-col justify-between">
+                <div className="space-y-2">
+                  <div className="flex justify-between items-start">
+                    <h3 className="font-bold text-slate-200 text-sm flex items-center gap-1.5 uppercase tracking-wide">
+                      <FileImage className="w-4 h-4 text-blue-400" />
+                      <span>{cat.title}</span>
+                    </h3>
+                    <span className="text-[9px] px-1.5 py-0.5 bg-slate-950 border border-slate-800 text-slate-500 rounded font-mono font-bold uppercase">
+                      {assetRoles[cat.key]}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-500 font-mono">S3 target path: diagrams/{cat.key}/*</p>
                 </div>
-              ) : diagrams[cat.key] ? (
-                <div className="bg-slate-955 p-2 rounded-lg border border-slate-850 h-40 flex items-center justify-center overflow-hidden">
-                  <img src={diagrams[cat.key]} alt={cat.title} className="max-w-full max-h-full object-contain" />
-                </div>
-              ) : (
-                <div className="bg-slate-955 border border-dashed border-slate-850 h-40 flex items-center justify-center rounded-lg text-slate-600 font-semibold italic">
-                  No diagram registered
-                </div>
-              )}
 
-              <div className="flex items-center justify-between gap-4 border-t border-slate-850/80 pt-3 text-xs">
-                <input 
-                  type="file" accept="image/png, image/jpeg, image/jpg, image/gif"
-                  onChange={(e) => handleUpload(cat.key, e.target.files[0])}
-                  className="w-full text-[11px] text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-[10px] file:font-bold file:bg-slate-800 file:text-slate-300 hover:file:bg-slate-700 file:cursor-pointer"
-                />
+                {/* layout configurator properties panel */}
+                <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-850/80 space-y-3 font-sans">
+                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-1"><Layout className="w-3.5 h-3.5" /> Layout Role:</span>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setAssetRoles(prev => ({ ...prev, [cat.key]: "inline_diagram" }))}
+                        className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-all ${
+                          assetRoles[cat.key] === "inline_diagram"
+                            ? "bg-blue-600 text-white"
+                            : "bg-slate-900 text-slate-500"
+                        }`}
+                      >
+                        Inline Image
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAssetRoles(prev => ({ ...prev, [cat.key]: "full_page_diagram" }))}
+                        className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-all ${
+                          assetRoles[cat.key] === "full_page_diagram"
+                            ? "bg-blue-600 text-white"
+                            : "bg-slate-900 text-slate-500"
+                        }`}
+                      >
+                        Full-Page Chart
+                      </button>
+                    </div>
+                  </div>
+
+                  {isFullPage && (
+                    <div className="space-y-1.5 animate-fadeIn">
+                      <span className="text-[9px] uppercase font-bold text-slate-500 block">Print Custom Title Header:</span>
+                      <div className="relative">
+                        <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-slate-600">
+                          <FileText className="w-3.5 h-3.5" />
+                        </span>
+                        <input
+                          type="text"
+                          value={customTitles[cat.key] || ""}
+                          onChange={(e) => setCustomTitles(prev => ({ ...prev, [cat.key]: e.target.value }))}
+                          className="w-full pl-8 pr-2 py-1.5 bg-slate-900 border border-slate-800 rounded text-[11px] text-white outline-none focus:border-blue-500 font-mono"
+                          placeholder="Print Title..."
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-1"><Settings2 className="w-3.5 h-3.5" /> Preserve Native Aspect:</span>
+                    <button
+                      type="button"
+                      onClick={() => setAspectPreserve(prev => ({ ...prev, [cat.key]: !prev[cat.key] }))}
+                      className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-all ${
+                        aspectPreserve[cat.key]
+                          ? "bg-emerald-600 text-white"
+                          : "bg-red-955/40 text-red-400 border border-red-900/30"
+                      }`}
+                    >
+                      {aspectPreserve[cat.key] ? "ENABLED" : "DISABLED (STRETCH)"}
+                    </button>
+                  </div>
+                </div>
+
+                {warningText && (
+                  <div className="p-2.5 bg-amber-955/20 border border-amber-900/30 text-amber-400 rounded-lg flex items-start gap-1.5 leading-relaxed text-[10px] font-semibold animate-pulse">
+                    <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    <span>{warningText}</span>
+                  </div>
+                )}
+
+                {uploading[cat.key] ? (
+                  <div className="bg-slate-955 border border-slate-850 h-40 flex flex-col items-center justify-center rounded-lg">
+                    <RefreshCw className="w-5 h-5 animate-spin text-blue-500 mb-2" />
+                    <span className="text-[10px] text-slate-500">Uploading diagram binary...</span>
+                  </div>
+                ) : diagrams[cat.key] ? (
+                  <div className="bg-slate-955 p-2 rounded-lg border border-slate-850 h-40 flex items-center justify-center overflow-hidden">
+                    <img src={diagrams[cat.key]} alt={cat.title} className="max-w-full max-h-full object-contain" />
+                  </div>
+                ) : (
+                  <div className="bg-slate-955 border border-dashed border-slate-850 h-40 flex items-center justify-center rounded-lg text-slate-600 font-semibold italic">
+                    No diagram registered
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between gap-4 border-t border-slate-850/80 pt-3 text-xs">
+                  <input 
+                    type="file" accept="image/png, image/jpeg, image/jpg, image/gif"
+                    onChange={(e) => {
+                      const file = e.target.files[0];
+                      validateImageAspect(cat.key, file);
+                      handleUpload(cat.key, file);
+                    }}
+                    className="w-full text-[11px] text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-[10px] file:font-bold file:bg-slate-800 file:text-slate-300 hover:file:bg-slate-700 file:cursor-pointer"
+                  />
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

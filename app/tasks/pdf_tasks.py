@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from sqlalchemy import func
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.config import settings
@@ -36,7 +36,15 @@ from app.database.models import (
     ClientOsCensus,
     OfficeSoftwareCensus,
     ProposalDeployment,
-    IctStaffPosition
+    IctStaffPosition,
+    IsspNode,
+    IsspVocabulary,
+    IsspContent,
+    IsspAsset,
+    NodeType,
+    PageOrientation,
+    ContentType,
+    AssetRole
 )
 from app.storage.s3_client import storage_client
 from app.celery_app import celery_app
@@ -45,29 +53,49 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================================
-# PERMANENT DOCUMENT LAYOUT CONFIGURATION
+# SYSTEM DIRECTORY MAPS & FALLBACK FORMATS
 # ==========================================================
 
+KEY_TO_SCHEMA = {
+    "TRANSMITTAL": "core_transmittal",
+    "COVER": "core_cover",
+    "SIGNATORIES": "core_sig_scope",
+    "TOC_PAGE": "core_toc",
+    "TOC": "core_toc",
+    "PROCESS_FLOW": "core_process_flow",
+    "GLOSSARY": "core_defs",
+    "INSTRUCTIONS": "core_instructions",
+    "PART_I_ORG_PROFILE": "part_1_org_profile",
+    "PART_I_SECTION_B": "part_1_b_manpower",
+    "PART_I_SECTION_C": "core_process_flow",
+    "PART_I_SECTION_D": "part_1_org_profile",
+    "PART_I_SECTION_E": "part_1_e_concerns",
+    "PART_V_SCHEDULES": "part_5_schedules",
+    "PART_V_INVESTMENTS": "part_5_investments",
+    "ANNEX_MASTER": "annex_master",
+    "ANNEX_A3_FUNCTIONS": "annex_a3_functions",
+    "ANNEX_A4_PROGRAMS": "annex_a4_programs"
+}
+
 STANDARD_ISSP_FORMAT = [
-    {"schema_id": "core_transmittal", "display_title": "Transmittal Letter", "force_page_break": True},
-    {"schema_id": "core_cover", "display_title": "ISSP Cover Page", "force_page_break": True},
-    {"schema_id": "core_sig_scope", "display_title": "ISSP Signatories & Scope", "force_page_break": True},
-    {"schema_id": "core_toc", "display_title": "Table of Contents", "force_page_break": True},
-    {"schema_id": "core_process_flow", "display_title": "ISSP Process Flow Diagram", "force_page_break": True},
-    {"schema_id": "core_defs", "display_title": "Definition of Terms", "force_page_break": True},
-    {"schema_id": "core_instructions", "display_title": "General Instructions", "force_page_break": True},
-    {"schema_id": "part_1_org_profile", "display_title": "Part I: Organizational Profile", "force_page_break": True},
-    {"schema_id": "part_1_b_manpower", "display_title": "Part I.B: IT Manpower complement", "force_page_break": True},
-    {"schema_id": "part_1_e_concerns", "display_title": "Part I.E: Strategic Concerns Matrix", "force_page_break": True},
-    {"schema_id": "part_2_is_strategy", "display_title": "Part II: IS Strategy", "force_page_break": True},
-    {"schema_id": "part_2_b_c_databases", "display_title": "Part II.B & II.C: Systems & Databases", "force_page_break": True},
-    {"schema_id": "part_3_ict_projects", "display_title": "Part III: ICT Projects & PMF", "force_page_break": True},
-    {"schema_id": "part_4_b_org_structure", "display_title": "Part IV.B: ICT Organizational Charts", "force_page_break": True},
-    {"schema_id": "part_5_schedules", "display_title": "Part V: Projects Implementation Schedules", "force_page_break": True},
-    {"schema_id": "part_5_investments", "display_title": "Part V: Summary of Investments", "force_page_break": True},
-    {"schema_id": "annex_master", "display_title": "Annex A-1: Survey Details", "force_page_break": True},
-    {"schema_id": "annex_a3_functions", "display_title": "Annex A-3: Core Offices & Functions", "force_page_break": True},
-    {"schema_id": "annex_a4_programs", "display_title": "Annex A-4: Academic Programs & GAA Targets", "force_page_break": True}
+    {"schema_id": "core_transmittal", "display_title": "Transmittal Letter", "force_page_break": True, "orientation": "portrait"},
+    {"schema_id": "core_cover", "display_title": "ISSP Cover Page", "force_page_break": True, "orientation": "portrait"},
+    {"schema_id": "core_sig_scope", "display_title": "ISSP Signatories & Scope", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "core_toc", "display_title": "Table of Contents", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "core_defs", "display_title": "Definition of Terms", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "core_instructions", "display_title": "General Instructions", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_1_org_profile", "display_title": "Part I: Organizational Profile", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_1_b_manpower", "display_title": "Part I.B: IT Manpower complement", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_1_e_concerns", "display_title": "Part I.E: Strategic Concerns Matrix", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_2_is_strategy", "display_title": "Part II: IS Strategy", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_2_b_c_databases", "display_title": "Part II.B & II.C: Systems & Databases", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_3_ict_projects", "display_title": "Part III: ICT Projects & PMF", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_4_b_org_structure", "display_title": "Part IV.B: ICT Organizational Charts", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_5_schedules", "display_title": "Part V: Projects Implementation Schedules", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "part_5_investments", "display_title": "Part V: Summary of Investments", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "annex_master", "display_title": "Annex A-1: Survey Details", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "annex_a3_functions", "display_title": "Annex A-3: Core Offices & Functions", "force_page_break": True, "orientation": "landscape"},
+    {"schema_id": "annex_a4_programs", "display_title": "Annex A-4: Academic Programs & GAA Targets", "force_page_break": True, "orientation": "landscape"}
 ]
 
 
@@ -123,11 +151,11 @@ class ISSPDynamicCompiler:
             agency = metadata.get("transmittal_recipient_agency") or "Department of Information and Communications Technology"
             address = metadata.get("transmittal_recipient_address") or "DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City"
             date = metadata.get("transmittal_date") or "22 February 2023"
-            approved_by = metadata.get("signatory_approved_by") or "DR. CHARLITO P. CADAG"
+            approved_by = metadata.get("signatory_approved_by") or "DR. CHARLITO P. CADAG, PhD"
             issp_period = metadata.get("issp_period_years", "2026-2028")
 
             return f'''
-            <div class="core-issp-portrait transmittal-layout" id="transmittal-anchor" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
+            <div class="transmittal-layout" id="transmittal-anchor" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #1e3a8a; padding-bottom:12px; margin-bottom: 25px;">
                     <div style="width: 75px;">{cls.get_logo_html(metadata.get("agency_logo_url"))}</div>
                     <div style="text-align:center; font-family:sans-serif; flex:1;">
@@ -173,7 +201,7 @@ class ISSPDynamicCompiler:
             issp_period = metadata.get("issp_period_years", "2026-2028")
             agency_name = metadata.get("agency_name", "Camarines Sur Polytechnic Colleges")
             return f'''
-            <div class="core-issp-portrait cover-layout" id="cover-anchor" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
+            <div class="cover-layout" id="cover-anchor" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; min-height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
                 <div style="text-align: center; margin-top: 40px;">
                     <div style="background-color: white; display: inline-block; padding: 12px; border-radius: 50%; box-shadow: 0 4px 6px rgba(0,0,0,0.15);">
                         {cls.get_logo_html(metadata.get("agency_logo_url"))}
@@ -203,7 +231,7 @@ class ISSPDynamicCompiler:
             preparer_pos = metadata.get("preparer_position", "Director, MICT")
             preparer_tel = metadata.get("preparer_tel", "09190840018")
             preparer_email = metadata.get("preparer_email", "ianbenitez@cspc.edu.ph")
-            approved_by = metadata.get("signatory_approved_by", "DR. CHARLITO P. CADAG")
+            approved_by = metadata.get("signatory_approved_by", "DR. CHARLITO P. CADAG, PhD")
             
             scope_map = metadata.get("scope_json") or {}
             
@@ -216,10 +244,10 @@ class ISSPDynamicCompiler:
             check_agency_regional = "[✓]" if scope_map.get("agency_regional_offices") else "[ &nbsp; ]"
 
             return f'''
-            <div class="core-issp-landscape signatories-layout" id="sig-scope-anchor" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
+            <div class="signatories-layout" id="sig-scope-anchor" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
                 <h2 style="font-size:12.5pt; text-align:center; font-weight:bold; color:#1e3a8a; border-bottom:2px solid #1e3a8a; padding-bottom:8px; margin-bottom:25px; text-transform: uppercase;">
-                    Information Systems Strategic Plan<br/>
-                    <span style="font-size:10pt; font-weight:normal; color:#475569; text-transform: none;">For the Planning Cycle {issp_period}</span>
+                    Information Systems Strategic Plan (ISSP)<br/>
+                    <span style="font-size:10pt; font-weight:normal; color:#475569; text-transform: none;">For the period {issp_period}</span>
                 </h2>
                 <div style="margin-top: 15px; display: flex; justify-content: space-between; page-break-inside: avoid;">
                     <div style="width: 48%; border: 1px solid #cbd5e1; padding: 15px; background-color: #f8fafc; border-radius: 4px; box-sizing: border-box;">
@@ -261,60 +289,160 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-        # D. Detailed Table of Contents Subsections (Landscape Layout - Page 4-5)
+        # D. Detailed Table of Contents Subsections (Landscape Layout - Page 4-5) - Restructured Flexbox Dot Leaders
         elif schema_id == "core_toc":
             return '''
-            <div class="core-issp-landscape toc-layout" id="toc-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="toc-container" id="toc-anchor" style="padding: 15px; color: #0f172a;">
                 <h2 style="text-align: center; font-size: 14pt; color: #1e3a8a; margin-bottom: 30px; text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px;">
                     Table of Contents
                 </h2>
-                <div class="toc-layout" style="font-size: 9pt; line-height: 1.8; color: #334155;">
-                    <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART I. ORGANIZATIONAL PROFILE</p>
-                    <div style="margin-left: 15px; margin-bottom: 12px;">
-                        <div class="toc-row"><span>A. Department/Agency Vision, Mission and Mandate</span><span class="page-number-ref-part1"></span></div>
-                        <div class="toc-row" style="margin-left:15px; color: #64748b;"><span>A.1. SUC Legal Mandate & BP 512 Basis</span><span class="page-number-ref-part1"></span></div>
-                        <div class="toc-row" style="margin-left:15px; color: #64748b;"><span>A.2. Vision and Mission Statements</span><span class="page-number-ref-part1"></span></div>
-                        <div class="toc-row"><span>B. SUC Designated Planners Profile Matrix (Table B-1)</span><span class="page-number-ref-part1b"></span></div>
-                        <div class="toc-row"><span>C. SUC Functional Interface Flowchart</span><span class="page-number-ref-part1c"></span></div>
-                        <div class="toc-row"><span>D. Present SUC ICT Situation (Strategic Challenges)</span><span class="page-number-ref-part1d"></span></div>
-                        <div class="toc-row"><span>E. Strategic Concerns for ICT Use (Table I.E)</span><span class="page-number-ref-part1e"></span></div>
-                    </div>
+                <ul class="toc-list" style="list-style: none; padding: 0; margin: 0;">
+                    <li>
+                        <span class="toc-text indent-0" style="font-weight: bold; color:#1e3a8a; text-transform: uppercase;">PART I. ORGANIZATIONAL PROFILE</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">A. Department/Agency Vision, Mission and Mandate</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-2">A.1. SUC Legal Mandate & BP 512 Basis</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-2">A.2. Vision and Mission Statements</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">B. SUC Designated Planners Profile Matrix (Table B-1)</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1b"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">C. SUC Functional Interface Flowchart</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1c"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">D. Present SUC ICT Situation (Strategic Challenges)</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1d"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">E. Strategic Concerns for ICT Use (Table I.E)</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part1e"></span>
+                    </li>
 
-                    <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART II. INFORMATION SYSTEMS STRATEGY</p>
-                    <div style="margin-left: 15px; margin-bottom: 12px;">
-                        <div class="toc-row"><span>A. Conceptual Framework of IS Interface</span><span class="page-number-ref-part2"></span></div>
-                        <div class="toc-row" style="margin-left:15px; color: #64748b;"><span>A.1. Site Development Plans & Logical Layouts</span><span class="page-number-ref-part2"></span></div>
-                        <div class="toc-row"><span>B. Detailed Proposed Systems Profile Cards</span><span class="page-number-ref-part2-cards"></span></div>
-                        <div class="toc-row"><span>C. Required Registries and Databases Sheets</span><span class="page-number-ref-part2-cards"></span></div>
-                        <div class="toc-row"><span>D. Segmented Logical Network Layouts</span><span class="page-number-ref-part2"></span></div>
-                    </div>
+                    <li style="margin-top: 15px;">
+                        <span class="toc-text indent-0" style="font-weight: bold; color:#1e3a8a; text-transform: uppercase;">PART II. INFORMATION SYSTEMS STRATEGY</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part2"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">A. Conceptual Framework of IS Interface</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part2"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-2">A.1. Site Development Plans & Logical Layouts</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part2"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">B. Detailed Proposed Systems Profile Cards</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part2-cards"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">C. Required Registries and Databases Sheets</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part2-cards"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">D. Segmented Logical Network Layouts</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part2"></span>
+                    </li>
 
-                    <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART III. DETAILED DESCRIPTION OF ICT PROJECTS</p>
-                    <div style="margin-left: 15px; margin-bottom: 12px;">
-                        <div class="toc-row"><span>A. Internal SUC Projects Profiles</span><span class="page-number-ref-part3"></span></div>
-                        <div class="toc-row"><span>B. Cross-Agency Collaborative Projects</span><span class="page-number-ref-part3"></span></div>
-                        <div class="toc-row"><span>C. Performance Measurement Frameworks Matrix</span><span class="page-number-ref-pmf"></span></div>
-                    </div>
+                    <li style="margin-top: 15px;">
+                        <span class="toc-text indent-0" style="font-weight: bold; color:#1e3a8a; text-transform: uppercase;">PART III. DETAILED DESCRIPTION OF ICT PROJECTS</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part3"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">A. Internal SUC Projects Profiles</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part3"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">B. Cross-Agency Collaborative Projects</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part3"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">C. Performance Measurement Frameworks Matrix</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-pmf"></span>
+                    </li>
 
-                    <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART IV. RESOURCE REQUIREMENTS</p>
-                    <div style="margin-left: 15px; margin-bottom: 12px;">
-                        <div class="toc-row"><span>A. Equipment Deployment Mapping (Table IV.A)</span><span class="page-number-ref-part4"></span></div>
-                        <div class="toc-row"><span>B. ICT Organizational Charts & Structures</span><span class="page-number-ref-part4"></span></div>
-                    </div>
+                    <li style="margin-top: 15px;">
+                        <span class="toc-text indent-0" style="font-weight: bold; color:#1e3a8a; text-transform: uppercase;">PART IV. RESOURCE REQUIREMENTS</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part4"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">A. Equipment Deployment Mapping (Table IV.A)</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part4"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">B. ICT Organizational Charts & Structures</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-part4"></span>
+                    </li>
 
-                    <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">PART V. SUMMARY OF INVESTMENTS & SCHEDULES</p>
-                    <div style="margin-left: 15px; margin-bottom: 12px;">
-                        <div class="toc-row"><span>A. Quarterly Projects Implementation Gantt Schedules</span><span class="page-number-ref-schedules"></span></div>
-                        <div class="toc-row"><span>B. Summary of Investments (CapEx/MOOE)</span><span class="page-number-ref-investments"></span></div>
-                    </div>
+                    <li style="margin-top: 15px;">
+                        <span class="toc-text indent-0" style="font-weight: bold; color:#1e3a8a; text-transform: uppercase;">PART V. SUMMARY OF INVESTMENTS & SCHEDULES</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-schedules"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">A. Quarterly Projects Implementation Gantt Schedules</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-schedules"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">B. Summary of Investments (CapEx/MOOE)</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-investments"></span>
+                    </li>
 
-                    <p style="font-weight: bold; margin-bottom: 4px; color:#1e3a8a; font-size: 9.5pt; text-transform: uppercase;">ANNEX REPOSITORIES</p>
-                    <div style="margin-left: 15px;">
-                        <div class="toc-row"><span>Annex A-1: DICT Baseline Equipment Surveys</span><span class="page-number-ref-annex1"></span></div>
-                        <div class="toc-row"><span>Annex A-3: Core SUC Offices Functions Directory</span><span class="page-number-ref-annexa3"></span></div>
-                        <div class="toc-row"><span>Annex A-4: SUC Degree Programs & GAA Target Indicators</span><span class="page-number-ref-annexa4"></span></div>
-                    </div>
-                </div>
+                    <li style="margin-top: 15px;">
+                        <span class="toc-text indent-0" style="font-weight: bold; color:#1e3a8a; text-transform: uppercase;">ANNEX REPOSITORIES</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-annex1"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">Annex A-1: DICT Baseline Equipment Surveys</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-annex1"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">Annex A-3: Core SUC Offices Functions Directory</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-annexa3"></span>
+                    </li>
+                    <li>
+                        <span class="toc-text indent-1">Annex A-4: SUC Degree Programs & GAA Target Indicators</span>
+                        <span class="toc-dots"></span>
+                        <span class="toc-num page-number-ref-annexa4"></span>
+                    </li>
+                </ul>
             </div>
             '''
 
@@ -324,10 +452,10 @@ class ISSPDynamicCompiler:
             if not process_flow_url:
                 return ""
             return f'''
-            <div class="core-issp-landscape process-flow-layout" id="process-flow-anchor" style="text-align: center; padding: 20px;">
-                <h2 class="section-title">ISSP Process Flow</h2>
-                <div style="display: flex; justify-content: center; align-items: center; height: 80%; border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; background-color: #f8fafc; margin-top: 15px;">
-                    <img src="{process_flow_url}" style="max-width: 100%; max-height: 480px; border: 1px solid #cbd5e1; padding: 4px; border-radius: 4px;" />
+            <div class="full-page-media" id="process-flow-anchor">
+                <h2 class="media-header">ISSP Process Flow Diagram</h2>
+                <div class="image-wrapper">
+                    <img src="{process_flow_url}" alt="ISSP Process Flow" />
                 </div>
             </div>
             '''
@@ -342,7 +470,7 @@ class ISSPDynamicCompiler:
             right_html = "".join(f'<p style="margin: 10px 0 2px 0;"><strong>{g.get("term")}:</strong> {g.get("definition")}</p>' for g in terms_right)
 
             return f'''
-            <div class="core-issp-landscape defs-layout" id="defs-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="defs-layout" id="defs-anchor" style="padding: 15px; color: #0f172a;">
                 <h2 class="section-title">Definition of Terms</h2>
                 <div style="font-size: 7.5pt; line-height: 1.4; text-align: justify; margin-top: 10px;">
                     <div style="display: flex; flex-wrap: wrap; justify-content: space-between;">
@@ -363,7 +491,7 @@ class ISSPDynamicCompiler:
             steps_html = "".join(f'<li style="margin-bottom: 10px;">{inst.get("instruction_text")}</li>' for inst in instructions_list)
 
             return f'''
-            <div class="core-issp-landscape instructions-layout" id="instructions-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="instructions-layout" id="instructions-anchor" style="padding: 15px; color: #0f172a;">
                 <h2 class="section-title">General Instructions</h2>
                 <div style="font-size: 9.5pt; line-height: 1.7; color: #334155; text-align: justify; padding: 20px; border: 1px solid #cbd5e1; background-color: #f8fafc; border-radius: 4px;">
                     <p style="margin-top: 0; font-weight: bold; color: #1e3a8a;">Guidelines on Formulating and Submitting SUC ISSP Documents:</p>
@@ -398,9 +526,11 @@ class ISSPDynamicCompiler:
             functional_interface_html = ""
             if metadata.get("functional_interface_url"):
                 functional_interface_html = f'''
-                <div class="canvas-page" id="part-1-c-functional-chart" style="text-align: center; margin-top: 25px; margin-bottom: 20px; page-break-inside: avoid;">
+                <div class="full-page-media" id="part-1-c-functional-chart" style="page-break-inside: avoid;">
                     <h4 class="sub-section-title">I.C. Agency Functional Interface Diagram</h4>
-                    <img src="{metadata.get("functional_interface_url")}" style="max-width: 100%; max-height: 400px; height: auto; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px; margin-top: 5px;" />
+                    <div class="image-wrapper">
+                        <img src="{metadata.get("functional_interface_url")}" alt="Functional Interface" />
+                    </div>
                 </div>
                 '''
 
@@ -438,7 +568,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="core-issp-landscape organizational-profile-layout" id="part-i-anchor">
+            <div class="organizational-profile-layout" id="part-i-anchor">
                 <h2 class="section-title">
                     PART I: ORGANIZATIONAL PROFILE
                 </h2>
@@ -457,7 +587,7 @@ class ISSPDynamicCompiler:
 
                 {org_structure_html}
 
-                <h4 class="sub-section-title" id="part-1-d-present-situation">I.D. Present ICT Situation (Strategic Challenges)</h4>
+                <h4 class="sub-section-title" id="part-1-d-present-situation">I.D. Present SUC ICT Situation (Strategic Challenges)</h4>
                 <div style="font-size: 9.5pt; text-align: justify; color: #334155; line-height: 1.6; margin-bottom: 20px;">
                     {metadata.get("present_situation_html") or '<p style="font-style:italic; color:#64748b;">No present ICT situation narratives declared.</p>'}
                 </div>
@@ -506,7 +636,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="core-issp-landscape manpower-layout" id="part-1-b-manpower">
+            <div class="manpower-layout" id="part-1-b-manpower">
                 <h2 class="section-title">
                     PART I.B: PLANNERS & IT MANPOWER COMPLEMENT
                 </h2>
@@ -541,7 +671,7 @@ class ISSPDynamicCompiler:
                 </tr>
                 '''
             return f'''
-            <div class="core-issp-landscape concerns-layout" id="part-1-e-concerns">
+            <div class="concerns-layout" id="part-1-e-concerns">
                 <h2 class="section-title">
                     PART I.E: STRATEGIC CONCERNS FOR ICT USE
                 </h2>
@@ -565,35 +695,44 @@ class ISSPDynamicCompiler:
             framework_img_html = ""
             if metadata.get("conceptual_framework_url"):
                 framework_img_html = f'''
-                <div class="canvas-page" style="text-align:center; margin-top:25px; margin-bottom:25px; page-break-inside: avoid;">
-                    <img src="{metadata.get("conceptual_framework_url")}" style="max-width:100%; max-height: 400px; height:auto; border: 1px solid #e2e8f0; padding:4px; border-radius: 4px;"/>
+                <div class="full-page-media">
+                    <h4 class="sub-section-title">Conceptual Framework of IS Interface</h4>
+                    <div class="image-wrapper">
+                        <img src="{metadata.get("conceptual_framework_url")}" alt="Conceptual Framework" />
+                    </div>
                 </div>
                 '''
             
             site_plan_html = ""
             if metadata.get("site_development_plan_url"):
                 site_plan_html = f'''
-                <div class="page landscape-layout canvas-page" style="page-break-after: always; text-align: center;">
+                <div class="full-page-media">
                     <h4 class="sub-section-title">Annex A-2 Campus Site Development Plan</h4>
-                    <img src="{metadata.get("site_development_plan_url")}" style="max-width: 100%; max-height: 480px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                    <div class="image-wrapper">
+                        <img src="{metadata.get("site_development_plan_url")}" alt="Site Development Plan" />
+                    </div>
                 </div>
                 '''
 
             fiber_backbone_html = ""
             if metadata.get("fiber_backbone_url"):
                 fiber_backbone_html = f'''
-                <div class="page landscape-layout canvas-page" style="page-break-after: always; text-align: center;">
+                <div class="full-page-media">
                     <h4 class="sub-section-title">Fiber Optic Backbone Cabling Layout</h4>
-                    <img src="{metadata.get("fiber_backbone_url")}" style="max-width: 100%; max-height: 480px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                    <div class="image-wrapper">
+                        <img src="{metadata.get("fiber_backbone_url")}" alt="Fiber Backbone" />
+                    </div>
                 </div>
                 '''
 
             system_architecture_html = ""
             if metadata.get("system_architecture_url"):
                 system_architecture_html = f'''
-                <div class="page landscape-layout canvas-page" style="page-break-after: always; text-align: center;">
+                <div class="full-page-media">
                     <h4 class="sub-section-title">CSPC Unified System Architecture Diagram</h4>
-                    <img src="{metadata.get("system_architecture_url")}" style="max-width: 100%; max-height: 480px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                    <div class="image-wrapper">
+                        <img src="{metadata.get("system_architecture_url")}" alt="System Architecture" />
+                    </div>
                 </div>
                 '''
 
@@ -602,23 +741,27 @@ class ISSPDynamicCompiler:
                 urls = [u.strip() for u in metadata.get("network_layout_url", "").split(",") if u.strip()]
                 for idx, u in enumerate(urls):
                     network_img_html += f'''
-                    <div class="page landscape-layout canvas-page" style="page-break-after: always; text-align: center;">
+                    <div class="full-page-media">
                         <h4 class="sub-section-title">Network layout segment {idx + 1}</h4>
-                        <img src="{u}" style="max-width: 100%; max-height: 480px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                        <div class="image-wrapper">
+                            <img src="{u}" alt="Network Layout Segment" />
+                        </div>
                     </div>
                     '''
 
             topology_html = ""
             if metadata.get("network_topology_url"):
                 topology_html = f'''
-                <div class="page landscape-layout canvas-page" style="page-break-after: always; text-align: center;">
+                <div class="full-page-media">
                     <h4 class="sub-section-title">CSPC Network Diagram & Core topology</h4>
-                    <img src="{metadata.get("network_topology_url")}" style="max-width: 100%; max-height: 480px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                    <div class="image-wrapper">
+                        <img src="{metadata.get("network_topology_url")}" alt="Network Topology" />
+                    </div>
                 </div>
                 '''
 
             return f'''
-            <div class="core-issp-landscape strategy-layout" id="part-ii-anchor">
+            <div class="strategy-layout" id="part-ii-anchor">
                 <h2 class="section-title">
                     PART II: INFORMATION SYSTEMS STRATEGY
                 </h2>
@@ -652,7 +795,7 @@ class ISSPDynamicCompiler:
             for idx, sys_item in enumerate(systems_list):
                 anchor_tag = 'id="part-2-b-c-databases"' if idx == 0 else ""
                 html_output += f'''
-                <div class="core-issp-landscape databases-layout" style="page-break-after: always; padding-top: 10px;" {anchor_tag}>
+                <div class="databases-layout" style="page-break-after: always; padding-top: 10px;" {anchor_tag}>
                     <h2 class="section-title">
                         PART II.B: DETAILED DESCRIPTION OF PROPOSED SYSTEM
                     </h2>
@@ -695,13 +838,14 @@ class ISSPDynamicCompiler:
                     {"name": "Student Information and Accounting System (SIAS) Database", "description": "Student academic demographics, transaction records, and enrollment indexes.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server"},
                     {"name": "Online Library Information Systems Database", "description": "Catalogs of academic book indexes, borrowing transaction logs, and fine matrices.", "status": "Existing", "is_served": "Online Library Information Systems", "storage_media": "High-End Data Storage Server"},
                     {"name": "School Monitoring and Security System Database", "description": "Security logs, gate visitor entries, and smart card permissions registries.", "status": "Proposed", "is_served": "School Monitoring and Security System", "storage_media": "High-End Data Storage Server"},
-                    {"name": "Human Resource Management Database", "description": "Facilitates employee biometrics logs, payroll files, and tax matrices.", "status": "Proposed", "is_served": "Human Resource Management System", "storage_media": "High-End Data Storage Server"}
+                    {"name": "Human Resource Management Database", "description": "Facilitates employee biometrics logs, payroll files, and tax matrices.", "status": "Proposed", "is_served": "School Monitoring and Security System", "storage_media": "High-End Data Storage Server"},
+                    {"name": "Human Resource Management Database", "description": "Stores employee profiles, biometric signatures, tax records, and payroll sheets.", "status": "Proposed", "is_served": "Human Resource Management System", "storage_media": "High-End Data Storage Server"}
                 ]
 
             for idx, db_item in enumerate(databases_list):
                 anchor_attr = 'id="part-2-c-databases"' if idx == 0 else ""
                 html_output += f'''
-                <div class="core-issp-landscape databases-layout" style="page-break-after: always; padding-top: 10px;" {anchor_attr}>
+                <div class="databases-layout" style="page-break-after: always; padding-top: 10px;" {anchor_attr}>
                     <h2 class="section-title">
                         PART II.C: REQUIRED DATABASES & REGISTRIES
                     </h2>
@@ -754,7 +898,7 @@ class ISSPDynamicCompiler:
                 objectives_list_html = f'<ul style="margin: 15px 0 0 15px; padding: 0; font-size: 9.5pt; color: #475569; line-height:1.5;">{objectives_list}</ul>' if objectives_list else ""
                 
                 projects_html += f'''
-                <div class="core-issp-landscape" style="page-break-after: always; padding: 20px; border: 1px solid #e2e8f0; border-top: 4px solid #1e3a8a; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
+                <div class="projects-layout" style="page-break-after: always; padding: 20px; border: 1px solid #e2e8f0; border-top: 4px solid #1e3a8a; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
                     <div style="font-weight: bold; color: #1e3a8a; font-size: 11pt; margin-bottom: 8px; text-transform: uppercase;">[INTERNAL PROJECT CARD] {proj.get("name", "")}</div>
                     <div style="font-size: 9.5pt; color: #475569; margin-bottom: 6px;"><strong>Duration Cycle:</strong> {proj.get("duration", "2026 - 2028")}</div>
                     <div style="font-size: 9.5pt; color: #334155; margin-bottom: 12px;"><strong>Target Deliverables:</strong> {proj.get("deliverables", "")}</div>
@@ -769,10 +913,9 @@ class ISSPDynamicCompiler:
                 objectives_list_html = f'<ul style="margin: 15px 0 0 15px; padding: 0; font-size: 9.5pt; color: #475569; line-height:1.5;">{objectives_list}</ul>' if objectives_list else ""
                 
                 projects_html += f'''
-                <div class="core-issp-landscape" style="page-break-after: always; padding: 20px; border: 1px solid #e2e8f0; border-top: 4px solid #0d9488; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
+                <div class="projects-layout" style="page-break-after: always; padding: 20px; border: 1px solid #e2e8f0; border-top: 4px solid #0d9488; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
                     <div style="font-weight: bold; color: #0d9488; font-size: 11pt; margin-bottom: 8px; text-transform: uppercase;">[CROSS-AGENCY PROJECT CARD] {proj.get("name", "")}</div>
-                    <div style="font-size: 9.5pt; color: #475569; margin-bottom: 6px;"><strong>Duration Cycle:</strong> {proj.get("duration", "2026 - 2028")}</div>
-                    <div style="font-size: 9.5pt; color: #334155; margin-bottom: 6px;"><strong>Lead Entity:</strong> {proj.get("lead_agency", "CSPC")}</div>
+                    <div style="font-size: 9.5pt; color: #334155; margin-6px;"><strong>Lead Entity:</strong> {proj.get("lead_agency", "CSPC")}</div>
                     <div style="font-size: 9.5pt; color: #334155; margin-bottom: 12px;"><strong>Target Deliverables:</strong> {proj.get("deliverables", "")}</div>
                     <h5 style="margin: 0; font-size: 9.5pt; font-weight: bold; color: #0d9488; border-bottom: 1px dashed #cbd5e1; padding-bottom: 4px;">Project Objectives</h5>
                     {objectives_list_html}
@@ -807,7 +950,7 @@ class ISSPDynamicCompiler:
 
                 anchor_attr = 'id="pmf-anchor"' if idx == 0 else ""
                 pmf_page_html += f'''
-                <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;" {anchor_attr}>
+                <div style="page-break-after: always; padding-top: 10px;" {anchor_attr}>
                     <h4 class="sub-section-title">III.C. Performance Measurement Framework (PMF)</h4>
                     <div style="font-size: 9.5pt; color: #475569; font-weight: bold; margin-bottom: 8px; text-transform: uppercase;">PROJECT: {project_title}</div>
                     <table style="width: 100%; border-collapse: collapse; margin-top: 5px;">
@@ -829,7 +972,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="core-issp-landscape projects-layout" id="part-iii-anchor">
+            <div class="projects-layout" id="part-iii-anchor">
                 <h2 class="section-title">
                     PART III: DETAILED DESCRIPTION OF ICT PROJECTS
                 </h2>
@@ -874,28 +1017,34 @@ class ISSPDynamicCompiler:
                 </table>
                 '''
 
-            html_out = '<div class="core-issp-landscape org-structure-layout" id="org-structure-anchor">'
+            html_out = '<div class="org-structure-layout" id="org-structure-anchor">'
             html_out += '<h2 class="section-title">PART IV.B: ICT ORGANIZATIONAL STRUCTURE</h2>'
             
             if existing_img:
                 html_out += f'''
-                <div class="canvas-page" style="text-align: center; margin-bottom: 25px; page-break-inside: avoid;">
+                <div class="full-page-media" style="page-break-inside: avoid; page-break-after: always;">
                     <h4 class="sub-section-title">Existing ICT Organizational Structure</h4>
-                    <img src="{existing_img}" style="max-width: 100%; max-height: 200px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                    <div class="image-wrapper">
+                        <img src="{existing_img}" alt="Existing ICT Org Chart" />
+                    </div>
                 </div>
                 '''
             if proposed_img:
                 html_out += f'''
-                <div class="canvas-page" style="text-align: center; margin-bottom: 25px; page-break-inside: avoid;">
+                <div class="full-page-media" style="page-break-inside: avoid; page-break-after: always;">
                     <h4 class="sub-section-title">Proposed ICT Organizational Structure</h4>
-                    <img src="{proposed_img}" style="max-width: 100%; max-height: 200px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                    <div class="image-wrapper">
+                        <img src="{proposed_img}" alt="Proposed ICT Org Chart" />
+                    </div>
                 </div>
                 '''
             if placement_img:
                 html_out += f'''
-                <div class="canvas-page" style="text-align: center; page-break-inside: avoid; margin-bottom: 25px;">
+                <div class="full-page-media" style="page-break-inside: avoid; page-break-after: always;">
                     <h4 class="sub-section-title">Placement of Proposed Structure in Institutional Chart</h4>
-                    <img src="{placement_img}" style="max-width: 100%; max-height: 200px; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px;" />
+                    <div class="image-wrapper">
+                        <img src="{placement_img}" alt="Placement in Institutional Chart" />
+                    </div>
                 </div>
                 '''
 
@@ -937,7 +1086,7 @@ class ISSPDynamicCompiler:
             fallback_rows_html = f'<tr><td colspan="{total_cols}" style="padding:12px; color:#64748b;">No schedule timeline parameters defined.</td></tr>'
             
             return f'''
-            <div class="core-issp-landscape schedules-layout" id="schedules-anchor">
+            <div class="schedules-layout" id="schedules-anchor">
                 <h2 class="section-title">
                     Part V: DEVELOPMENT & IMPLEMENTATION PROGRAM SCHEDULES
                 </h2>
@@ -1084,7 +1233,7 @@ class ISSPDynamicCompiler:
             continuing_rows_fallback_html = f'<tr><td colspan="{5 + len(planning_years)}" style="padding:10px; text-align:center; color:#94a3b8;">No continuing SUC operational costs logged.</td></tr>'
 
             return f'''
-            <div class="core-issp-landscape investments-layout" id="part-v-anchor">
+            <div class="investments-layout" id="part-v-anchor">
                 <h2 class="section-title">
                     PART V: COMPREHENSIVE SUMMARY OF INVESTMENTS
                 </h2>
@@ -1273,7 +1422,7 @@ class ISSPDynamicCompiler:
 
             # Build detailed landscape Annex structure
             annex_p1_html = f'''
-            <div class="core-issp-landscape annex-master-layout" id="annex-master-anchor" style="page-break-after: always; padding-top: 10px;">
+            <div class="annex-master-layout" id="annex-master-anchor" style="page-break-after: always; padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 1.1 Computing Devices & Peripherals (Inventory Baseline)</h2>
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
                     <thead>
@@ -1294,7 +1443,7 @@ class ISSPDynamicCompiler:
             '''
 
             annex_p2_html = f'''
-            <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;">
+            <div style="page-break-after: always; padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 1.2 Computing Devices & Peripherals by Usage</h2>
                 <p style="font-size: 9.5pt; line-height: 1.6; color:#475569;">Detailed breakdown mapping computing devices to specific operational usage profiles.</p>
                 <table style="width:100%; border-collapse:collapse; margin-top:15px;">
@@ -1325,7 +1474,7 @@ class ISSPDynamicCompiler:
             '''
 
             annex_p3_html = f'''
-            <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;">
+            <div style="page-break-after: always; padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 1.3 Server Hosting Storage Profile Census</h2>
                 <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
                     <thead>
@@ -1343,7 +1492,7 @@ class ISSPDynamicCompiler:
             '''
 
             annex_p4_html = f'''
-            <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;">
+            <div style="page-break-after: always; padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 2.1 Client OS Census & 2.2 Office Automation Software</h2>
                 <div style="display:flex; gap:20px; justify-content:space-between; margin-top:15px;">
                     <div style="width:48%;">
@@ -1380,7 +1529,7 @@ class ISSPDynamicCompiler:
             '''
 
             annex_p5_html = f'''
-            <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;">
+            <div style="page-break-after: always; padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 3. Network Connectivity Profile</h2>
                 {network_block}
                 <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
@@ -1403,7 +1552,7 @@ class ISSPDynamicCompiler:
             '''
 
             annex_p6_html = f'''
-            <div class="core-issp-landscape" style="page-break-after: always; padding-top: 10px;">
+            <div style="page-break-after: always; padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 4. Security, Disaster Recovery & 5. Data Archiving</h2>
                 <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc; margin-top:15px; page-break-inside:avoid;">
                     <div style="font-weight: bold; font-size: 8.5pt; color: #1e3a8a; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">Security, Disaster Recovery & Backup Protection Scheme Checklist</div>
@@ -1424,7 +1573,7 @@ class ISSPDynamicCompiler:
             '''
 
             annex_p7_html = f'''
-            <div class="core-issp-landscape" style="padding-top: 10px;">
+            <div style="padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 8.2 Issues & Bottlenecks Encountered in SUC ICT Implementations</h2>
                 <div style="border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px; background-color: #f8fafc; margin-top:15px;">
                     <div style="font-weight: bold; font-size: 8.5pt; color: #dc2626; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 8px;">8.2 Issues & Bottlenecks Checklist</div>
@@ -1452,7 +1601,7 @@ class ISSPDynamicCompiler:
                 </div>
                 '''
             return f'''
-            <div class="core-issp-landscape annex-a3-layout" id="annex-a3-anchor" style="padding-top: 10px;">
+            <div class="annex-a3-layout" id="annex-a3-anchor" style="padding-top: 10px;">
                 <h2 class="section-title">
                     ANNEX A-3: CORE OFFICES AND DESCRIPTION OF FUNCTIONS
                 </h2>
@@ -1485,7 +1634,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="core-issp-landscape annex-a4-layout" id="annex-a4-anchor" style="padding-top: 10px;">
+            <div class="annex-a4-layout" id="annex-a4-anchor" style="padding-top: 10px;">
                 <h2 class="section-title">
                     ANNEX A-4: SUC PROGRAM OFFERINGS & LEGISLATIVE GAA OUTCOMES
                 </h2>
@@ -1525,7 +1674,7 @@ class ISSPDynamicCompiler:
             title_formatted = schema_id.replace("_", " ").title()
             
             return f'''
-            <div class="core-issp-landscape custom-section" id="{schema_id}-anchor">
+            <div class="custom-section" id="{schema_id}-anchor">
                 <h2 class="section-title">
                     {title_formatted}
                 </h2>
@@ -1616,7 +1765,6 @@ def compile_issp_document(self, metadata: dict):
             raise ValueError(error_msg)
             
         self.update_state(state="PROGRESS", meta={"progress": 25, "status": "Fetching authored Part I-V narratives..."})
-        layout_sequence = [section["schema_id"] for section in STANDARD_ISSP_FORMAT]
         
         issp_period_from = narrative.issp_period_from if narrative and narrative.issp_period_from else None
         issp_period_to = narrative.issp_period_to if narrative and narrative.issp_period_to else None
@@ -1762,6 +1910,7 @@ def compile_issp_document(self, metadata: dict):
         ]
 
         if narrative:
+            metadata["agency_name"] = narrative.agency_name
             metadata["agency_mandate"] = narrative.mandate_html
             metadata["agency_vision"] = narrative.vision_html
             metadata["agency_mission"] = narrative.mission_html
@@ -1862,9 +2011,7 @@ def compile_issp_document(self, metadata: dict):
         css_style = f'''
         <style>
             @page {{ 
-                size: A4 portrait; 
-                margin: 30mm 15mm 20mm 15mm; 
-                background-color: #ffffff;
+                margin: 0.75in;
                 @top-left {{
                     content: "";
                     background-image: url("{metadata.get("agency_logo_url")}");
@@ -1890,7 +2037,7 @@ def compile_issp_document(self, metadata: dict):
                     padding-bottom: 8px;
                 }}
                 @top-right {{
-                    content: "INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\\A {metadata.get("issp_period_years", "2024-2026")}";
+                    content: "INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\\A {metadata.get("issp_period_years", "2026-2028")}";
                     font-family: Arial, sans-serif;
                     font-size: 8pt;
                     font-weight: bold;
@@ -1904,22 +2051,22 @@ def compile_issp_document(self, metadata: dict):
             }}
             
             /* Named Page Selectors for Multi-Scoped Resets */
-            @page core_issp_portrait {{
-                size: A4 portrait;
-                margin: 30mm 15mm 20mm 15mm;
+            @page portrait_section {{
+                size: portrait;
+                margin: 0.75in;
                 @bottom-right {{
-                    content: "Page " counter(page) " of " target-counter(#annex-a4-anchor, page);
+                    content: "Page " counter(page) " of " counter(pages);
                     font-family: Arial, sans-serif;
                     font-size: 8pt;
                     color: #64748b;
                 }}
             }}
 
-            @page core_issp_landscape {{
-                size: A4 landscape;
-                margin: 25mm 15mm 20mm 15mm;
+            @page landscape_section {{
+                size: landscape;
+                margin: 0.5in 0.75in;
                 @bottom-right {{
-                    content: "Page " counter(page) " of " target-counter(#annex-a4-anchor, page);
+                    content: "Page " counter(page) " of " counter(pages);
                     font-family: Arial, sans-serif;
                     font-size: 8pt;
                     color: #64748b;
@@ -1927,60 +2074,107 @@ def compile_issp_document(self, metadata: dict):
             }}
 
             /* Map named page selectors to class containers */
-            .core-issp-portrait {{
-                page: core_issp_portrait;
-                page-break-after: always;
+            .page-portrait {{
+                page: portrait_section;
             }}
 
-            .core-issp-landscape {{
-                page: core_issp_landscape;
-                page-break-after: always;
+            .page-landscape {{
+                page: landscape_section;
             }}
 
-            /* Table of Contents Dynamic Leader Dot and Counter Alignments */
-            .toc-layout div div {{
+            /* Enforce Explicit Page Breaks */
+            .force-page-break {{
+                page-break-before: always;
+                break-before: page;
+            }}
+
+            /* running header boundary pushing */
+            .content-wrapper {{
+                padding-top: 80px;
+            }}
+
+            /* Table of Contents Restructured Flexbox Layout with Dot Leaders */
+            .toc-list {{
+                list-style: none;
+                padding: 0;
+                margin: 0;
+            }}
+            .toc-list li {{
                 display: flex;
                 justify-content: space-between;
                 align-items: flex-end;
-                margin-bottom: 4px;
+                margin-bottom: 8px;
+                font-size: 10pt;
+                line-height: 1.2;
             }}
-            .toc-layout div div span:first-child {{
-                position: relative;
-                overflow: hidden;
-                display: flex;
-                width: 100%;
-                align-items: flex-end;
-            }}
-            .toc-layout div div span:first-child::after {{
-                content: " .............................................................................................................................................................................................................................................................................................................";
+            .indent-0 {{ padding-left: 0; }}
+            .indent-1 {{ padding-left: 20px; }}
+            .indent-2 {{ padding-left: 40px; }}
+            .indent-3 {{ padding-left: 60px; }}
+            
+            .toc-text {{
+                flex-shrink: 0;
+                max-width: 70%;
                 white-space: nowrap;
                 overflow: hidden;
-                color: #cbd5e1;
-                margin-left: 5px;
-                margin-right: 5px;
-                flex-grow: 1;
+                text-overflow: ellipsis;
             }}
-            .toc-layout div div span:last-child {{
+            .toc-dots {{
+                flex-grow: 1;
+                border-bottom: 1px dotted #444;
+                margin: 0 10px;
+                position: relative;
+                top: -4px;
+            }}
+            .toc-num {{
+                flex-shrink: 0;
+                text-align: right;
+                min-width: 30px;
                 font-weight: bold;
                 color: #1e3a8a;
-                white-space: nowrap;
             }}
 
-            .page-number-ref-part1::after {{ content: target-counter(#part-i-anchor, page); }}
-            .page-number-ref-part1b::after {{ content: target-counter(#part-1-b-manpower, page); }}
-            .page-number-ref-part1c::after {{ content: target-counter(#part-1-c-functional-chart, page); }}
-            .page-number-ref-part1d::after {{ content: target-counter(#part-1-d-present-situation, page); }}
-            .page-number-ref-part1e::after {{ content: target-counter(#part-1-e-concerns, page); }}
-            .page-number-ref-part2::after {{ content: target-counter(#part-ii-anchor, page); }}
+            /* Image Sizing and Aspect Ratio Preserving Containers */
+            .full-page-media {{
+                display: block;
+                box-sizing: border-box;
+                padding: 20px;
+                page-break-inside: avoid;
+            }}
+            .media-header {{
+                font-size: 14pt;
+                text-transform: uppercase;
+                color: #1e3a8a;
+                border-bottom: 2px solid #1e3a8a;
+                padding-bottom: 5px;
+                margin-bottom: 20px;
+            }}
+            .image-wrapper {{
+                display: block;
+                text-align: center;
+                width: 100%;
+            }}
+            .image-wrapper img {{
+                max-width: 100%;
+                height: auto;
+                object-fit: contain;
+            }}
+
+            .page-number-ref-part1::after {{ content: target-counter(#part_1_org_profile, page); }}
+            .page-number-ref-part1b::after {{ content: target-counter(#part_1_b_manpower, page); }}
+            .page-number-ref-part1c::after {{ content: target-counter(#core_process_flow, page); }}
+            .page-number-ref-part1d::after {{ content: target-counter(#part_1_org_profile, page); }}
+            .page-number-ref-part1e::after {{ content: target-counter(#part_1_e_concerns, page); }}
+            .page-number-ref-part2::after {{ content: target-counter(#part_2_is_strategy, page); }}
             .page-number-ref-part2-cards::after {{ content: target-counter(#part-2-b-c-databases, page); }}
-            .page-number-ref-part3::after {{ content: target-counter(#part-iii-anchor, page); }}
-            .page-number-ref-pmf::after {{ content: target-counter(#pmf-anchor, page); }}
-            .page-number-ref-part4::after {{ content: target-counter(#org-structure-anchor, page); }}
-            .page-number-ref-schedules::after {{ content: target-counter(#schedules-anchor, page); }}
-            .page-number-ref-investments::after {{ content: target-counter(#part-v-anchor, page); }}
-            .page-number-ref-annex1::after {{ content: target-counter(#annex-master-anchor, page); }}
-            .page-number-ref-annexa3::after {{ content: target-counter(#annex-a3-anchor, page); }}
-            .page-number-ref-annexa4::after {{ content: target-counter(#annex-a4-anchor, page); }}
+            .page-number-ref-part3::after {{ content: target-counter(#part_3_ict_projects, page); }}
+            .page-number-ref-pmf::after {{ content: target-counter(#part_3_ict_projects, page); }}
+            .page-number-ref-part4::after {{ content: target-counter(#part_4_b_org_structure, page); }}
+            .page-number-ref-schedules::after {{ content: target-counter(#part_5_schedules, page); }}
+            .page-number-ref-investments::after {{ content: target-counter(#part_5_investments, page); }}
+            .page-number-ref-annex1::after {{ content: target-counter(#annex_master, page); }}
+            .page-number-ref-annex3::after {{ content: target-counter(#annex_a3_functions, page); }}
+            .page-number-ref-annex4::after {{ content: target-counter(#annex_a4_programs, page); }}
             
             body {{ 
                 font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
@@ -2015,23 +2209,6 @@ def compile_issp_document(self, metadata: dict):
                 letter-spacing: 0.3px;
             }}
             
-            .portrait-layout {{ page-break-after: always; }}
-            
-            .canvas-page {{
-                page-break-after: always;
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                align-items: center;
-                height: 100%;
-                text-align: center;
-            }}
-            .canvas-page img {{
-                max-width: 100%;
-                max-height: 90%;
-                object-fit: contain;
-            }}
-
             table {{ 
                 width: 100%; 
                 border-collapse: collapse; 
@@ -2074,25 +2251,31 @@ def compile_issp_document(self, metadata: dict):
             raise RuntimeError("PDF compilation engine initialization failed.") from generic_err
 
         # ==========================================================
-        # MULTI-PASS PDF COMPILATION PIPELINE
+        # TREE TRAVERSAL & COMPILATION FLOW
         # ==========================================================
         self.update_state(state="PROGRESS", meta={"progress": 50, "status": "Executing Pass 1: Calculating layout geometry & final page count..."})
 
-        metadata["computed_total_pages"] = "107"  
+        # Query all standard sections matching the structure of the official CSPC guide format
         html_blocks_pass1 = []
-        for section_id in layout_sequence:
-            html_blocks_pass1.append(
-                ISSPDynamicCompiler.render_section(
-                    section_id, 
-                    metadata, 
-                    approved_proposals, 
-                    approved_subscriptions, 
-                    needs_assessments,
-                    planning_years
-                )
+        for format_item in STANDARD_ISSP_FORMAT:
+            rendered = ISSPDynamicCompiler.render_section(
+                format_item["schema_id"], 
+                metadata, 
+                approved_proposals, 
+                approved_subscriptions, 
+                needs_assessments,
+                planning_years
             )
+            orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+            break_class = "force-page-break" if format_item["force_page_break"] else ""
             
+            html_blocks_pass1.append(f'''
+            <div class="{orientation_class} {break_class} content-wrapper" id="{format_item["schema_id"]}">
+                {rendered}
+            </div>
+            ''')
         combined_body_pass1 = "".join(html_blocks_pass1)
+
         html_raw_pass1 = f"<html><head>{css_style}</head><body>{combined_body_pass1}</body></html>"
         
         html_doc_pass1 = HTML(string=html_raw_pass1, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))
@@ -2101,7 +2284,7 @@ def compile_issp_document(self, metadata: dict):
         core_pages = []
         for p in rendered_doc_pass1.pages:
             p_name = getattr(p, "page_name", getattr(p, "_page_name", None))
-            if p_name in ["core_issp_portrait", "core_issp_landscape"]:
+            if p_name in ["portrait_section", "landscape_section"]:
                 core_pages.append(p)
                 
         total_page_count = len(core_pages) if core_pages else len(rendered_doc_pass1.pages)
@@ -2109,20 +2292,27 @@ def compile_issp_document(self, metadata: dict):
         self.update_state(state="PROGRESS", meta={"progress": 80, "status": f"Executing Pass 2: Drawing table layouts for {total_page_count} certified pages..."})
         metadata["computed_total_pages"] = str(total_page_count)
 
+        # Execution Pass 2
         html_blocks_pass2 = []
-        for section_id in layout_sequence:
-            html_blocks_pass2.append(
-                ISSPDynamicCompiler.render_section(
-                    section_id, 
-                    metadata, 
-                    approved_proposals, 
-                    approved_subscriptions, 
-                    needs_assessments,
-                    planning_years
-                )
+        for format_item in STANDARD_ISSP_FORMAT:
+            rendered = ISSPDynamicCompiler.render_section(
+                format_item["schema_id"], 
+                metadata, 
+                approved_proposals, 
+                approved_subscriptions, 
+                needs_assessments,
+                planning_years
             )
+            orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+            break_class = "force-page-break" if format_item["force_page_break"] else ""
             
+            html_blocks_pass2.append(f'''
+            <div class="{orientation_class} {break_class} content-wrapper" id="{format_item["schema_id"]}">
+                {rendered}
+            </div>
+            ''')
         combined_body_pass2 = "".join(html_blocks_pass2)
+
         html_raw_pass2 = f"<html><head>{css_style}</head><body>{combined_body_pass2}</body></html>"
 
         html_doc_pass2 = HTML(string=html_raw_pass2, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))

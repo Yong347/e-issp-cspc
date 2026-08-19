@@ -4,12 +4,13 @@ import html
 import uuid
 import logging
 from decimal import Decimal
-from datetime import datetime  # <--- Add this import
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from app.config import settings
 from app.database.session import get_db
@@ -37,7 +38,16 @@ from app.database.models import (
     CrossAgencyProject,
     PerformanceMetric,
     AnnualCostBreakdown,
-    IctStaffPosition
+    IctStaffPosition,
+    # New Node Models (Gap Restructuring)
+    IsspNode,
+    IsspVocabulary,
+    IsspContent,
+    IsspAsset,
+    NodeType,
+    PageOrientation,
+    ContentType,
+    AssetRole
 )
 from app.schemas import (
     AdminOverridePayload,
@@ -52,7 +62,7 @@ from app.schemas import (
     CatalogItemCreate, 
     CatalogItemUpdate, 
     CatalogItemResponse,
-    ProposalResponse,              # <--- Added to the imports
+    ProposalResponse,
     SubscriptionProposalResponse,
     WhitelistedUserCreate,
     WhitelistedUserUpdate,
@@ -85,7 +95,18 @@ from app.schemas import (
     AnnualCostBreakdownCreate,
     AnnualCostBreakdownResponse,
     IctStaffPositionCreate,
-    IctStaffPositionResponse
+    IctStaffPositionResponse,
+    # New Node Schemas (Gap Restructuring)
+    IsspNodeResponse,
+    IsspNodeCreate,
+    IsspNodeUpdate,
+    IsspNodeReorderPayload,
+    IsspVocabularyResponse,
+    IsspVocabularyCreate,
+    IsspContentResponse,
+    IsspContentCreate,
+    IsspAssetResponse,
+    IsspAssetCreate
 )
 from app.auth.router import require_admin
 from app.tasks.pdf_tasks import compile_issp_document
@@ -101,6 +122,282 @@ from app.utils.helpers import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["Admin & Governance Subsystem"])
+
+
+# ==========================================================
+# 0. RESTRUCTURED DOCUMENT TREE APIs (Gap Restructuring)
+# ==========================================================
+
+@router.get("/issp/document-tree", response_model=List[IsspNodeResponse])
+def get_issp_document_tree(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        # Define recursive loading options up to 4 levels of tree depth
+        query_options = [
+            joinedload(IsspNode.vocabulary),
+            selectinload(IsspNode.contents),
+            selectinload(IsspNode.assets),
+            selectinload(IsspNode.children).options(
+                joinedload(IsspNode.vocabulary),
+                selectinload(IsspNode.contents),
+                selectinload(IsspNode.assets),
+                selectinload(IsspNode.children).options(
+                    joinedload(IsspNode.vocabulary),
+                    selectinload(IsspNode.contents),
+                    selectinload(IsspNode.assets),
+                    selectinload(IsspNode.children).options(
+                        joinedload(IsspNode.vocabulary),
+                        selectinload(IsspNode.contents),
+                        selectinload(IsspNode.assets)
+                    )
+                )
+            )
+        ]
+
+        # Fetch root nodes and recursively load all nested children eagerly
+        root_nodes = db.query(IsspNode).options(*query_options).filter(
+            IsspNode.parent_id == None
+        ).order_by(IsspNode.sequence_order.asc()).all()
+        
+        return root_nodes
+        
+    except Exception as e:
+        logger.error(f"Failed to query document tree: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load document skeleton tree.")
+    
+@router.put("/issp/reorder")
+def reorder_issp_nodes(
+    payload: IsspNodeReorderPayload,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        node = db.query(IsspNode).filter(IsspNode.id == payload.node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Document node not found.")
+
+        node.parent_id = payload.parent_id if payload.parent_id != 0 else None
+        node.sequence_order = payload.sequence_order
+        db.commit()
+        return {"status": "success", "message": "Document node hierarchy reordered successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to reorder issp nodes: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database failure during node reordering.")
+
+
+@router.post("/issp/assets", response_model=IsspAssetResponse)
+async def upload_issp_asset(
+    node_id: int = Query(...),
+    asset_role: AssetRole = Query(...),
+    custom_title: Optional[str] = Query(None),
+    aspect_ratio_preserve: bool = Query(True),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Target document node not found.")
+
+        file_bytes = await file.read()
+        is_valid_file = (
+            file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or  # PNG
+            file_bytes.startswith(b"\xff\xd8\xff") or        # JPEG
+            file_bytes.startswith(b"GIF8") or                # GIF
+            file_bytes.startswith(b"%PDF-")                  # PDF
+        )
+        if not is_valid_file:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security Violation: Invalid file format. Only PNG, JPG, or PDF documents are permitted as system diagrams."
+            )
+
+        safe_filename = secure_filename(file.filename)
+        key = storage_client.get_diagram_key(asset_role.value, safe_filename)
+        success = storage_client.upload_canvas_evidence(file_bytes, key)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to write diagram asset to storage.")
+
+        download_url = storage_client.generate_download_url(key)
+
+        # Restructuring Rule: If full page diagram, set page break strictly to True on target node
+        if asset_role == AssetRole.FULL_PAGE_DIAGRAM:
+            node.force_page_break = True
+
+        new_asset = IsspAsset(
+            node_id=node_id,
+            file_path=download_url,
+            asset_role=asset_role,
+            custom_title=custom_title,
+            aspect_ratio_preserve=aspect_ratio_preserve
+        )
+        db.add(new_asset)
+        db.commit()
+        db.refresh(new_asset)
+        return new_asset
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to upload issp asset: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database failure during asset uploading.")
+
+
+@router.post("/issp/nodes", response_model=IsspNodeResponse, status_code=status.HTTP_201_CREATED)
+def create_issp_node(
+    payload: IsspNodeCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        new_node = IsspNode(
+            parent_id=payload.parent_id,
+            node_type=payload.node_type,
+            system_key=payload.system_key,
+            sequence_order=payload.sequence_order,
+            page_orientation=payload.page_orientation,
+            force_page_break=payload.force_page_break
+        )
+        db.add(new_node)
+        db.commit()
+        db.refresh(new_node)
+        return new_node
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create document node: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database failure during node creation.")
+
+
+@router.put("/issp/nodes/{node_id}", response_model=IsspNodeResponse)
+def update_issp_node(
+    node_id: int,
+    payload: IsspNodeUpdate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Document node not found.")
+
+        if payload.node_type is not None:
+            node.node_type = payload.node_type
+        if payload.system_key is not None:
+            node.system_key = payload.system_key
+        if payload.sequence_order is not None:
+            node.sequence_order = payload.sequence_order
+        if payload.page_orientation is not None:
+            node.page_orientation = payload.page_orientation
+        if payload.force_page_break is not None:
+            node.force_page_break = payload.force_page_break
+        if payload.parent_id is not None:
+            node.parent_id = payload.parent_id if payload.parent_id != 0 else None
+
+        db.commit()
+        db.refresh(node)
+        return node
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update document node: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database failure during node updates.")
+
+
+@router.delete("/issp/nodes/{node_id}")
+def delete_issp_node(
+    node_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Document node not found.")
+
+        db.delete(node)
+        db.commit()
+        return {"status": "success", "message": "Document node deleted successfully."}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete document node: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database failure during node deletion.")
+
+
+@router.post("/issp/nodes/{node_id}/vocabulary", response_model=IsspVocabularyResponse)
+def configure_node_vocabulary(
+    node_id: int,
+    payload: IsspVocabularyCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Document node not found.")
+
+        vocab = db.query(IsspVocabulary).filter(IsspVocabulary.node_id == node_id).first()
+        if vocab:
+            vocab.display_title = payload.display_title
+            vocab.toc_label = payload.toc_label
+        else:
+            vocab = IsspVocabulary(
+                node_id=node_id,
+                display_title=payload.display_title,
+                toc_label=payload.toc_label
+            )
+            db.add(vocab)
+
+        db.commit()
+        db.refresh(vocab)
+        return vocab
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to save vocabulary: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database failure during vocabulary configuration.")
+
+
+@router.post("/issp/nodes/{node_id}/contents", response_model=IsspContentResponse)
+def configure_node_content(
+    node_id: int,
+    payload: IsspContentCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Document node not found.")
+
+        content = db.query(IsspContent).filter(IsspContent.node_id == node_id).first()
+        if content:
+            content.content_type = payload.content_type
+            content.json_data = payload.json_data
+        else:
+            content = IsspContent(
+                node_id=node_id,
+                content_type=payload.content_type,
+                json_data=payload.json_data
+            )
+            db.add(content)
+
+        db.commit()
+        db.refresh(content)
+        return content
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to configure content: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database failure during content mapping.")
 
 
 # ==========================================================
@@ -658,7 +955,7 @@ def update_whitelisted_user(
             action="SYSTEM_USER_WHITELIST_MODIFIED",
             user_id=admin["id"],
             old_value=old_state,
-            new_value=new_state
+            new_state=new_state
         )
         db.add(audit)
         
@@ -2548,7 +2845,7 @@ def update_strategic_concern(
         raise HTTPException(status_code=404, detail="Strategic concern record not found")
     try:
         concern.mfo = payload.mfo
-        concern.critical_system = payload.critical_system
+        concern.critical_system = payload.critical_system,
         concern.problems = payload.problems
         concern.intended_use = payload.intended_use
         db.commit()

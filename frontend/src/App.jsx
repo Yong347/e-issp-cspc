@@ -46,6 +46,7 @@ import PerformanceMetricsManager from "./views/admin/Narrative/PerformanceMetric
 import StrategicConcernsManager from "./views/admin/Narrative/StrategicConcernsManager";
 import TransmittalLetterPreview from "./views/admin/Narrative/TransmittalLetterPreview";
 import StaffPositionsManager from "./views/admin/Narrative/StaffPositionsManager";
+import DocumentStructureManager from "./views/admin/Narrative/DocumentStructureManager";
 
 import { useAuth } from "./context/AuthContext";
 import { NotificationProvider } from "./context/NotificationContext";
@@ -173,6 +174,7 @@ export default function App() {
             <Route path="narratives/concerns" element={<StrategicConcernsManager />} />
             <Route path="narratives/transmittal" element={<TransmittalLetterPreview />} />
             <Route path="narratives/staff-positions" element={<StaffPositionsManager />} />
+            <Route path="narratives/structure" element={<DocumentStructureManager />} />
             
             {/* Administrator profile routing configuration */}
             <Route path="profile" element={<ProfileSettings />} />

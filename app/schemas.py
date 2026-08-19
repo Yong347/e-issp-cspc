@@ -11,7 +11,16 @@ from pydantic import BaseModel, Field, EmailStr, field_validator, model_validato
 from app.config import settings
 
 # Import standard Enums directly from the Database models as the single source of truth
-from app.database.models import RoleTag, ProposalStatus, AssetStatus, ScopeChoice
+from app.database.models import (
+    RoleTag, 
+    ProposalStatus, 
+    AssetStatus, 
+    ScopeChoice,
+    NodeType,
+    PageOrientation,
+    ContentType,
+    AssetRole
+)
 
 # Global map translating raw form-select codes to formal MFO classifications
 MFO_MAPPING = {
@@ -63,6 +72,99 @@ def deserialize_optional_dict_if_string(v: Any) -> Optional[Dict[Any, Any]]:
     return None
 
 
+# ==========================================================
+# 0. DOCUMENT TREE ARCHITECTURE SCHEMAS (Gap Restructuring)
+# ==========================================================
+
+class IsspVocabularyBase(BaseModel):
+    display_title: str = Field(..., max_length=255, description="Official DICT title")
+    toc_label: str = Field(..., max_length=255, description="Shorter label for Table of Contents")
+
+
+class IsspVocabularyCreate(IsspVocabularyBase):
+    pass
+
+
+class IsspVocabularyResponse(IsspVocabularyBase):
+    id: int
+    node_id: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IsspContentBase(BaseModel):
+    content_type: ContentType
+    json_data: Dict[str, Any] = Field(..., description="Structured JSON payload")
+
+
+class IsspContentCreate(IsspContentBase):
+    pass
+
+
+class IsspContentResponse(IsspContentBase):
+    id: int
+    node_id: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IsspAssetBase(BaseModel):
+    file_path: str = Field(..., max_length=255, description="S3 or local file location")
+    asset_role: AssetRole
+    custom_title: Optional[str] = Field(None, max_length=255, description="Header text for full page diagrams")
+    aspect_ratio_preserve: bool = Field(True, description="Enforce aspect ratio bounds")
+
+
+class IsspAssetCreate(IsspAssetBase):
+    node_id: int
+
+
+class IsspAssetResponse(IsspAssetBase):
+    id: int
+    node_id: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IsspNodeBase(BaseModel):
+    node_type: NodeType
+    system_key: str = Field(..., max_length=100, description="Unique system lookup key")
+    sequence_order: Decimal = Field(..., description="Decimal index for sorting order")
+    page_orientation: PageOrientation = Field(PageOrientation.LANDSCAPE)
+    force_page_break: bool = Field(False)
+
+
+class IsspNodeCreate(IsspNodeBase):
+    parent_id: Optional[int] = None
+
+
+class IsspNodeUpdate(BaseModel):
+    node_type: Optional[NodeType] = None
+    system_key: Optional[str] = None
+    sequence_order: Optional[Decimal] = None
+    page_orientation: Optional[PageOrientation] = None
+    force_page_break: Optional[bool] = None
+    parent_id: Optional[int] = None
+
+
+class IsspNodeReorderPayload(BaseModel):
+    node_id: int
+    parent_id: Optional[int] = None
+    sequence_order: Decimal
+
+
+class IsspNodeResponse(IsspNodeBase):
+    id: int
+    parent_id: Optional[int] = None
+    created_at: datetime
+    vocabulary: Optional[IsspVocabularyResponse] = None
+    contents: List[IsspContentResponse] = []
+    assets: List[IsspAssetResponse] = []
+    children: List["IsspNodeResponse"] = []
+
+    # model_config goes inside the class definition
+    model_config = ConfigDict(from_attributes=True)
+
+
+# model_rebuild() goes outside the class, at the module level (no indentation)
+IsspNodeResponse.model_rebuild()
 # ==========================================================
 # 1. AUTHENTICATION & SESSION SCHEMAS
 # ==========================================================
@@ -490,7 +592,7 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
 
 class AdminHardwareOverride(BaseModel):
     """Specific overrides reserved strictly for CapEx/Hardware entries"""
-    item_name: Optional[str] = Field(None, description="Corrected name matching standardized naming guidelines")
+    item_name: Optional[str] = Field(None, description="Corrected name matching standardized guidelines")
     custom_specification: Optional[str] = None
     unit_cost: Optional[Decimal] = Field(None, ge=0, le=100_000_000)
     
@@ -563,7 +665,7 @@ class AdminSubscriptionOverride(BaseModel):
                 if count < 0:
                     raise ValueError(f"User license override for year {year} cannot be negative.")
                 if count > 100_000:
-                    raise ValueError(f"User license override for year {year} exceeds maximum allowable threshold (100,000 users).")
+                    raise ValueError(f"User license override for year {year} exceeds maximum allowable threshold (10,000 users).")
         return v
 
 
@@ -984,7 +1086,7 @@ class MithiIctIssuesSchema(BaseModel):
     has_reluctant_stakeholders: bool = Field(False, description="Resistance to digital systems transition")
     has_management_support_issues: bool = Field(False, description="Lack of institutional executive support")
     has_personnel_recruitment_issues: bool = Field(False, description="Difficulty recruiting or retaining IT personnel")
-    has_employee_skills_issues: bool = Field(False, description="Low level of ICT literacy among SUC employees")
+    has_employee_skills_issues: bool = Field(False, description="Low level of ICT skills among SUC employees")
     has_bandwidth_issues: bool = Field(False, description="Unavailability of required network bandwidth")
     has_contract_management_issues: bool = Field(False, description="Difficulties in contracts and vendor management")
 
@@ -1560,3 +1662,4 @@ class MilestoneUpdatePayload(BaseModel):
     @classmethod
     def deserialize_fields(cls, v: Any) -> Dict[str, bool]:
         return deserialize_dict_if_string(v)
+

@@ -291,6 +291,135 @@ class ScopeChoice(str, enum.Enum):
 
 
 # ==========================================================
+# RESTRUCTURED DOCUMENT TREE ENUMS (Gap Restructuring)
+# ==========================================================
+
+class NodeType(str, enum.Enum):
+    ROOT = "root"
+    PART = "part"
+    SECTION = "section"
+    SUBSECTION = "subsection"
+    LEAF = "leaf"
+
+
+class PageOrientation(str, enum.Enum):
+    PORTRAIT = "portrait"
+    LANDSCAPE = "landscape"
+
+
+class ContentType(str, enum.Enum):
+    RICH_TEXT = "rich_text"
+    KEY_VALUE_TABLE = "key_value_table"
+    STAFFING_MATRIX = "staffing_matrix"
+    BUDGET_GRID = "budget_grid"
+
+
+class AssetRole(str, enum.Enum):
+    LOGO = "logo"
+    INLINE_DIAGRAM = "inline_diagram"
+    FULL_PAGE_DIAGRAM = "full_page_diagram"
+
+
+# ==========================================================
+# RESTRUCTURED DOCUMENT TREE MODELS (Gap Restructuring)
+# ==========================================================
+
+class IsspNode(Base):
+    """
+    Self-referencing ordered hierarchical tree to support strict DICT structuring
+    and orientation mappings (e.g. Part I -> A -> A.1 -> A.1.1).
+    """
+    __tablename__ = "issp_nodes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("issp_nodes.id", ondelete="CASCADE"), 
+        nullable=True,
+        index=True
+    )
+    node_type: Mapped[NodeType] = mapped_column(Enum(NodeType), nullable=False)
+    system_key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    sequence_order: Mapped[Decimal] = mapped_column(Numeric(6, 3), nullable=False)
+    page_orientation: Mapped[PageOrientation] = mapped_column(
+        Enum(PageOrientation), 
+        default=PageOrientation.LANDSCAPE, 
+        nullable=False
+    )
+    force_page_break: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+    # Self-referencing tree relationships
+    parent: Mapped[Optional["IsspNode"]] = relationship("IsspNode", back_populates="children", remote_side=[id])
+    children: Mapped[List["IsspNode"]] = relationship("IsspNode", back_populates="parent", cascade="all, delete-orphan")
+
+    # Mapped children components
+    vocabulary: Mapped[Optional["IsspVocabulary"]] = relationship(
+        "IsspVocabulary", 
+        back_populates="node", 
+        cascade="all, delete-orphan",
+        uselist=False
+    )
+    contents: Mapped[List["IsspContent"]] = relationship("IsspContent", back_populates="node", cascade="all, delete-orphan")
+    assets: Mapped[List["IsspAsset"]] = relationship("IsspAsset", back_populates="node", cascade="all, delete-orphan")
+
+
+class IsspVocabulary(Base):
+    """
+    Stores aligned DICT displaying headers and titles, avoiding invented words.
+    """
+    __tablename__ = "issp_vocabulary"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    node_id: Mapped[int] = mapped_column(
+        ForeignKey("issp_nodes.id", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    display_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    toc_label: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    node: Mapped["IsspNode"] = relationship("IsspNode", back_populates="vocabulary")
+
+
+class IsspContent(Base):
+    """
+    Dynamic container to handle rich texts, grids, and tables structurally.
+    """
+    __tablename__ = "issp_contents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    node_id: Mapped[int] = mapped_column(
+        ForeignKey("issp_nodes.id", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    content_type: Mapped[ContentType] = mapped_column(Enum(ContentType), nullable=False)
+    json_data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+    node: Mapped["IsspNode"] = relationship("IsspNode", back_populates="contents")
+
+
+class IsspAsset(Base):
+    """
+    Tracks and registers full page diagrams vs inline icons.
+    """
+    __tablename__ = "issp_assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    node_id: Mapped[int] = mapped_column(
+        ForeignKey("issp_nodes.id", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )
+    file_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    asset_role: Mapped[AssetRole] = mapped_column(Enum(AssetRole), nullable=False)
+    custom_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    aspect_ratio_preserve: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    node: Mapped["IsspNode"] = relationship("IsspNode", back_populates="assets")
+
+
+# ==========================================================
 # CAMPUS REGISTRIES
 # ==========================================================
 

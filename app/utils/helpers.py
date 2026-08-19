@@ -253,3 +253,31 @@ def validate_pdf_content(file_bytes: bytes) -> bool:
     except (ImportError, AttributeError, Exception):
         # Secure binary fallback pattern check if python-magic dependencies are unavailable
         return file_bytes.startswith(b"%PDF-")
+    
+    # app/utils/helpers.py
+import json
+
+def get_dict_from_payload(payload: Any) -> dict:
+    """
+    Defensively parses and returns a dictionary from the database payload.
+    Handles raw strings, None, and doubly-serialized JSON structures on SQLite.
+    """
+    if not payload:
+        return {}
+    
+    if isinstance(payload, dict):
+        return payload
+        
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, str):
+                double_parsed = json.loads(parsed)
+                if isinstance(double_parsed, dict):
+                    return double_parsed
+        except Exception as e:
+            logger.warning(f"Failed to parse payload string: {str(e)}")
+            
+    return {}
