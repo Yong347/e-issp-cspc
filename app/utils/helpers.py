@@ -5,6 +5,7 @@ import html
 import logging
 import posixpath
 import importlib
+import json
 from typing import List, Optional, Any, Dict, Tuple
 from urllib.parse import urlparse
 from sqlalchemy.orm import Session
@@ -119,6 +120,7 @@ def get_active_issp_period(db: Session) -> str:
         if active_narrative:
             return active_narrative.issp_period
     except Exception as e:
+        db.rollback()  # Rollback transaction to clear failed state before callers execute secondary queries
         logger.warning(f"Defensive check: Failed to query active MasterNarrative issp_period: {str(e)}")
         
     try:
@@ -126,6 +128,7 @@ def get_active_issp_period(db: Session) -> str:
         if latest_narrative:
             return latest_narrative.issp_period
     except Exception as e:
+        db.rollback()  # Rollback transaction to clear failed state before callers execute secondary queries
         logger.warning(f"Defensive check: Failed to query latest MasterNarrative issp_period: {str(e)}")
         
     return "2026-2028"
@@ -253,9 +256,7 @@ def validate_pdf_content(file_bytes: bytes) -> bool:
     except (ImportError, AttributeError, Exception):
         # Secure binary fallback pattern check if python-magic dependencies are unavailable
         return file_bytes.startswith(b"%PDF-")
-    
-    # app/utils/helpers.py
-import json
+
 
 def get_dict_from_payload(payload: Any) -> dict:
     """

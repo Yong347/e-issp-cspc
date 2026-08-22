@@ -87,6 +87,31 @@ async def lifespan(app: FastAPI):
             logger.info("Database base tables verified successfully.")
         except Exception as e:
             logger.critical(f"Failed to initialize metadata tables: {str(e)}")
+
+    # --- DEFENSIVE SCHEMA ALIGNMENT CHECK ---
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        
+        # Check and fix 'subscription_proposals' table
+        if "subscription_proposals" in inspector.get_table_names():
+            sub_cols = [c['name'] for c in inspector.get_columns('subscription_proposals')]
+            if 'is_archived' not in sub_cols:
+                logger.info("Defensive Sync: 'is_archived' column missing in 'subscription_proposals' table. Appending column...")
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE subscription_proposals ADD COLUMN is_archived BOOLEAN DEFAULT 0"))
+                logger.info("Defensive Sync: 'is_archived' successfully appended to 'subscription_proposals'.")
+
+        # Check and fix 'issp_core' table
+        if "issp_core" in inspector.get_table_names():
+            core_cols = [c['name'] for c in inspector.get_columns('issp_core')]
+            if 'is_archived' not in core_cols:
+                logger.info("Defensive Sync: 'is_archived' column missing in 'issp_core' table. Appending column...")
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE issp_core ADD COLUMN is_archived BOOLEAN DEFAULT 0"))
+                logger.info("Defensive Sync: 'is_archived' successfully appended to 'issp_core'.")
+    except Exception as schema_err:
+        logger.error(f"Failed to execute defensive schema alignment: {str(schema_err)}")
     
     # Route Diagnosis Table
     logger.info("Scanning and mapping active API routing tables...")

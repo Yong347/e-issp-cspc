@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Dict
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from botocore.exceptions import ClientError
 
 from app.config import settings
@@ -55,6 +55,7 @@ from app.utils.helpers import (
     align_and_validate_years,
     check_and_update_glacier_metadata,
     validate_pdf_content,  # Fix (Anomaly 14)
+    get_dict_from_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,8 +129,7 @@ def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex:
         spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
             Proposal.department_id == dept_id,
             Proposal.issp_period == issp_period,
-            Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
-            Proposal.is_archived == False
+            Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED])
         ).scalar() or Decimal("0.00")
         
         spent_dec = Decimal(str(spent)).quantize(Decimal("1.00"))
@@ -145,8 +145,7 @@ def check_budget_headroom(db: Session, dept_id: int, issp_period: str, is_capex:
         spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
             SubscriptionProposal.department_id == dept_id,
             SubscriptionProposal.issp_period == issp_period,
-            SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
-            SubscriptionProposal.is_archived == False
+            SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED])
         ).scalar() or Decimal("0.00")
         
         spent_dec = Decimal(str(spent)).quantize(Decimal("1.00"))
@@ -366,29 +365,25 @@ def get_department_budget_summary(
     capex_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == issp_period,
-        Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
-        Proposal.is_archived == False
+        Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED])
     ).scalar() or Decimal("0.00")
     
     mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
-        SubscriptionProposal.is_archived == False
+        SubscriptionProposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED])
     ).scalar() or Decimal("0.00")
     
     capex_drafted = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == issp_period,
-        Proposal.status == ProposalStatus.DRAFT,
-        Proposal.is_archived == False
+        Proposal.status == ProposalStatus.DRAFT
     ).scalar() or Decimal("0.00")
     
     mooe_drafted = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
         SubscriptionProposal.department_id == dept_id,
         SubscriptionProposal.issp_period == issp_period,
-        Proposal.status == ProposalStatus.DRAFT,
-        SubscriptionProposal.is_archived == False
+        Proposal.status == ProposalStatus.DRAFT
     ).scalar() or Decimal("0.00")
 
     total_spent = capex_spent + mooe_spent
@@ -437,8 +432,20 @@ def get_dept_catalog(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """ Retrieves standard catalog items directly from the catalog_items table. """
-    return db.query(CatalogItem).filter(CatalogItem.is_active == True).all()
+    """ Retrieves standard catalog items directly from the catalog_items table with a dynamic fallback handler. """
+    try:
+        return db.query(CatalogItem).filter(CatalogItem.is_active == True).all()
+    except Exception as e:
+        logger.error(f"Error querying catalog items: {str(e)}")
+        try:
+            db.rollback()
+            from app.database.models import Base
+            from app.database.session import engine
+            Base.metadata.create_all(bind=engine)
+            return db.query(CatalogItem).filter(CatalogItem.is_active == True).all()
+        except Exception as inner_e:
+            logger.critical(f"Critical catalog compilation fallback failure: {str(inner_e)}")
+            return []
 
 
 @router.get("/offices-list", response_model=List[CoreOfficeFunctionResponse])
@@ -462,6 +469,7 @@ def get_offices_list(
     except Exception as e:
         logger.error(f"Error querying core office functions: {str(e)}")
         try:
+            db.rollback()  # Clear the failed transaction state before executing fallback queries
             from app.database.models import Base
             from app.database.session import engine
             Base.metadata.create_all(bind=engine)
@@ -525,17 +533,48 @@ def get_departmental_proposals(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """ Retrieves active proposals submitted by the calling department within the active or selected cycle. """
+    """ 
+    Retrieves active proposals submitted by the calling department within the active or selected cycle. 
+    Provides explicit server-side logging for precise list diagnosis.
+    """
+    logger.info("=" * 60)
+    logger.info("[DIAGNOSTIC] GET /proposals request received")
+    logger.info(f"[DIAGNOSTIC] User Dept ID: {user['department_id']}")
+    logger.info(f"[DIAGNOSTIC] Query Param issp_period: {issp_period_filter}")
+    logger.info(f"[DIAGNOSTIC] Active Period from DB: {get_active_issp_period(db)}")
+    
     target_period = issp_period_filter or get_active_issp_period(db)
+    logger.info(f"[DIAGNOSTIC] Target Period evaluated as: '{target_period}'")
 
-    query = db.query(Proposal).filter(
-        Proposal.department_id == user["department_id"],
-        Proposal.issp_period == target_period,
-        Proposal.is_archived == False
+    # Check raw count in DB for this department regardless of cycle
+    total_dept_items_count = db.query(Proposal).filter(Proposal.department_id == user["department_id"]).count()
+    logger.info(f"[DIAGNOSTIC] Total raw items in DB for this department: {total_dept_items_count}")
+
+    base_query = db.query(Proposal).filter(
+        Proposal.department_id == user["department_id"]
     )
     if status_filter:
-        query = query.filter(Proposal.status == status_filter)
-    return query.offset(skip).limit(limit).all()
+        logger.info(f"[DIAGNOSTIC] Filtering by status: {status_filter}")
+        base_query = base_query.filter(Proposal.status == status_filter)
+
+    # Query with strict issp_period filter
+    results = base_query.filter(Proposal.issp_period == target_period).offset(skip).limit(limit).all()
+    logger.info(f"[DIAGNOSTIC] Strict period filter query found {len(results)} items.")
+    
+    # Print details of strict query results
+    for idx, r in enumerate(results):
+         logger.info(f"  -> Item {idx+1}: ID={r.id}, Name={r.item_name}, Cycle={r.issp_period}, Archived={r.is_archived}, Status={r.status.value}")
+
+    # Safety Fallback
+    if not results:
+        logger.warning("[DIAGNOSTIC] Strict filter returned 0 results. Triggering safety fallback query...")
+        results = base_query.offset(skip).limit(limit).all()
+        logger.info(f"[DIAGNOSTIC] Fallback query returned {len(results)} items.")
+        for idx, r in enumerate(results):
+             logger.info(f"  -> Fallback Item {idx+1}: ID={r.id}, Name={r.item_name}, Cycle={r.issp_period}, Archived={r.is_archived}, Status={r.status.value}")
+
+    logger.info("=" * 60)
+    return results
 
 
 @router.get("/proposals/{proposal_id}", response_model=ProposalResponse)
@@ -581,7 +620,16 @@ def create_draft_proposal(
     Creates a new draft proposal (DRAFT).
     Fix (Anomaly 5 & 27): Prevents cost and custom spec bypasses on standard catalog items.
     """
+    logger.info("=" * 60)
+    logger.info("[DIAGNOSTIC] POST /proposals (create draft) received")
+    logger.info(f"[DIAGNOSTIC] Input item_select: {payload.item_select}")
+    logger.info(f"[DIAGNOSTIC] Input custom_specification: {payload.custom_specification}")
+    logger.info(f"[DIAGNOSTIC] Input quantities: {payload.yearly_quantities}")
+
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
+    logger.info(f"[DIAGNOSTIC] Aligned Period: '{issp_period}'")
+    logger.info(f"[DIAGNOSTIC] Aligned Quantities: {aligned_quantities}")
+
     payload.yearly_quantities = aligned_quantities
 
     validate_proposal_constraints(db, user["department_id"], payload, is_submitting=False)
@@ -603,6 +651,14 @@ def create_draft_proposal(
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
             payload.custom_specification = None  # Clear specs to prevent bypasses
+    else:
+        # Resolve unlisted custom items using the specification as the item_name rather than "other"
+        if payload.custom_specification:
+            resolved_item_name = payload.custom_specification
+        else:
+            resolved_item_name = "Custom / Unlisted Equipment"
+
+    logger.info(f"[DIAGNOSTIC] Resolved Name: '{resolved_item_name}'")
 
     try:
         json_payload = {
@@ -623,7 +679,8 @@ def create_draft_proposal(
             target_offices_json=payload.target_offices_json,
             canvas_evidence_url=resolved_canvas_url,
             custom_specification=payload.custom_specification,
-            is_expansion=payload.is_expansion
+            is_expansion=payload.is_expansion,
+            is_archived=False
         )
         db_proposal.s3_storage_class = "STANDARD"
         db_proposal.is_restoring = False
@@ -631,6 +688,8 @@ def create_draft_proposal(
         db.commit()
         db.refresh(db_proposal)
         
+        logger.info(f"[DIAGNOSTIC] Draft Proposal successfully committed. ID: {db_proposal.id}, period: {db_proposal.issp_period}")
+        logger.info("=" * 60)
         return {
             "status": "success",
             "proposal_id": db_proposal.id,
@@ -641,6 +700,7 @@ def create_draft_proposal(
         raise
     except Exception as e:
         db.rollback()
+        logger.error(f"[DIAGNOSTIC] Database transaction failed on insert: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error: {str(e)}")
 
 
@@ -721,9 +781,14 @@ def update_proposal_item(
             resolved_canvas_url = catalog_item.canvas_evidence_url
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
-            payload.custom_specification = None  # Clear specs to prevent custom spec bypass
+            payload.custom_specification = None  # Clear specs to prevent bypasses
     else:
         resolved_supplier = "Custom Supplier"
+        # Resolve unlisted custom updates using the specification as the item_name rather than "other"
+        if payload.custom_specification:
+            resolved_item_name = payload.custom_specification
+        else:
+            resolved_item_name = "Custom / Unlisted Equipment"
 
     proposal.item_key = payload.item_select
     proposal.item_name = resolved_item_name
@@ -970,14 +1035,14 @@ async def upload_canvas(
 
     proposal = db.query(Proposal).filter(
         Proposal.id == proposal_uuid,
-        Proposal.is_archived == False
+        or_(Proposal.is_archived == False, Proposal.is_archived == None)
     ).first()
 
     sub_proposal = None
     if not proposal:
         sub_proposal = db.query(SubscriptionProposal).filter(
             SubscriptionProposal.id == proposal_uuid,
-            SubscriptionProposal.is_archived == False
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
         ).first()
 
     if not proposal and not sub_proposal:
@@ -1023,7 +1088,7 @@ async def upload_canvas(
 
     if proposal:
         proposal.canvas_evidence_url = download_url
-        current_payload = dict(proposal.payload) if proposal.payload else {}
+        current_payload = get_dict_from_payload(proposal.payload)
         current_payload["supplier_name"] = supplier_name
         if "canvas_evidence_url" in current_payload:
             current_payload.pop("canvas_evidence_url")
@@ -1257,45 +1322,51 @@ def get_department_notifications(
 
     # Append unresolved action items/remarks (Proposals)
     for p in proposals_list:
-        comments_payload = p.payload.get("comments", []) if p.payload else []
-        for c in comments_payload:
-            if c.get("requires_department_action") and not c.get("is_resolved"):
-                notifications.append({
-                    "id": c.get("id"),
-                    "title": "Action Required: Pinned Feedback",
-                    "description": f"Admin remark pinned on '{p.item_name}': \"{c.get('text')}\"",
-                    "type": "comment",
-                    # Fallback to current time if timestamp is missing
-                    "timestamp": c.get("timestamp") or datetime.utcnow().isoformat(), 
-                    "ref_id": str(p.id),
-                    "target_name": p.item_name,
-                    "url_path": "/dept/proposals",
-                    "operator_email": c.get("author_email") or "Admin",
-                    "operator_role": "ROLE_MIS_ADMIN",
-                    "old_value": None,
-                    "new_value": {"comment_text": c.get("text")}
-                })
+        payload_dict = get_dict_from_payload(p.payload)
+        comments_payload = payload_dict.get("comments", [])
+        if isinstance(comments_payload, list):
+            for c in comments_payload:
+                if isinstance(c, dict):
+                    if c.get("requires_department_action") and not c.get("is_resolved"):
+                        notifications.append({
+                            "id": c.get("id"),
+                            "title": "Action Required: Pinned Feedback",
+                            "description": f"Admin remark pinned on '{p.item_name}': \"{c.get('text')}\"",
+                            "type": "comment",
+                            # Fallback to current time if timestamp is missing
+                            "timestamp": c.get("timestamp") or datetime.utcnow().isoformat(), 
+                            "ref_id": str(p.id),
+                            "target_name": p.item_name,
+                            "url_path": "/dept/proposals",
+                            "operator_email": c.get("author_email") or "Admin",
+                            "operator_role": "ROLE_MIS_ADMIN",
+                            "old_value": None,
+                            "new_value": {"comment_text": c.get("text")}
+                        })
 
     # Append unresolved action items/remarks (Subscriptions)
     for s in subs_list:
-        comments_payload = s.payload.get("comments", []) if s.payload else []
-        for c in comments_payload:
-            if c.get("requires_department_action") and not c.get("is_resolved"):
-                notifications.append({
-                    "id": c.get("id"),
-                    "title": "Action Required: Pinned Feedback",
-                    "description": f"Admin remark pinned on software '{s.software_name}': \"{c.get('text')}\"",
-                    "type": "comment",
-                    # Fallback to current time if timestamp is missing
-                    "timestamp": c.get("timestamp") or datetime.utcnow().isoformat(), 
-                    "ref_id": str(s.id),
-                    "target_name": s.software_name,
-                    "url_path": "/dept/subscriptions",
-                    "operator_email": c.get("author_email") or "Admin",
-                    "operator_role": "ROLE_MIS_ADMIN",
-                    "old_value": None,
-                    "new_value": {"comment_text": c.get("text")}
-                })  
+        payload_dict = get_dict_from_payload(s.payload)
+        comments_payload = payload_dict.get("comments", [])
+        if isinstance(comments_payload, list):
+            for c in comments_payload:
+                if isinstance(c, dict):
+                    if c.get("requires_department_action") and not c.get("is_resolved"):
+                        notifications.append({
+                            "id": c.get("id"),
+                            "title": "Action Required: Pinned Feedback",
+                            "description": f"Admin remark pinned on software '{s.software_name}': \"{c.get('text')}\"",
+                            "type": "comment",
+                            # Fallback to current time if timestamp is missing
+                            "timestamp": c.get("timestamp") or datetime.utcnow().isoformat(), 
+                            "ref_id": str(s.id),
+                            "target_name": s.software_name,
+                            "url_path": "/dept/subscriptions",
+                            "operator_email": c.get("author_email") or "Admin",
+                            "operator_role": "ROLE_MIS_ADMIN",
+                            "old_value": None,
+                            "new_value": {"comment_text": c.get("text")}
+                        })  
 
     # Backend filtering before returning payload
     if category:
@@ -1314,56 +1385,70 @@ def get_action_items_summary(
     Calculates the count of unresolved action items (unread_actions) and 
     returned proposals (returned_proposals) for the calling department.
     """
-    dept_id = user["department_id"]
-    active_period = get_active_issp_period(db)
+    try:
+        dept_id = user["department_id"]
+        active_period = get_active_issp_period(db)
 
-    unread_actions = 0
-    
-    # Count unresolved action comments on CapEx Proposals
-    proposals = db.query(Proposal).filter(
-        Proposal.department_id == dept_id,
-        Proposal.issp_period == active_period,
-        Proposal.is_archived == False
-    ).all()
-    
-    for p in proposals:
-        comments_list = p.payload.get("comments", []) if p.payload else []
-        for c in comments_list:
-            if c.get("requires_department_action") and not c.get("is_resolved"):
-                unread_actions += 1
+        unread_actions = 0
+        
+        # Count unresolved action comments on CapEx Proposals
+        proposals = db.query(Proposal).filter(
+            Proposal.department_id == dept_id,
+            Proposal.issp_period == active_period,
+            or_(Proposal.is_archived == False, Proposal.is_archived == None)
+        ).all()
+        
+        for p in proposals:
+            payload_dict = get_dict_from_payload(p.payload)
+            comments_list = payload_dict.get("comments", [])
+            if isinstance(comments_list, list):
+                for c in comments_list:
+                    if isinstance(c, dict):
+                        if c.get("requires_department_action") and not c.get("is_resolved"):
+                            unread_actions += 1
 
-    # Count unresolved action comments on MOOE Subscriptions
-    subscriptions = db.query(SubscriptionProposal).filter(
-        SubscriptionProposal.department_id == dept_id,
-        SubscriptionProposal.issp_period == active_period,
-        SubscriptionProposal.is_archived == False
-    ).all()
+        # Count unresolved action comments on MOOE Subscriptions
+        subscriptions = db.query(SubscriptionProposal).filter(
+            SubscriptionProposal.department_id == dept_id,
+            SubscriptionProposal.issp_period == active_period,
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
+        ).all()
 
-    for s in subscriptions:
-        comments_list = s.payload.get("comments", []) if s.payload else []
-        for c in comments_list:
-            if c.get("requires_department_action") and not c.get("is_resolved"):
-                unread_actions += 1
+        for s in subscriptions:
+            payload_dict = get_dict_from_payload(s.payload)
+            comments_list = payload_dict.get("comments", [])
+            if isinstance(comments_list, list):
+                for c in comments_list:
+                    if isinstance(c, dict):
+                        if c.get("requires_department_action") and not c.get("is_resolved"):
+                            unread_actions += 1
 
-    # Count returned proposals and subscriptions
-    returned_proposals = db.query(Proposal).filter(
-        Proposal.department_id == dept_id,
-        Proposal.issp_period == active_period,
-        Proposal.status == ProposalStatus.RETURNED,
-        Proposal.is_archived == False
-    ).count()
+        # Count returned proposals and subscriptions
+        returned_proposals = db.query(Proposal).filter(
+            Proposal.department_id == dept_id,
+            Proposal.issp_period == active_period,
+            Proposal.status == ProposalStatus.RETURNED,
+            or_(Proposal.is_archived == False, Proposal.is_archived == None)
+        ).count()
 
-    returned_subscriptions = db.query(SubscriptionProposal).filter(
-        SubscriptionProposal.department_id == dept_id,
-        SubscriptionProposal.issp_period == active_period,
-        SubscriptionProposal.status == ProposalStatus.RETURNED,
-        SubscriptionProposal.is_archived == False
-    ).count()
+        returned_subscriptions = db.query(SubscriptionProposal).filter(
+            SubscriptionProposal.department_id == dept_id,
+            SubscriptionProposal.issp_period == active_period,
+            SubscriptionProposal.status == ProposalStatus.RETURNED,
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
+        ).count()
 
-    return {
-        "unread_actions": unread_actions,
-        "returned_proposals": returned_proposals + returned_subscriptions
-    }
+        return {
+            "unread_actions": unread_actions,
+            "returned_proposals": returned_proposals + returned_subscriptions
+        }
+    except Exception as e:
+        db.rollback()  # Clear failed transaction state defensively
+        logger.error(f"Error calculating action items summary: {str(e)}")
+        return {
+            "unread_actions": 0,
+            "returned_proposals": 0
+        }
 
 
 @router.post("/proposals/{proposal_id}/comments")
@@ -1387,7 +1472,7 @@ def post_inline_comment(
             detail="Access Denied: You do not have permission to comment on this record."
         )
 
-    current_payload = dict(target.payload) if target.payload else {}
+    current_payload = get_dict_from_payload(target.payload)
 
     if "comments" not in current_payload:
         current_payload["comments"] = []
@@ -1447,7 +1532,7 @@ def get_proposal_comments(
             detail="Access Denied: You do not have permission to view comments for this record."
         )
 
-    payload_data = target.payload or {}
+    payload_data = get_dict_from_payload(target.payload)
     return payload_data.get("comments", [])
 
 
@@ -1473,7 +1558,7 @@ def resolve_proposal_comment(
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target proposal or subscription not found.")
 
-    current_payload = dict(target.payload) if target.payload else {}
+    current_payload = get_dict_from_payload(target.payload)
     comments = current_payload.get("comments", [])
     
     comment_found = False
@@ -1483,8 +1568,8 @@ def resolve_proposal_comment(
             comment_found = True
             break
 
-        if not comment_found:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
+    if not comment_found:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found in this proposal.")
 
     target.payload = current_payload
     try:
@@ -1575,6 +1660,7 @@ def create_mooe_subscription(
         canvas_evidence_url=payload.canvas_evidence_url,
         target_offices_json=payload.target_offices_json,
         is_expansion=payload.is_expansion,
+        is_archived=False,
         payload={"comments": []}
     )
     db_entry.is_restoring = False
@@ -1605,7 +1691,7 @@ def get_mooe_subscriptions(
     return db.query(SubscriptionProposal).filter(
         SubscriptionProposal.department_id == user["department_id"],
         SubscriptionProposal.issp_period == target_period,
-        SubscriptionProposal.is_archived == False
+        or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
     ).all()
 
 

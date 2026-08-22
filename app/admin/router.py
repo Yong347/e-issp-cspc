@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -134,32 +134,16 @@ def get_issp_document_tree(
     admin: dict = Depends(require_admin)
 ):
     try:
-        # Define recursive loading options up to 4 levels of tree depth
-        query_options = [
+        # Eagerly load vocabulary, contents, and assets for all nodes to prevent N+1 queries.
+        # SQLAlchemy automatically maps parent-child self-referential relationships in memory.
+        all_nodes = db.query(IsspNode).options(
             joinedload(IsspNode.vocabulary),
             selectinload(IsspNode.contents),
-            selectinload(IsspNode.assets),
-            selectinload(IsspNode.children).options(
-                joinedload(IsspNode.vocabulary),
-                selectinload(IsspNode.contents),
-                selectinload(IsspNode.assets),
-                selectinload(IsspNode.children).options(
-                    joinedload(IsspNode.vocabulary),
-                    selectinload(IsspNode.contents),
-                    selectinload(IsspNode.assets),
-                    selectinload(IsspNode.children).options(
-                        joinedload(IsspNode.vocabulary),
-                        selectinload(IsspNode.contents),
-                        selectinload(IsspNode.assets)
-                    )
-                )
-            )
-        ]
-
-        # Fetch root nodes and recursively load all nested children eagerly
-        root_nodes = db.query(IsspNode).options(*query_options).filter(
-            IsspNode.parent_id == None
+            selectinload(IsspNode.assets)
         ).order_by(IsspNode.sequence_order.asc()).all()
+        
+        # Filter for root-level nodes. The children trees populate seamlessly in memory.
+        root_nodes = [node for node in all_nodes if node.parent_id is None]
         
         return root_nodes
         
@@ -545,13 +529,13 @@ def get_approved_canvas_items(
         capex = db.query(Proposal).filter(
             Proposal.status == ProposalStatus.APPROVED,
             Proposal.canvas_evidence_url.isnot(None),
-            Proposal.is_archived == False
+            or_(Proposal.is_archived == False, Proposal.is_archived == None)
         ).all()
         
         mooe = db.query(SubscriptionProposal).filter(
             SubscriptionProposal.status == ProposalStatus.APPROVED,
             SubscriptionProposal.canvas_evidence_url.isnot(None),
-            SubscriptionProposal.is_archived == False
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
         ).all()
         
         results = []
@@ -704,24 +688,24 @@ def get_admin_dashboard_metrics(
         capex_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
             Proposal.status == ProposalStatus.APPROVED,
             Proposal.issp_period == issp_period,
-            Proposal.is_archived == False
+            or_(Proposal.is_archived == False, Proposal.is_archived == None)
         ).scalar() or Decimal("0.00")
         
         mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
             SubscriptionProposal.status == ProposalStatus.APPROVED,
             SubscriptionProposal.issp_period == issp_period,
-            SubscriptionProposal.is_archived == False
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
         ).scalar() or Decimal("0.00")
         
         total_spent = capex_spent + mooe_spent
         
         pending_capex = db.query(Proposal).filter(
             Proposal.status == ProposalStatus.SUBMITTED, 
-            Proposal.is_archived == False
+            or_(Proposal.is_archived == False, Proposal.is_archived == None)
         ).count()
         pending_mooe = db.query(SubscriptionProposal).filter(
             SubscriptionProposal.status == ProposalStatus.SUBMITTED, 
-            SubscriptionProposal.is_archived == False
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
         ).count()
         
         active_narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
@@ -1223,7 +1207,7 @@ def get_admin_master_queue(
     admin: dict = Depends(require_admin)
 ):
     try:
-        query = db.query(Proposal).filter(Proposal.is_archived == False)
+        query = db.query(Proposal).filter(or_(Proposal.is_archived == False, Proposal.is_archived == None))
         
         if dept_id:
             query = query.filter(Proposal.department_id == dept_id)
@@ -1249,7 +1233,7 @@ def get_admin_subscription_queue(
     admin: dict = Depends(require_admin)
 ):
     try:
-        query = db.query(SubscriptionProposal).filter(SubscriptionProposal.is_archived == False)
+        query = db.query(SubscriptionProposal).filter(or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None))
         
         if dept_id:
             query = query.filter(SubscriptionProposal.department_id == dept_id)
@@ -1278,7 +1262,7 @@ def admin_override_proposal(
 
         hw_proposal = db.query(Proposal).filter(
             Proposal.id == proposal_id,
-            Proposal.is_archived == False
+            or_(Proposal.is_archived == False, Proposal.is_archived == None)
         ).first()
 
         if hw_proposal:
@@ -1355,7 +1339,7 @@ def admin_override_proposal(
                 Proposal.department_id == hw_proposal.department_id,
                 Proposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
                 Proposal.issp_period == hw_proposal.issp_period,
-                Proposal.is_archived == False,
+                or_(Proposal.is_archived == False, Proposal.is_archived == None),
                 Proposal.id != hw_proposal.id
             ).scalar() or Decimal("0.00")
 
@@ -1363,7 +1347,7 @@ def admin_override_proposal(
                 SubscriptionProposal.department_id == hw_proposal.department_id,
                 SubscriptionProposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
                 SubscriptionProposal.issp_period == hw_proposal.issp_period,
-                SubscriptionProposal.is_archived == False
+                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
             ).scalar() or Decimal("0.00")
 
             total_projected_spent = other_capex_spent + projected_capex_cost + other_mooe_spent
@@ -1414,7 +1398,7 @@ def admin_override_proposal(
 
         sub_proposal = db.query(SubscriptionProposal).filter(
             SubscriptionProposal.id == proposal_id,
-            SubscriptionProposal.is_archived == False
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
         ).first()
 
         if sub_proposal:
@@ -1463,7 +1447,7 @@ def admin_override_proposal(
                 sub_proposal.annual_cost_per_user = sub.annual_cost_per_user
                 has_changes = True
             if sub.target_offices_json is not None and sub.target_offices_json != sub_proposal.target_offices_json:
-                sub_proposal.target_offices_json = [html.escape(str(o).strip()) for o in sub.target_offices_json if o]
+                sub_proposal.target_offices_json = [html.escape(str(o).strip()) for o in sub_proposal.target_offices_json if o]
                 has_changes = True
             if sub.project_key is not None and sub.project_key != sub_proposal.project_key:
                 sub_proposal.project_key = html.escape(sub.project_key.strip()) if sub.project_key else None
@@ -1494,7 +1478,7 @@ def admin_override_proposal(
                 SubscriptionProposal.department_id == sub_proposal.department_id,
                 SubscriptionProposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
                 SubscriptionProposal.issp_period == sub_proposal.issp_period,
-                SubscriptionProposal.is_archived == False,
+                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None),
                 SubscriptionProposal.id != sub_proposal.id
             ).scalar() or Decimal("0.00")
 
@@ -1502,7 +1486,7 @@ def admin_override_proposal(
                 Proposal.department_id == sub_proposal.department_id,
                 Proposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
                 Proposal.issp_period == os.environ.get("ISSP_PERIOD", sub_proposal.issp_period),
-                Proposal.is_archived == False
+                or_(Proposal.is_archived == False, Proposal.is_archived == None)
             ).scalar() or Decimal("0.00")
 
             total_projected_spent = other_mooe_spent + new_total_mooe + other_capex_spent
@@ -1591,7 +1575,7 @@ def get_budget_ceilings(
             ).filter(
                 Proposal.status == ProposalStatus.APPROVED,
                 Proposal.issp_period == issp_period,
-                Proposal.is_archived == False
+                or_(Proposal.is_archived == False, Proposal.is_archived == None)
             ).group_by(Proposal.department_id).all()
         )
 
@@ -1602,7 +1586,7 @@ def get_budget_ceilings(
             ).filter(
                 SubscriptionProposal.status == ProposalStatus.APPROVED,
                 SubscriptionProposal.issp_period == issp_period,
-                SubscriptionProposal.is_archived == False
+                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
             ).group_by(SubscriptionProposal.department_id).all()
         )
 
@@ -1917,7 +1901,7 @@ def run_pre_generation_budget_check(
             ).filter(
                 Proposal.status == ProposalStatus.APPROVED,
                 Proposal.issp_period == issp_period,
-                Proposal.is_archived == False
+                or_(Proposal.is_archived == False, Proposal.is_archived == None)
             ).group_by(Proposal.department_id).all()
         )
 
@@ -1928,7 +1912,7 @@ def run_pre_generation_budget_check(
             ).filter(
                 SubscriptionProposal.status == ProposalStatus.APPROVED,
                 SubscriptionProposal.issp_period == issp_period,
-                SubscriptionProposal.is_archived == False
+                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
             ).group_by(SubscriptionProposal.department_id).all()
         )
 
@@ -1990,12 +1974,12 @@ def get_department_analytics(
         for dept in departments:
             proposals = db.query(Proposal).filter(
                 Proposal.department_id == dept.id,
-                Proposal.is_archived == False
+                or_(Proposal.is_archived == False, Proposal.is_archived == None)
             ).all()
             
             subscriptions = db.query(SubscriptionProposal).filter(
                 SubscriptionProposal.department_id == dept.id,
-                SubscriptionProposal.is_archived == False
+                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
             ).all()
             
             total_count = len(proposals) + len(subscriptions)
@@ -2060,13 +2044,13 @@ def trigger_document_generation(
         approved_capex = db.query(Proposal).filter(
             Proposal.status == ProposalStatus.APPROVED,
             Proposal.issp_period == issp_period,
-            Proposal.is_archived == False
+            or_(Proposal.is_archived == False, Proposal.is_archived == None)
         ).all()
 
         approved_mooe = db.query(SubscriptionProposal).filter(
             SubscriptionProposal.status == ProposalStatus.APPROVED,
             SubscriptionProposal.issp_period == issp_period,
-            SubscriptionProposal.is_archived == False
+            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
         ).all()
 
         cold_capex = [p for p in approved_capex if p.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or p.is_restoring]
@@ -2777,7 +2761,7 @@ def delete_gaa_target(
 ):
     target = db.query(GaaPerformance).filter(GaaPerformance.id == target_id).first()
     if not target:
-        raise HTTPException(status_code=404, detail="GAA target metric not found")
+        raise HTTPException(status_code=404, detail="GAA target metric not found font-bold")
     try:
         db.delete(target)
         db.commit()
@@ -3192,7 +3176,7 @@ def get_os_census(
         raise HTTPException(status_code=500, detail="Failed to load OS platform census data.")
 
 
-@router.post("/os-census", response_model=ClientOsCensusResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/os-census", response_model=List[ClientOsCensusResponse], status_code=status.HTTP_201_CREATED)
 def create_os_census_record(
     payload: ClientOsCensusCreate, 
     db: Session = Depends(get_db), 

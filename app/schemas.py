@@ -272,12 +272,8 @@ class InventoryCreate(BaseModel):
     unserviceable_report_url: Optional[str] = Field(None, description="Upload requirement if asset is Condemned or Needs Repair")
     date_acquired: datetime = Field(default_factory=datetime.utcnow, description="Standard acquisition date mapping device lifecycle age")
 
-    @model_validator(mode='after')
-    def validate_condemned_status(self) -> 'InventoryCreate':
-        """Force validation constraint demanding an unserviceable report (IIRUP) for condemned and damaged items"""
-        if self.status in [AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR] and not self.unserviceable_report_url:
-            raise ValueError("An Unserviceable Report PDF URL is mandatory when the asset is marked as Condemned or Needs Repair.")
-        return self
+    # The strict creation validator has been removed to resolve the inventory creation deadlock.
+    # Submission of proposals remains gated until unserviceable reports are linked on the UI.
 
 
 class InventoryResponse(BaseModel):
@@ -460,7 +456,7 @@ class ProposalResponse(BaseModel):
         """Resolves stringified or null JSON outputs for offices defensively"""
         return deserialize_list_if_string(v)
 
-    @field_validator('is_restoring', 'is_expansion', mode='before')
+    @field_validator('is_restoring', 'is_expansion', 'is_archived', mode='before')
     @classmethod
     def coerce_bool(cls, v: Any) -> bool:
         """Defensively coerces database NULL values to False"""
@@ -566,7 +562,7 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
     is_archived: bool = False
     target_offices_json: List[str] = []
-    s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks active storage tier for COA retrieval")
+    s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks active storage class")
     is_restoring: Optional[bool] = Field(False, description="True if a cold archival retrieval is currently active")
 
     @field_validator('s3_storage_class', mode='before')
@@ -577,7 +573,7 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
             return "LOCAL"
         return v or "STANDARD"
 
-    @field_validator('is_restoring', mode='before')
+    @field_validator('is_restoring', 'is_archived', mode='before')
     @classmethod
     def coerce_bool(cls, v: Any) -> bool:
         """Defensively coerces database NULL values to False"""
@@ -1238,22 +1234,22 @@ class MasterNarrativeUpdate(BaseModel):
 class MasterNarrativeResponse(BaseModel):
     """Encompasses all written master parameters as well as diagram storage keys"""
     issp_period: str
-    agency_name: str
-    signatory_prepared_by: str
-    signatory_approved_by: str
-    mandate_html: str
-    vision_html: str
-    mission_html: str
-    planners_json: List[ISPlannerSchema]
+    agency_name: Optional[str] = "Camarines Sur Polytechnic Colleges"
+    signatory_prepared_by: Optional[str] = "Not Configured"
+    signatory_approved_by: Optional[str] = "Not Configured"
+    mandate_html: Optional[str] = ""
+    vision_html: Optional[str] = ""
+    mission_html: Optional[str] = ""
+    planners_json: List[ISPlannerSchema] = []
     manpower_json: Optional[ManpowerSchema] = None
-    annual_ict_budget: Decimal
-    core_offices_json: List[CoreOfficeRegistrySchema]
-    strategic_concerns_json: List[StrategicConcernSchema]
-    systems_json: List[ProposedSystemSchema]
-    databases_json: List[DatabaseRequiredSchema]
-    internal_projects_json: List[ICTProjectSchema]
-    cross_projects_json: List[ICTProjectSchema]
-    pmf_matrix_json: List[PMFRowSchema]
+    annual_ict_budget: Optional[Decimal] = Decimal("0.00")
+    core_offices_json: List[CoreOfficeRegistrySchema] = []
+    strategic_concerns_json: List[StrategicConcernSchema] = []
+    systems_json: List[ProposedSystemSchema] = []
+    databases_json: List[DatabaseRequiredSchema] = []
+    internal_projects_json: List[ICTProjectSchema] = []
+    cross_projects_json: List[ICTProjectSchema] = []
+    pmf_matrix_json: List[PMFRowSchema] = []
     
     org_chart_url: Optional[str] = Field(None, description="Part IV.B diagram mapping asset location")
     authoring_cycle_duration: Optional[int] = None
@@ -1474,16 +1470,17 @@ class CoreOfficeFunctionCreate(BaseModel):
 
 class CoreOfficeFunctionResponse(BaseModel):
     id: int
-    issp_period: str
-    office_name: str
-    division: str
-    description: str
+    issp_period: Optional[str] = "2026-2028"
+    office_name: Optional[str] = "Unnamed Office"
+    division: Optional[str] = "Administration"
+    description: Optional[str] = "No description provided"
+    
     model_config = ConfigDict(from_attributes=True)
 
 
 # --- Gap 7: Glossary Terms ---
 class GlossaryTermCreate(BaseModel):
-    term: str = Field(..., example="Batas Pambansa Blg. 512")
+    type: str = Field(..., example="Batas Pambansa Blg. 512")
     definition: str = Field(..., example="The college charter law creating Camarines Sur Polytechnic Colleges.")
 
 
@@ -1662,4 +1659,3 @@ class MilestoneUpdatePayload(BaseModel):
     @classmethod
     def deserialize_fields(cls, v: Any) -> Dict[str, bool]:
         return deserialize_dict_if_string(v)
-
