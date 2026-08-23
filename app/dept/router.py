@@ -432,9 +432,16 @@ def get_dept_catalog(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """ Retrieves standard catalog items directly from the catalog_items table with a dynamic fallback handler. """
+    """ Retrieves standard catalog items directly from the catalog_items table with a dynamic fallback handler, filtering out expired canvas items. """
     try:
-        return db.query(CatalogItem).filter(CatalogItem.is_active == True).all()
+        now = datetime.utcnow()
+        return db.query(CatalogItem).filter(
+            CatalogItem.is_active == True,
+            or_(
+                CatalogItem.canvas_expiration_date.is_(None),
+                CatalogItem.canvas_expiration_date > now
+            )
+        ).all()
     except Exception as e:
         logger.error(f"Error querying catalog items: {str(e)}")
         try:
@@ -442,10 +449,67 @@ def get_dept_catalog(
             from app.database.models import Base
             from app.database.session import engine
             Base.metadata.create_all(bind=engine)
-            return db.query(CatalogItem).filter(CatalogItem.is_active == True).all()
+            now = datetime.utcnow()
+            return db.query(CatalogItem).filter(
+                CatalogItem.is_active == True,
+                or_(
+                    CatalogItem.canvas_expiration_date.is_(None),
+                    CatalogItem.canvas_expiration_date > now
+                )
+            ).all()
         except Exception as inner_e:
             logger.critical(f"Critical catalog compilation fallback failure: {str(inner_e)}")
             return []
+
+
+@router.get("/catalog/expiring-alerts", response_model=Dict[str, Any])
+def get_expiring_canvas_alerts(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """
+    Identifies catalog and custom items whose canvas validity expires within 14 days, 
+    alerting department planners to perform updated market canvas evaluations.
+    """
+    now = datetime.utcnow()
+    warning_boundary = now + timedelta(days=14)
+    dept_id = user["department_id"]
+
+    # 1. Expiring standard catalog items
+    expiring_catalog = db.query(CatalogItem).filter(
+        CatalogItem.is_active == True,
+        CatalogItem.canvas_expiration_date.isnot(None),
+        CatalogItem.canvas_expiration_date > now,
+        CatalogItem.canvas_expiration_date <= warning_boundary
+    ).all()
+
+    # 2. Expiring department custom proposals (draft/returned)
+    expiring_proposals = db.query(Proposal).filter(
+        Proposal.department_id == dept_id,
+        Proposal.status.in_([ProposalStatus.DRAFT, ProposalStatus.RETURNED]),
+        Proposal.canvas_expiration_date.isnot(None),
+        Proposal.canvas_expiration_date > now,
+        Proposal.canvas_expiration_date <= warning_boundary
+    ).all()
+
+    return {
+        "expiring_standard_items": [
+            {
+                "item_key": item.item_key,
+                "display_name": item.display_name,
+                "expires_at": item.canvas_expiration_date.isoformat(),
+                "days_remaining": (item.canvas_expiration_date - now).days
+            } for item in expiring_catalog
+        ],
+        "expiring_custom_proposals": [
+            {
+                "proposal_id": str(p.id),
+                "item_name": p.item_name,
+                "expires_at": p.canvas_expiration_date.isoformat(),
+                "days_remaining": (p.canvas_expiration_date - now).days
+            } for p in expiring_proposals
+        ]
+    }
 
 
 @router.get("/offices-list", response_model=List[CoreOfficeFunctionResponse])
@@ -680,7 +744,8 @@ def create_draft_proposal(
             canvas_evidence_url=resolved_canvas_url,
             custom_specification=payload.custom_specification,
             is_expansion=payload.is_expansion,
-            is_archived=False
+            is_archived=False,
+            canvas_expiration_date=payload.canvas_expiration_date  # Synchronized deadline field
         )
         db_proposal.s3_storage_class = "STANDARD"
         db_proposal.is_restoring = False
@@ -799,6 +864,7 @@ def update_proposal_item(
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.custom_specification = payload.custom_specification
     proposal.is_expansion = proposal.is_expansion
+    proposal.canvas_expiration_date = payload.canvas_expiration_date  # Synchronized deadline field
 
     old_payload = dict(proposal.payload) if proposal.payload else {}
     old_payload["supplier_name"] = resolved_supplier
@@ -1661,7 +1727,8 @@ def create_mooe_subscription(
         target_offices_json=payload.target_offices_json,
         is_expansion=payload.is_expansion,
         is_archived=False,
-        payload={"comments": []}
+        payload={"comments": []},
+        canvas_expiration_date=payload.canvas_expiration_date  # Synchronized deadline field
     )
     db_entry.is_restoring = False
     db_entry.s3_storage_class = "STANDARD"
@@ -1782,6 +1849,7 @@ def update_mooe_subscription(
     sub.canvas_evidence_url = payload.canvas_evidence_url
     sub.target_offices_json = payload.target_offices_json
     sub.is_expansion = payload.is_expansion
+    sub.canvas_expiration_date = payload.canvas_expiration_date  # Synchronized deadline field
 
     try:
         db.commit()

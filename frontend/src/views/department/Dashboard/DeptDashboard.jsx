@@ -1,3 +1,4 @@
+// frontend/src/views/department/Dashboard/DeptDashboard.jsx
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -10,7 +11,8 @@ import {
   RefreshCw, 
   Landmark, 
   ShieldCheck,
-  FileText
+  FileText,
+  Clock
 } from "lucide-react";
 
 export default function DeptDashboard() {
@@ -19,6 +21,13 @@ export default function DeptDashboard() {
   const [headroom, setHeadroom] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // Expiration warning metrics
+  const [alerts, setAlerts] = useState({ expiring_standard_items: [], expiring_custom_proposals: [] });
+  const [loadingAlerts, setLoadingAlerts] = useState(false);
+
+  const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
 
   const fetchData = async () => {
     setLoading(true);
@@ -33,9 +42,26 @@ export default function DeptDashboard() {
     }
   };
 
+  const fetchExpirationAlerts = async () => {
+    setLoadingAlerts(true);
+    try {
+      const res = await fetch(`${apiUrl}/api/dept/catalog/expiring-alerts`, {
+        headers: { Authorization: `Bearer ${user.token}` }
+      });
+      if (res.ok) {
+        setAlerts(await res.json());
+      }
+    } catch (err) {
+      console.error("Failed to load catalog canvas alerts:", err);
+    } finally {
+      setLoadingAlerts(false);
+    }
+  };
+
   useEffect(() => {
     if (user?.token) {
       fetchData();
+      fetchExpirationAlerts();
     }
   }, [user, activeCycle]);
 
@@ -62,6 +88,8 @@ export default function DeptDashboard() {
   const capexPercent = allocatedCapex > 0 ? (spentCapex / allocatedCapex) * 100 : 0;
   const mooePercent = allocatedMooe > 0 ? (spentMooe / allocatedMooe) * 100 : 0;
 
+  const totalActiveAlerts = (alerts.expiring_standard_items?.length || 0) + (alerts.expiring_custom_proposals?.length || 0);
+
   return (
     <div className="space-y-6 text-xs text-slate-100 select-none">
       {/* Header Banner */}
@@ -76,11 +104,14 @@ export default function DeptDashboard() {
           </p>
         </div>
         <button
-          onClick={fetchData}
-          disabled={loading}
+          onClick={() => {
+            fetchData();
+            fetchExpirationAlerts();
+          }}
+          disabled={loading || loadingAlerts}
           className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-1.5 text-xs cursor-pointer disabled:opacity-50 transition-all self-start"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          <RefreshCw className={`w-3.5 h-3.5 ${(loading || loadingAlerts) ? "animate-spin" : ""}`} />
           <span>Sync Balances</span>
         </button>
       </div>
@@ -89,6 +120,39 @@ export default function DeptDashboard() {
         <div className="p-4 bg-red-955/40 border border-red-900/50 text-red-300 rounded-lg flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           <span>{error}</span>
+        </div>
+      )}
+
+      {/* Expiration Warning Alert Banner */}
+      {totalActiveAlerts > 0 && (
+        <div className="p-4 bg-amber-95/20 border border-amber-900/50 rounded-xl space-y-3 animate-fadeIn">
+          <div className="flex items-center gap-2 text-amber-400 font-bold">
+            <AlertTriangle className="w-4 h-4 shrink-0 animate-pulse" />
+            <span>Validity Alert: Expiring Quotation Canvases Detected</span>
+          </div>
+          <p className="text-slate-400 text-[11px] leading-relaxed">
+            The market quotation proof for the items below will expire soon. To maintain regulatory compliance, please re-evaluate and upload an updated canvas PDF before submission.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            {alerts.expiring_standard_items?.map((item, idx) => (
+              <div key={`std-${idx}`} className="p-2.5 bg-slate-950 border border-slate-850 rounded flex justify-between items-center">
+                <span className="font-semibold text-slate-300">{item.display_name}</span>
+                <span className="font-mono text-amber-500 font-bold flex items-center gap-1">
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>Expires in {item.days_remaining} Days</span>
+                </span>
+              </div>
+            ))}
+            {alerts.expiring_custom_proposals?.map((item, idx) => (
+              <div key={`cust-${idx}`} className="p-2.5 bg-slate-955 border border-slate-850 rounded flex justify-between items-center">
+                <span className="font-semibold text-slate-300">{item.item_name} (Custom Proposal)</span>
+                <span className="font-mono text-amber-500 font-bold flex items-center gap-1">
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>Expires in {item.days_remaining} Days</span>
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

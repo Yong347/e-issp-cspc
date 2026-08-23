@@ -60,11 +60,16 @@ export default function AdminDashboard() {
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (!response.ok) throw new Error("Failed to fetch database queue.");
-      const data = await response.json();
-      setProposals(data);
       
-      setPendingCount(data.filter(p => p.status === 'Submitted').length);
-      setApprovedCount(data.filter(p => p.status === 'Approved').length);
+      const payload = await response.json();
+      
+      // Robust Parsing: Accommodate either a direct array or the paginated object structure
+      const itemsList = Array.isArray(payload) ? payload : (payload.data || []);
+      
+      setProposals(itemsList);
+      
+      setPendingCount(itemsList.filter(p => p.status === 'Submitted').length);
+      setApprovedCount(itemsList.filter(p => p.status === 'Approved').length);
 
       // Fetch consolidated budget metrics
       const metricsResponse = await fetch(`${apiUrl}/api/admin/dashboard-metrics`, {
@@ -73,7 +78,7 @@ export default function AdminDashboard() {
       if (metricsResponse.ok) {
         const metricsData = await metricsResponse.json();
         setBudgetMetrics({
-          global_ceiling: metricsData.global_ceiling || 200000000.00,
+          global_ceiling: metricsData.global_ceiling || 50000000.00,
           total_spent: metricsData.total_spent || 0.00
         });
       }

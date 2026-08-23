@@ -49,16 +49,19 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 
 # Configure thread-safe, non-autocommit session creator
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# db_session is maintained as a scoped session proxy to prevent import errors in other modules
 db_session = scoped_session(SessionLocal)
 
 
 def get_db():
     """
-    Fix (Anomaly 21): Generator yielding thread-safe database session contexts.
-    Ensures that any outstanding active database transactions are rolled back 
-    upon unhandled failures and connection pools are cleanly deallocated.
+    Generator yielding thread-safe request-scoped database session contexts.
+    By instantiating directly from SessionLocal() instead of the global scoped_session proxy,
+    we ensure concurrent requests running on the async event loop receive independent,
+    isolated session transactions.
     """
-    db = db_session()
+    db = SessionLocal()
     try:
         yield db
     except Exception:
@@ -66,4 +69,3 @@ def get_db():
         raise
     finally:
         db.close()
-        db_session.remove()

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, ConfigDict
 
-# Import settings to resolve Pylance undefined variable errors
+# Import settings to resolve environment-dependent parameters
 from app.config import settings
 
 # Import standard Enums directly from the Database models as the single source of truth
@@ -158,13 +158,12 @@ class IsspNodeResponse(IsspNodeBase):
     contents: List[IsspContentResponse] = []
     assets: List[IsspAssetResponse] = []
     children: List["IsspNodeResponse"] = []
-
-    # model_config goes inside the class definition
     model_config = ConfigDict(from_attributes=True)
 
 
-# model_rebuild() goes outside the class, at the module level (no indentation)
 IsspNodeResponse.model_rebuild()
+
+
 # ==========================================================
 # 1. AUTHENTICATION & SESSION SCHEMAS
 # ==========================================================
@@ -181,7 +180,6 @@ class TokenResponse(BaseModel):
     token_type: str
     role: str
     department_id: Optional[int] = None
-
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -209,6 +207,7 @@ class CatalogItemCreate(BaseModel):
     allowed_offices: List[str] = Field(default=[], description="Offices permitted to request this item type")
     canvas_evidence_url: Optional[str] = Field(None, description="Pre-verified PDF catalog evidence document")
     supplier_name: Optional[str] = Field(None, description="Pre-verified item provider")
+    canvas_expiration_date: Optional[datetime] = Field(None, description="Explicit validity deadline of S3 quotation proof")
 
     @field_validator('item_key')
     @classmethod
@@ -228,6 +227,7 @@ class CatalogItemUpdate(BaseModel):
     allowed_offices: Optional[List[str]] = None
     canvas_evidence_url: Optional[str] = Field(None, description="Pre-verified PDF catalog evidence document")
     supplier_name: Optional[str] = Field(None, description="Pre-verified item provider")
+    canvas_expiration_date: Optional[datetime] = Field(None, description="Explicit validity deadline of S3 quotation proof")
 
 
 class CatalogItemResponse(CatalogItemSchema):
@@ -235,6 +235,7 @@ class CatalogItemResponse(CatalogItemSchema):
     id: uuid.UUID
     is_active: bool
     allowed_offices: List[str]
+    canvas_expiration_date: Optional[datetime] = None
 
     @field_validator('allowed_offices', mode='before')
     @classmethod
@@ -272,9 +273,6 @@ class InventoryCreate(BaseModel):
     unserviceable_report_url: Optional[str] = Field(None, description="Upload requirement if asset is Condemned or Needs Repair")
     date_acquired: datetime = Field(default_factory=datetime.utcnow, description="Standard acquisition date mapping device lifecycle age")
 
-    # The strict creation validator has been removed to resolve the inventory creation deadlock.
-    # Submission of proposals remains gated until unserviceable reports are linked on the UI.
-
 
 class InventoryResponse(BaseModel):
     """Active catalog database schema definition for inventory items"""
@@ -285,7 +283,6 @@ class InventoryResponse(BaseModel):
     status: AssetStatus
     unserviceable_report_url: Optional[str] = None
     date_acquired: datetime
-
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -305,10 +302,7 @@ class NeedsAssessmentCreate(BaseModel):
     @field_validator('mfo_alignment', mode='before')
     @classmethod
     def resolve_mfo_code(cls, v: str) -> str:
-        """
-        Intercepts inputs and maps descriptions back to standard code keys.
-        Handles connectors, abbreviations, and cased variations without aggressive character-stripping false positives.
-        """
+        """Intercepts inputs and maps descriptions back to standard code keys."""
         if not isinstance(v, str):
             return v
         
@@ -348,7 +342,6 @@ class NeedsAssessmentResponse(NeedsAssessmentCreate):
     id: uuid.UUID
     department_id: int
     is_archived: bool = False
-
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -375,6 +368,7 @@ class ProposalUpdatePayload(BaseModel):
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
     is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
+    canvas_expiration_date: Optional[datetime] = Field(None, description="Explicit validity deadline of S3 quotation proof")
 
     @field_validator('target_offices_json')
     @classmethod
@@ -443,6 +437,7 @@ class ProposalResponse(BaseModel):
     s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks AWS S3 storage lifecycle tier")
     is_restoring: Optional[bool] = Field(False, description="True if a cold archival retrieval is currently processing")
     is_expansion: Optional[bool] = Field(False, description="Explicitly flags if this is an expansion project")
+    canvas_expiration_date: Optional[datetime] = None
 
     @field_validator('yearly_quantities', mode='before')
     @classmethod
@@ -498,6 +493,7 @@ class SubscriptionProposalCreate(BaseModel):
     # Target Strategic Project Key Map
     project_key: Optional[str] = Field(None, description="Standard key mapping to university target ICT Project")
     is_expansion: bool = Field(False, description="Explicitly flags if this is an expansion project")
+    canvas_expiration_date: Optional[datetime] = Field(None, description="Explicit validity deadline of S3 quotation proof")
 
     # Prevent Stored XSS attacks inside input fields of MOOE subscriptions
     @field_validator('software_name', 'justification', mode='before')
@@ -564,6 +560,7 @@ class SubscriptionProposalResponse(SubscriptionProposalCreate):
     target_offices_json: List[str] = []
     s3_storage_class: str = Field("STANDARD", example="GLACIER", description="Tracks active storage class")
     is_restoring: Optional[bool] = Field(False, description="True if a cold archival retrieval is currently active")
+    canvas_expiration_date: Optional[datetime] = None
 
     @field_validator('s3_storage_class', mode='before')
     @classmethod
@@ -1177,8 +1174,20 @@ class MasterNarrativeUpdate(BaseModel):
     fiber_backbone_url: Optional[str] = Field(None, description="Path to the original uploaded Fiber Optic Backbone Cabling Diagram")
     system_architecture_url: Optional[str] = Field(None, description="Path to the original uploaded System Architecture Diagram")
     
-    # CSPC Network Diagram & Core topology (Page 129 compliance layout element)
-    network_topology_url: Optional[str] = Field(None, description="Path to the uploaded CSPC Network Diagram & Core topology")
+    # Separated 9 System-Specific Network Layout Columns
+    net_layout_sias_url: Optional[str] = Field(None, description="Path to the uploaded SIAS/Enrollment network layout diagram")
+    net_layout_library_url: Optional[str] = Field(None, description="Path to the uploaded Library IS network layout diagram")
+    net_layout_security_url: Optional[str] = Field(None, description="Path to the uploaded School Security network layout diagram")
+    net_layout_hris_url: Optional[str] = Field(None, description="Path to the uploaded HRIS & Payroll network layout diagram")
+    net_layout_dms_url: Optional[str] = Field(None, description="Path to the uploaded Document Management network layout diagram")
+    net_layout_supplies_url: Optional[str] = Field(None, description="Path to the uploaded Supplies Management network layout diagram")
+    net_layout_budget_url: Optional[str] = Field(None, description="Path to the uploaded Budget Management network layout diagram")
+    net_layout_sias_upgrade_url: Optional[str] = Field(None, description="Path to the uploaded SIAS/Accounting network layout diagram")
+    net_layout_extension_url: Optional[str] = Field(None, description="Path to the uploaded Extension Services network layout diagram")
+
+    # MIS Org Chart and Network Diagram
+    b_3_a_ict_org_url: Optional[str] = Field(None, description="Path to SUC MIS/ICT Org Chart")
+    network_diagram_url: Optional[str] = Field(None, description="Path to CSPC Network Diagram & Core Topology")
 
     # Gap 6 ISSP Process Flow diagram representation
     process_flow_diagram_url: Optional[str] = Field(None, description="Path to the uploaded ISSP Process Flow diagram")
@@ -1255,7 +1264,21 @@ class MasterNarrativeResponse(BaseModel):
     authoring_cycle_duration: Optional[int] = None
     functional_interface_url: Optional[str] = Field(None, description="Part I.C diagram mapping asset location")
     conceptual_framework_url: Optional[str] = Field(None, description="Part II.A diagram mapping asset location")
-    network_layout_url: Optional[str] = Field(None, description="Part II.D diagram mapping asset location")
+
+    # Separated 9 System-Specific Network Layout Columns
+    net_layout_sias_url: Optional[str] = Field(None, description="Path to the uploaded SIAS/Enrollment network layout diagram")
+    net_layout_library_url: Optional[str] = Field(None, description="Path to the uploaded Library IS network layout diagram")
+    net_layout_security_url: Optional[str] = Field(None, description="Path to the uploaded School Security network layout diagram")
+    net_layout_hris_url: Optional[str] = Field(None, description="Path to the uploaded HRIS & Payroll network layout diagram")
+    net_layout_dms_url: Optional[str] = Field(None, description="Path to the uploaded Document Management network layout diagram")
+    net_layout_supplies_url: Optional[str] = Field(None, description="Path to the uploaded Supplies Management network layout diagram")
+    net_layout_budget_url: Optional[str] = Field(None, description="Path to the uploaded Budget Management network layout diagram")
+    net_layout_sias_upgrade_url: Optional[str] = Field(None, description="Path to the uploaded SIAS/Accounting network layout diagram")
+    net_layout_extension_url: Optional[str] = Field(None, description="Path to the uploaded Extension Services network layout diagram")
+
+    # MIS Org Chart and Network Diagram
+    b_3_a_ict_org_url: Optional[str] = Field(None, description="Path to SUC MIS/ICT Org Chart")
+    network_diagram_url: Optional[str] = Field(None, description="Path to CSPC Network Diagram & Core Topology")
 
     is_active: bool
     agency_logo_url: Optional[str] = None
@@ -1277,9 +1300,6 @@ class MasterNarrativeResponse(BaseModel):
     site_development_plan_url: Optional[str] = None
     fiber_backbone_url: Optional[str] = None
     system_architecture_url: Optional[str] = None
-    
-    # CSPC Network Diagram & Core topology (Page 129 compliance layout element)
-    network_topology_url: Optional[str] = Field(None, description="Part V Network diagram and core topology mapping asset location")
 
     # Gap 6 ISSP Process Flow diagram representation
     process_flow_diagram_url: Optional[str] = Field(None, description="Path to the uploaded ISSP Process Flow diagram")

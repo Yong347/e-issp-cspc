@@ -12,7 +12,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.config import settings
-from app.database.session import db_session
+from app.database.session import SessionLocal
 from app.database.models import (
     Proposal,
     SubscriptionProposal,
@@ -155,7 +155,7 @@ class ISSPDynamicCompiler:
             issp_period = metadata.get("issp_period_years", "2026-2028")
 
             return f'''
-            <div class="transmittal-layout" id="transmittal-anchor" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
+            <div class="transmittal-layout" id="core_transmittal" style="font-size: 10pt; line-height: 1.6; color:#0f172a; padding: 20px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #1e3a8a; padding-bottom:12px; margin-bottom: 25px;">
                     <div style="width: 75px;">{cls.get_logo_html(metadata.get("agency_logo_url"))}</div>
                     <div style="text-align:center; font-family:sans-serif; flex:1;">
@@ -201,7 +201,7 @@ class ISSPDynamicCompiler:
             issp_period = metadata.get("issp_period_years", "2026-2028")
             agency_name = metadata.get("agency_name", "Camarines Sur Polytechnic Colleges")
             return f'''
-            <div class="cover-layout" id="cover-anchor" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; min-height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
+            <div class="cover-layout" id="core_cover" style="background-color: #0b1a3a; color: white; padding: 50px 40px; border: 15px double #d4af37; min-height: 100%; position: relative; box-sizing: border-box; font-family: Arial, sans-serif;">
                 <div style="text-align: center; margin-top: 40px;">
                     <div style="background-color: white; display: inline-block; padding: 12px; border-radius: 50%; box-shadow: 0 4px 6px rgba(0,0,0,0.15);">
                         {cls.get_logo_html(metadata.get("agency_logo_url"))}
@@ -227,7 +227,7 @@ class ISSPDynamicCompiler:
         # C. ISSP Signatory Page & Scope Checkboxes (Landscape Layout - Page 3)
         elif schema_id == "core_sig_scope":
             issp_period = metadata.get("issp_period_years", "2026-2028")
-            prepared_by = metadata.get("signatory_prepared_by", "IAN P. BENITEZ, DIT")
+            prepared_by = metadata.get("signatory_prepared_by", "DR. IAN P. BENITEZ")
             preparer_pos = metadata.get("preparer_position", "Director, MICT")
             preparer_tel = metadata.get("preparer_tel", "09190840018")
             preparer_email = metadata.get("preparer_email", "ianbenitez@cspc.edu.ph")
@@ -244,7 +244,7 @@ class ISSPDynamicCompiler:
             check_agency_regional = "[✓]" if scope_map.get("agency_regional_offices") else "[ &nbsp; ]"
 
             return f'''
-            <div class="signatories-layout" id="sig-scope-anchor" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
+            <div class="signatories-layout" id="core_sig_scope" style="font-size: 9.5pt; line-height: 1.5; color: #0f172a; padding: 15px;">
                 <h2 style="font-size:12.5pt; text-align:center; font-weight:bold; color:#1e3a8a; border-bottom:2px solid #1e3a8a; padding-bottom:8px; margin-bottom:25px; text-transform: uppercase;">
                     Information Systems Strategic Plan (ISSP)<br/>
                     <span style="font-size:10pt; font-weight:normal; color:#475569; text-transform: none;">For the period {issp_period}</span>
@@ -289,10 +289,10 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-        # D. Detailed Table of Contents Subsections (Landscape Layout - Page 4-5) - Restructured Flexbox Dot Leaders
+        # D. Table of Contents
         elif schema_id == "core_toc":
             return '''
-            <div class="toc-container" id="toc-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="toc-container" id="core_toc" style="padding: 15px; color: #0f172a;">
                 <h2 style="text-align: center; font-size: 14pt; color: #1e3a8a; margin-bottom: 30px; text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px;">
                     Table of Contents
                 </h2>
@@ -446,21 +446,7 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-        # Process Flow Layout (Landscape Layout)
-        elif schema_id == "core_process_flow":
-            process_flow_url = metadata.get("process_flow_diagram_url")
-            if not process_flow_url:
-                return ""
-            return f'''
-            <div class="full-page-media" id="process-flow-anchor">
-                <h2 class="media-header">ISSP Process Flow Diagram</h2>
-                <div class="image-wrapper">
-                    <img src="{process_flow_url}" alt="ISSP Process Flow" />
-                </div>
-            </div>
-            '''
-
-        # E. Database-Backed Glossary / Definition of Terms (Landscape Layout)
+        # E. Database-Backed Glossary / Definition of Terms
         elif schema_id == "core_defs":
             glossary_list = metadata.get("glossary_terms") or []
             terms_left = glossary_list[:len(glossary_list)//2 + 1]
@@ -470,7 +456,7 @@ class ISSPDynamicCompiler:
             right_html = "".join(f'<p style="margin: 10px 0 2px 0;"><strong>{g.get("term")}:</strong> {g.get("definition")}</p>' for g in terms_right)
 
             return f'''
-            <div class="defs-layout" id="defs-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="defs-layout" id="core_defs" style="padding: 15px; color: #0f172a;">
                 <h2 class="section-title">Definition of Terms</h2>
                 <div style="font-size: 7.5pt; line-height: 1.4; text-align: justify; margin-top: 10px;">
                     <div style="display: flex; flex-wrap: wrap; justify-content: space-between;">
@@ -485,13 +471,13 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-        # F. Database-Backed General Instructions (Landscape Layout)
+        # F. Database-Backed General Instructions
         elif schema_id == "core_instructions":
             instructions_list = metadata.get("general_instructions") or []
             steps_html = "".join(f'<li style="margin-bottom: 10px;">{inst.get("instruction_text")}</li>' for inst in instructions_list)
 
             return f'''
-            <div class="instructions-layout" id="instructions-anchor" style="padding: 15px; color: #0f172a;">
+            <div class="instructions-layout" id="core_instructions" style="padding: 15px; color: #0f172a;">
                 <h2 class="section-title">General Instructions</h2>
                 <div style="font-size: 9.5pt; line-height: 1.7; color: #334155; text-align: justify; padding: 20px; border: 1px solid #cbd5e1; background-color: #f8fafc; border-radius: 4px;">
                     <p style="margin-top: 0; font-weight: bold; color: #1e3a8a;">Guidelines on Formulating and Submitting SUC ISSP Documents:</p>
@@ -502,7 +488,7 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-        # 3. Part I: Organizational Profile, Mandates, Situation & Needs Assessments (Landscape Layout)
+        # 3. Part I: Organizational Profile, Mandates, Situation & Needs Assessments
         elif schema_id == "part_1_org_profile":
             offices_html = ""
             for office in metadata.get("core_offices_json", []):
@@ -517,16 +503,18 @@ class ISSPDynamicCompiler:
             org_structure_html = ""
             if metadata.get("org_chart_url"):
                 org_structure_html = f'''
-                <div class="canvas-page" style="text-align: center; margin-top: 25px; margin-bottom: 20px; page-break-inside: avoid;">
+                <div class="full-page-media" style="text-align: center; margin-top: 25px; margin-bottom: 20px; page-break-inside: avoid;">
                     <h4 class="sub-section-title">General College Organizational Structure</h4>
-                    <img src="{metadata.get("org_chart_url")}" style="max-width: 100%; max-height: 400px; height: auto; border: 1px solid #e2e8f0; padding: 4px; border-radius: 4px; margin-top: 5px;" />
+                    <div class="image-wrapper">
+                        <img src="{metadata.get("org_chart_url")}" alt="General Structure" />
+                    </div>
                 </div>
                 '''
 
             functional_interface_html = ""
             if metadata.get("functional_interface_url"):
                 functional_interface_html = f'''
-                <div class="full-page-media" id="part-1-c-functional-chart" style="page-break-inside: avoid;">
+                <div class="full-page-media" id="core_process_flow" style="page-break-inside: avoid;">
                     <h4 class="sub-section-title">I.C. Agency Functional Interface Diagram</h4>
                     <div class="image-wrapper">
                         <img src="{metadata.get("functional_interface_url")}" alt="Functional Interface" />
@@ -568,7 +556,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="organizational-profile-layout" id="part-i-anchor">
+            <div class="organizational-profile-layout" id="part_1_org_profile">
                 <h2 class="section-title">
                     PART I: ORGANIZATIONAL PROFILE
                 </h2>
@@ -612,7 +600,7 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-        # 4. Part I.B: Planners, Manpower, and Budgets (Multi-Campus Structural Grid - Landscape Layout)
+        # 4. Part I.B: Planners, Manpower, and Budgets (Multi-Campus Structural Grid)
         elif schema_id == "part_1_b_manpower":
             campuses_data = metadata.get("campuses") or []
             table_b1_rows = ""
@@ -636,7 +624,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="manpower-layout" id="part-1-b-manpower">
+            <div class="manpower-layout" id="part_1_b_manpower">
                 <h2 class="section-title">
                     PART I.B: PLANNERS & IT MANPOWER COMPLEMENT
                 </h2>
@@ -659,7 +647,7 @@ class ISSPDynamicCompiler:
             </div>
             '''
 
-        # 5. Part I.E: Strategic Concerns Matrix (Landscape Layout)
+        # 5. Part I.E: Strategic Concerns Matrix
         elif schema_id == "part_1_e_concerns":
             concerns_html = ""
             for item in metadata.get("strategic_concerns_json", []):
@@ -671,7 +659,7 @@ class ISSPDynamicCompiler:
                 </tr>
                 '''
             return f'''
-            <div class="concerns-layout" id="part-1-e-concerns">
+            <div class="concerns-layout" id="part_1_e_concerns">
                 <h2 class="section-title">
                     PART I.E: STRATEGIC CONCERNS FOR ICT USE
                 </h2>
@@ -737,31 +725,41 @@ class ISSPDynamicCompiler:
                 '''
 
             network_img_html = ""
-            if metadata.get("network_layout_url"):
-                urls = [u.strip() for u in metadata.get("network_layout_url", "").split(",") if u.strip()]
-                for idx, u in enumerate(urls):
+            layouts = [
+                ("SIAS / Enrollment Network Layout", metadata.get("net_layout_sias_url")),
+                ("Library IS Network Layout", metadata.get("net_layout_library_url")),
+                ("School Security Network Layout", metadata.get("net_layout_security_url")),
+                ("HRIS & Payroll Network Layout", metadata.get("net_layout_hris_url")),
+                ("Document Management Network Layout", metadata.get("net_layout_dms_url")),
+                ("Supplies Management Network Layout", metadata.get("net_layout_supplies_url")),
+                ("Budget Management Network Layout", metadata.get("net_layout_budget_url")),
+                ("SIAS / Accounting Network Layout", metadata.get("net_layout_sias_upgrade_url")),
+                ("Extension Services Network Layout", metadata.get("net_layout_extension_url"))
+            ]
+            for label, url in layouts:
+                if url:
                     network_img_html += f'''
                     <div class="full-page-media">
-                        <h4 class="sub-section-title">Network layout segment {idx + 1}</h4>
+                        <h4 class="sub-section-title">{label}</h4>
                         <div class="image-wrapper">
-                            <img src="{u}" alt="Network Layout Segment" />
+                            <img src="{url}" alt="{label}" />
                         </div>
                     </div>
                     '''
 
             topology_html = ""
-            if metadata.get("network_topology_url"):
+            if metadata.get("network_diagram_url"):
                 topology_html = f'''
                 <div class="full-page-media">
                     <h4 class="sub-section-title">CSPC Network Diagram & Core topology</h4>
                     <div class="image-wrapper">
-                        <img src="{metadata.get("network_topology_url")}" alt="Network Topology" />
+                        <img src="{metadata.get("network_diagram_url")}" alt="Network Topology" />
                     </div>
                 </div>
                 '''
 
             return f'''
-            <div class="strategy-layout" id="part-ii-anchor">
+            <div class="strategy-layout" id="part_2_is_strategy">
                 <h2 class="section-title">
                     PART II: INFORMATION SYSTEMS STRATEGY
                 </h2>
@@ -778,7 +776,7 @@ class ISSPDynamicCompiler:
             {network_img_html}
             '''
 
-        # 7. Part II.B & II.C: Systems and Databases (Landscape Layout)
+        # 7. Part II.B & II.C: Systems and Databases
         elif schema_id == "part_2_b_c_databases":
             html_output = ""
             
@@ -837,15 +835,14 @@ class ISSPDynamicCompiler:
                 databases_list = [
                     {"name": "Student Information and Accounting System (SIAS) Database", "description": "Student academic demographics, transaction records, and enrollment indexes.", "status": "Existing", "is_served": "Student Information and Accounting System (SIAS)", "storage_media": "High-End Data Storage Server"},
                     {"name": "Online Library Information Systems Database", "description": "Catalogs of academic book indexes, borrowing transaction logs, and fine matrices.", "status": "Existing", "is_served": "Online Library Information Systems", "storage_media": "High-End Data Storage Server"},
-                    {"name": "School Monitoring and Security System Database", "description": "Security logs, gate visitor entries, and smart card permissions registries.", "status": "Proposed", "is_served": "School Monitoring and Security System", "storage_media": "High-End Data Storage Server"},
+                    {"name": "School Monitoring and Security Database", "description": "Security logs, gate visitor entries, and smart card permissions registries.", "status": "Proposed", "is_served": "School Monitoring and Security System", "storage_media": "High-End Data Storage Server"},
                     {"name": "Human Resource Management Database", "description": "Facilitates employee biometrics logs, payroll files, and tax matrices.", "status": "Proposed", "is_served": "School Monitoring and Security System", "storage_media": "High-End Data Storage Server"},
                     {"name": "Human Resource Management Database", "description": "Stores employee profiles, biometric signatures, tax records, and payroll sheets.", "status": "Proposed", "is_served": "Human Resource Management System", "storage_media": "High-End Data Storage Server"}
                 ]
 
             for idx, db_item in enumerate(databases_list):
-                anchor_attr = 'id="part-2-c-databases"' if idx == 0 else ""
                 html_output += f'''
-                <div class="databases-layout" style="page-break-after: always; padding-top: 10px;" {anchor_attr}>
+                <div class="databases-layout" style="page-break-after: always; padding-top: 10px;">
                     <h2 class="section-title">
                         PART II.C: REQUIRED DATABASES & REGISTRIES
                     </h2>
@@ -879,7 +876,7 @@ class ISSPDynamicCompiler:
 
             return html_output
 
-        # 8. Part III: Detailed Description of ICT Projects & PMF (Landscape Layout)
+        # 8. Part III: Detailed Description of ICT Projects & PMF
         elif schema_id == "part_3_ict_projects":
             int_projects = metadata.get("internal_projects_json") or []
             cross_projects = metadata.get("cross_projects_json") or []
@@ -913,7 +910,7 @@ class ISSPDynamicCompiler:
                 objectives_list_html = f'<ul style="margin: 15px 0 0 15px; padding: 0; font-size: 9.5pt; color: #475569; line-height:1.5;">{objectives_list}</ul>' if objectives_list else ""
                 
                 projects_html += f'''
-                <div class="projects-layout" style="page-break-after: always; padding: 20px; border: 1px solid #e2e8f0; border-top: 4px solid #0d9488; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
+                <div class="projects-layout" style="page-break-after: always; padding: 20px; border: 1px solid #0d9488; border-top: 4px solid #0d9488; border-radius: 8px; background-color: #f8fafc; box-sizing: border-box;">
                     <div style="font-weight: bold; color: #0d9488; font-size: 11pt; margin-bottom: 8px; text-transform: uppercase;">[CROSS-AGENCY PROJECT CARD] {proj.get("name", "")}</div>
                     <div style="font-size: 9.5pt; color: #334155; margin-6px;"><strong>Lead Entity:</strong> {proj.get("lead_agency", "CSPC")}</div>
                     <div style="font-size: 9.5pt; color: #334155; margin-bottom: 12px;"><strong>Target Deliverables:</strong> {proj.get("deliverables", "")}</div>
@@ -972,7 +969,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="projects-layout" id="part-iii-anchor">
+            <div class="projects-layout" id="part_3_ict_projects">
                 <h2 class="section-title">
                     PART III: DETAILED DESCRIPTION OF ICT PROJECTS
                 </h2>
@@ -1017,7 +1014,7 @@ class ISSPDynamicCompiler:
                 </table>
                 '''
 
-            html_out = '<div class="org-structure-layout" id="org-structure-anchor">'
+            html_out = '<div class="org-structure-layout" id="part_4_b_org_structure">'
             html_out += '<h2 class="section-title">PART IV.B: ICT ORGANIZATIONAL STRUCTURE</h2>'
             
             if existing_img:
@@ -1086,7 +1083,7 @@ class ISSPDynamicCompiler:
             fallback_rows_html = f'<tr><td colspan="{total_cols}" style="padding:12px; color:#64748b;">No schedule timeline parameters defined.</td></tr>'
             
             return f'''
-            <div class="schedules-layout" id="schedules-anchor">
+            <div class="schedules-layout" id="part_5_schedules">
                 <h2 class="section-title">
                     Part V: DEVELOPMENT & IMPLEMENTATION PROGRAM SCHEDULES
                 </h2>
@@ -1233,7 +1230,7 @@ class ISSPDynamicCompiler:
             continuing_rows_fallback_html = f'<tr><td colspan="{5 + len(planning_years)}" style="padding:10px; text-align:center; color:#94a3b8;">No continuing SUC operational costs logged.</td></tr>'
 
             return f'''
-            <div class="investments-layout" id="part-v-anchor">
+            <div class="investments-layout" id="part_5_investments">
                 <h2 class="section-title">
                     PART V: COMPREHENSIVE SUMMARY OF INVESTMENTS
                 </h2>
@@ -1291,8 +1288,8 @@ class ISSPDynamicCompiler:
                             <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; width: 22%;">Operational Description</th>
                             <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; width: 20%;">Deployment Target</th>
                             {capex_year_headers}
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: right; width: 10%;">Unit Rate</th>
-                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: right; width: 12%;">Subtotal</th>
+                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: right;">Unit Rate</th>
+                            <th style="padding: 6px; border: 1px solid #cbd5e1; font-size: 8pt; text-align: right;">Subtotal</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1422,7 +1419,7 @@ class ISSPDynamicCompiler:
 
             # Build detailed landscape Annex structure
             annex_p1_html = f'''
-            <div class="annex-master-layout" id="annex-master-anchor" style="page-break-after: always; padding-top: 10px;">
+            <div class="annex-master-layout" id="annex_master" style="page-break-after: always; padding-top: 10px;">
                 <h2 class="section-title">DICT ANNEX A-1: 1.1 Computing Devices & Peripherals (Inventory Baseline)</h2>
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
                     <thead>
@@ -1601,7 +1598,7 @@ class ISSPDynamicCompiler:
                 </div>
                 '''
             return f'''
-            <div class="annex-a3-layout" id="annex-a3-anchor" style="padding-top: 10px;">
+            <div class="annex-a3-layout" id="annex_a3_functions" style="padding-top: 10px;">
                 <h2 class="section-title">
                     ANNEX A-3: CORE OFFICES AND DESCRIPTION OF FUNCTIONS
                 </h2>
@@ -1634,7 +1631,7 @@ class ISSPDynamicCompiler:
                 '''
 
             return f'''
-            <div class="annex-a4-layout" id="annex-a4-anchor" style="padding-top: 10px;">
+            <div class="annex-a4-layout" id="annex_a4_programs" style="padding-top: 10px;">
                 <h2 class="section-title">
                     ANNEX A-4: SUC PROGRAM OFFERINGS & LEGISLATIVE GAA OUTCOMES
                 </h2>
@@ -1701,14 +1698,14 @@ def compile_issp_document(self, metadata: dict):
     Maintains clean database session cleanup and secure string error logging on failure
     to prevent inconsistent metadata serialization issues within the Redis result backend.
     """
-    db = db_session()
+    db = SessionLocal()
     try:
         self.update_state(state="PROGRESS", meta={"progress": 10, "status": "Acquiring database session..."})
         
         issp_period = metadata.get("issp_period_years", "2026-2028")
         
         self.update_state(state="PROGRESS", meta={"progress": 15, "status": "Executing master narrative compliance validations..."})
-        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+        narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
         
         # --------------------------------------------------
         # ISSP COMPLETENESS VALIDATION SUITE (DICT Standard)
@@ -1731,8 +1728,8 @@ def compile_issp_document(self, metadata: dict):
             # Check mandatory diagrams / S3 keys
             if not narrative.conceptual_framework_url:
                 missing_elements.append("Part II.A: Conceptual Framework of IS Interface Diagram (conceptual_framework_url)")
-            if not narrative.network_topology_url:
-                missing_elements.append("Part II.D: CSPC Network Diagram & Core Topology (network_topology_url)")
+            if not narrative.network_diagram_url:
+                missing_elements.append("Part II.D: CSPC Network Diagram & Core Topology (network_diagram_url)")
             if not narrative.system_architecture_url:
                 missing_elements.append("Part II.D: CSPC Unified System Architecture Diagram (system_architecture_url)")
             if not narrative.process_flow_diagram_url:
@@ -1949,7 +1946,7 @@ def compile_issp_document(self, metadata: dict):
             metadata["site_development_plan_url"] = resolve_local_img_path(narrative.site_development_plan_url)
             metadata["fiber_backbone_url"] = resolve_local_img_path(narrative.fiber_backbone_url)
             metadata["system_architecture_url"] = resolve_local_img_path(narrative.system_architecture_url)
-            metadata["network_topology_url"] = resolve_local_img_path(narrative.network_topology_url)
+            metadata["network_diagram_url"] = resolve_local_img_path(narrative.network_diagram_url)
             metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
 
             metadata["transmittal_recipient"] = narrative.transmittal_recipient
@@ -1960,13 +1957,21 @@ def compile_issp_document(self, metadata: dict):
             
             metadata["scope_json"] = narrative.scope_json
 
-            if narrative.network_layout_url:
-                resolved_urls = []
-                for url in narrative.network_layout_url.split(","):
-                    resolved_urls.append(resolve_local_img_path(url.strip()))
-                metadata["network_layout_url"] = ",".join(resolved_urls)
-            else:
-                metadata["network_layout_url"] = None
+            # Map the 9 system-specific network layout paths
+            metadata["net_layout_sias_url"] = resolve_local_img_path(narrative.net_layout_sias_url)
+            metadata["net_layout_library_url"] = resolve_local_img_path(narrative.net_layout_library_url)
+            metadata["net_layout_security_url"] = resolve_local_img_path(narrative.net_layout_security_url)
+            metadata["net_layout_hris_url"] = resolve_local_img_path(narrative.net_layout_hris_url)
+            metadata["net_layout_dms_url"] = resolve_local_img_path(narrative.net_layout_dms_url)
+            metadata["net_layout_supplies_url"] = resolve_local_img_path(narrative.net_layout_supplies_url)
+            metadata["net_layout_budget_url"] = resolve_local_img_path(narrative.net_layout_budget_url)
+            metadata["net_layout_sias_upgrade_url"] = resolve_local_img_path(narrative.net_layout_sias_upgrade_url)
+            metadata["net_layout_extension_url"] = resolve_local_img_path(narrative.net_layout_extension_url)
+
+            # Map core diagrams
+            metadata["b_3_a_ict_org_url"] = resolve_local_img_path(narrative.b_3_a_ict_org_url)
+            metadata["network_diagram_url"] = resolve_local_img_path(narrative.network_diagram_url)
+            metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
             
             if narrative.agency_name:
                 metadata["agency_name"] = narrative.agency_name
@@ -1994,19 +1999,7 @@ def compile_issp_document(self, metadata: dict):
             SubscriptionProposal.is_archived == False
         ).all()
 
-        cold_capex = [p for p in approved_proposals if p.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or p.is_restoring]
-        cold_mooe = [sub for sub in approved_subscriptions if sub.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or sub.is_restoring]
-
-        if cold_capex or cold_mooe:
-            cold_names = [p.item_name for p in cold_capex] + [sub.software_name for sub in cold_mooe]
-            raise ValueError(
-                f"Asynchronous Compilation Aborted: The following assets reside in cold S3 storage and cannot be compiled: {', '.join(cold_names)}. "
-                "Initiate restore requests and verify their storage state is STANDARD prior to recompiling."
-            )
-
-        needs_assessments = db.query(NeedsAssessment).filter(
-            NeedsAssessment.is_archived == False
-        ).all()
+        needs_assessments = db.query(NeedsAssessment).filter(NeedsAssessment.is_archived == False).all()
         
         css_style = f'''
         <style>
@@ -2048,39 +2041,48 @@ def compile_issp_document(self, metadata: dict):
                     border-bottom: 1px solid #cbd5e1;
                     padding-bottom: 8px;
                 }}
-            }}
-            
-            /* Named Page Selectors for Multi-Scoped Resets */
-            @page portrait_section {{
-                size: portrait;
-                margin: 0.75in;
                 @bottom-right {{
                     content: "Page " counter(page) " of " counter(pages);
                     font-family: Arial, sans-serif;
                     font-size: 8pt;
                     color: #64748b;
                 }}
+            }}
+            
+            /* Named Page Selectors for Multi-Scoped Resets */
+            @page cover_page {{
+                size: portrait;
+                margin: 0;
+                @top-left {{ content: none; }}
+                @top-center {{ content: none; }}
+                @top-right {{ content: none; }}
+                @bottom-right {{ content: none; }}
+            }}
+            
+            @page transmittal_page {{
+                size: portrait;
+                margin: 0.75in;
+                @top-left {{ content: none; }}
+                @top-center {{ content: none; }}
+                @top-right {{ content: none; }}
+                @bottom-right {{ content: none; }}
+            }}
+
+            @page portrait_section {{
+                size: portrait;
+                margin: 0.75in;
             }}
 
             @page landscape_section {{
                 size: landscape;
                 margin: 0.5in 0.75in;
-                @bottom-right {{
-                    content: "Page " counter(page) " of " counter(pages);
-                    font-family: Arial, sans-serif;
-                    font-size: 8pt;
-                    color: #64748b;
-                }}
             }}
 
             /* Map named page selectors to class containers */
-            .page-portrait {{
-                page: portrait_section;
-            }}
-
-            .page-landscape {{
-                page: landscape_section;
-            }}
+            .page-cover {{ page: cover_page; }}
+            .page-transmittal {{ page: transmittal_page; }}
+            .page-portrait {{ page: portrait_section; }}
+            .page-landscape {{ page: landscape_section; }}
 
             /* Enforce Explicit Page Breaks */
             .force-page-break {{
@@ -2138,7 +2140,7 @@ def compile_issp_document(self, metadata: dict):
             .full-page-media {{
                 display: block;
                 box-sizing: border-box;
-                padding: 20px;
+                padding: 10px 20px;
                 page-break-inside: avoid;
             }}
             .media-header {{
@@ -2156,8 +2158,11 @@ def compile_issp_document(self, metadata: dict):
             }}
             .image-wrapper img {{
                 max-width: 100%;
+                max-height: 420px; /* Limits height to fit the title and header on the same page */
                 height: auto;
                 object-fit: contain;
+                display: block;
+                margin: 0 auto;
             }}
 
             .page-number-ref-part1::after {{ content: target-counter(#part_1_org_profile, page); }}
@@ -2173,8 +2178,8 @@ def compile_issp_document(self, metadata: dict):
             .page-number-ref-schedules::after {{ content: target-counter(#part_5_schedules, page); }}
             .page-number-ref-investments::after {{ content: target-counter(#part_5_investments, page); }}
             .page-number-ref-annex1::after {{ content: target-counter(#annex_master, page); }}
-            .page-number-ref-annex3::after {{ content: target-counter(#annex_a3_functions, page); }}
-            .page-number-ref-annex4::after {{ content: target-counter(#annex_a4_programs, page); }}
+            .page-number-ref-annexa3::after {{ content: target-counter(#annex_a3_functions, page); }}
+            .page-number-ref-annexa4::after {{ content: target-counter(#annex_a4_programs, page); }}
             
             body {{ 
                 font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
@@ -2266,7 +2271,15 @@ def compile_issp_document(self, metadata: dict):
                 needs_assessments,
                 planning_years
             )
-            orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+            
+            # Map cover and transmittal sheets to custom clean page styles
+            if format_item["schema_id"] == "core_cover":
+                orientation_class = "page-cover"
+            elif format_item["schema_id"] == "core_transmittal":
+                orientation_class = "page-transmittal"
+            else:
+                orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+                
             break_class = "force-page-break" if format_item["force_page_break"] else ""
             
             html_blocks_pass1.append(f'''
@@ -2303,7 +2316,12 @@ def compile_issp_document(self, metadata: dict):
                 needs_assessments,
                 planning_years
             )
-            orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+            if format_item["schema_id"] == "core_cover":
+                orientation_class = "page-cover"
+            elif format_item["schema_id"] == "core_transmittal":
+                orientation_class = "page-transmittal"
+            else:
+                orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
             break_class = "force-page-break" if format_item["force_page_break"] else ""
             
             html_blocks_pass2.append(f'''
@@ -2349,3 +2367,1370 @@ def compile_issp_document(self, metadata: dict):
         raise Exception(f"CompilationError: {str(e)}")
     finally:
         db.close()
+
+
+@celery_app.task(
+    bind=True, 
+    name="app.tasks.pdf_tasks.compile_issp_document",
+    time_limit=310,
+    soft_time_limit=300
+)
+def compile_issp_document(self, metadata: dict):
+    """
+    Orchestrates the dynamic multi-pass layout compilation of the e-ISSP PDF document.
+    Maintains clean database session cleanup and secure string error logging on failure
+    to prevent inconsistent metadata serialization issues within the Redis result backend.
+    """
+    db = SessionLocal()
+    try:
+        self.update_state(state="PROGRESS", meta={"progress": 10, "status": "Acquiring database session..."})
+        
+        issp_period = metadata.get("issp_period_years", "2026-2028")
+        
+        self.update_state(state="PROGRESS", meta={"progress": 15, "status": "Executing master narrative compliance validations..."})
+        narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
+        
+        # --------------------------------------------------
+        # ISSP COMPLETENESS VALIDATION SUITE (DICT Standard)
+        # --------------------------------------------------
+        missing_elements = []
+
+        if not narrative:
+            missing_elements.append("Part I: Master Narrative Record (Not created for this period)")
+        else:
+            # Check mandatory text/HTML chapters
+            if not narrative.mandate_html or len(narrative.mandate_html.strip()) < 10:
+                missing_elements.append("Part I.A.1: SUC Legal Mandate Background (mandate_html)")
+            if not narrative.vision_html or len(narrative.vision_html.strip()) < 5:
+                missing_elements.append("Part I.A.2: SUC Vision Statement (vision_html)")
+            if not narrative.mission_html or len(narrative.mission_html.strip()) < 5:
+                missing_elements.append("Part I.A.2: SUC Mission Statement (mission_html)")
+            if not narrative.present_situation_html or len(narrative.present_situation_html.strip()) < 10:
+                missing_elements.append("Part I.D: Present SUC ICT Situation (present_situation_html)")
+            
+            # Check mandatory diagrams / S3 keys
+            if not narrative.conceptual_framework_url:
+                missing_elements.append("Part II.A: Conceptual Framework of IS Interface Diagram (conceptual_framework_url)")
+            if not narrative.network_diagram_url:
+                missing_elements.append("Part II.D: CSPC Network Diagram & Core Topology (network_diagram_url)")
+            if not narrative.system_architecture_url:
+                missing_elements.append("Part II.D: CSPC Unified System Architecture Diagram (system_architecture_url)")
+            if not narrative.process_flow_diagram_url:
+                missing_elements.append("Part I: ISSP Process Flow Diagram (process_flow_diagram_url)")
+
+            # Verify Planners Team
+            if not narrative.planners_json or len(narrative.planners_json) == 0:
+                missing_elements.append("Part I.B: SUC Designated Planners Profile Matrix (No planners configured)")
+                
+        # Verify relational strategic KRA matrices
+        strategic_concerns_count = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).count()
+        if strategic_concerns_count == 0:
+            missing_elements.append("Part I.E: Strategic Concerns for ICT Use Matrix (No concerns registered)")
+
+        # Verify Annex A-3 Core Offices Functions
+        core_offices_count = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).count()
+        if core_offices_count == 0:
+            missing_elements.append("Annex A-3: Core SUC Offices Functions Directory (No offices registered)")
+
+        # Verify PMF framework matrix targets
+        pmf_metrics_count = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).count()
+        if pmf_metrics_count == 0:
+            missing_elements.append("Part III.C: Performance Measurement Framework Matrix (No metrics configured)")
+
+        # Abort compilation if compliance elements are missing
+        if missing_elements:
+            error_msg = "ISSP Compilation Blocked: The following mandatory compliance parts are missing or incomplete:\n" + \
+                        "\n".join(f"  - {element}" for element in missing_elements)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+            
+        self.update_state(state="PROGRESS", meta={"progress": 25, "status": "Fetching authored Part I-V narratives..."})
+        
+        issp_period_from = narrative.issp_period_from if narrative and narrative.issp_period_from else None
+        issp_period_to = narrative.issp_period_to if narrative and narrative.issp_period_to else None
+        
+        if issp_period_from and issp_period_to:
+            planning_years = [str(y) for y in range(issp_period_from, issp_period_to + 1)]
+        else:
+            try:
+                parts = issp_period.split("-")
+                planning_years = [str(y) for y in range(int(parts[0]), int(parts[1]) + 1)]
+            except Exception:
+                planning_years = ["2026", "2027", "2028"]
+
+        # --------------------------------------------------
+        # Extract Database-Backed Dynamic Modules
+        # --------------------------------------------------
+        self.update_state(state="PROGRESS", meta={"progress": 35, "status": "Synchronizing glossary, campuses, and survey databases..."})
+        
+        campuses = db.query(Campus).all()
+        campuses_data = []
+        for campus in campuses:
+            depts = db.query(Department).filter(Department.campus_id == campus.id).all()
+            campus_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).\
+                join(Department).filter(Department.campus_id == campus.id).scalar() or Decimal("0.00")
+            
+            campus_planners = []
+            if narrative and narrative.planners_json:
+                campus_planners = [p for p in narrative.planners_json]
+                
+            campuses_data.append({
+                "name": campus.name,
+                "location": campus.location,
+                "code": campus.code,
+                "departments_count": len(depts),
+                "total_spent": float(campus_spent),
+                "planners": campus_planners
+            })
+        metadata["campuses"] = campuses_data
+
+        degree_offerings = db.query(DegreeOffering).order_by(DegreeOffering.department_name.asc()).all()
+        metadata["degree_offerings"] = [
+            {
+                "department": d.department_name,
+                "degree": d.degree_name,
+                "level": d.level,
+                "accreditation": d.accreditation_status
+            } for d in degree_offerings
+        ]
+
+        gaa_performance_metrics = db.query(GaaPerformance).all()
+        metadata["gaa_performance"] = [
+            {
+                "indicator": m.indicator_name,
+                "target": m.target_value
+            } for m in gaa_performance_metrics
+        ]
+
+        strategic_concerns_db = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).all()
+        metadata["strategic_concerns_json"] = [
+            {
+                "key_result_area": c.mfo,
+                "concern_description": c.critical_system,
+                "intended_solution": f"Problems: {c.problems} | Solution: {c.intended_use}"
+            } for c in strategic_concerns_db
+        ]
+
+        glossary_db = db.query(GlossaryTerm).order_by(GlossaryTerm.term.asc()).all()
+        metadata["glossary_terms"] = [{"term": g.term, "definition": g.definition} for g in glossary_db]
+
+        instructions_db = db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
+        metadata["general_instructions"] = [{"step_number": i.step_number, "instruction_text": i.instruction_text} for i in instructions_db]
+
+        capacities_db = db.query(ServerCapacityTrack).all()
+        metadata["server_capacities_json"] = [
+            {"tier": r.capacity_tier, "location": r.location, "quantity": r.quantity}
+            for r in capacities_db
+        ]
+
+        os_census_db = db.query(ClientOsCensus).all()
+        metadata["os_census_json"] = [
+            {"os_name": r.os_name, "workstations_count": r.workstations_count, "servers_count": r.servers_count}
+            for r in os_census_db
+        ]
+
+        software_census_db = db.query(OfficeSoftwareCensus).all()
+        metadata["office_software_census_json"] = [
+            {"software_name": r.software_name, "license_count": r.license_count}
+            for r in software_census_db
+        ]
+
+        core_offices_db = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).all()
+        metadata["core_offices_json"] = [
+            {
+                "office_name": o.office_name,
+                "division": o.division,
+                "description": o.description
+            } for o in core_offices_db
+        ]
+
+        cross_projects_db = db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
+        metadata["cross_projects_json"] = [
+            {
+                "name": cp.name,
+                "objectives": cp.objectives,
+                "duration": cp.duration,
+                "deliverables": cp.deliverables,
+                "lead_agency": cp.lead_agency,
+                "implementing_agencies": cp.implementing_agencies
+            } for cp in cross_projects_db
+        ]
+
+        pmf_metrics_db = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
+        metadata["pmf_matrix_json"] = [
+            {
+                "project_title": pm.project_title,
+                "result_hierarchy": pm.result_hierarchy,
+                "indicator": pm.indicator,
+                "baseline": pm.baseline,
+                "target": pm.target,
+                "collection_method": pm.collection_method,
+                "responsibility": pm.responsibility
+            } for pm in pmf_metrics_db
+        ]
+
+        annual_costs_db = db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.issp_period == issp_period).all()
+        metadata["annual_costs_breakdown"] = [
+            {
+                "project_key": cb.project_key,
+                "cost_type": cb.cost_type,
+                "item_description": cb.item_description,
+                "unit_cost": float(cb.unit_cost),
+                "yearly_quantities": cb.yearly_quantities
+            } for cb in annual_costs_db if cb.cost_type == "Continuing"
+        ]
+
+        staff_positions_db = db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
+        metadata["staff_positions_json"] = [
+            {
+                "position_title": sp.position_title,
+                "status": sp.status,
+                "count": sp.count
+            } for sp in staff_positions_db
+        ]
+
+        if narrative:
+            metadata["agency_name"] = narrative.agency_name
+            metadata["agency_mandate"] = narrative.mandate_html
+            metadata["agency_vision"] = narrative.vision_html
+            metadata["agency_mission"] = narrative.mission_html
+            metadata["present_situation_html"] = narrative.present_situation_html
+            metadata["systems_json"] = narrative.systems_json
+            metadata["databases_json"] = narrative.databases_json
+            metadata["internal_projects_json"] = narrative.internal_projects_json
+            metadata["planners_json"] = narrative.planners_json
+            metadata["manpower_json"] = narrative.manpower_json
+            
+            metadata["annual_ict_budget"] = Decimal(str(narrative.annual_ict_budget)) if narrative.annual_ict_budget is not None else Decimal("0.00")
+            
+            metadata["existing_ict_org_url"] = narrative.existing_ict_org_url
+            metadata["proposed_ict_org_url"] = narrative.proposed_ict_org_url
+            metadata["placement_ict_org_url"] = narrative.placement_ict_org_url
+
+            metadata["mithi_network_profile"] = narrative.mithi_network_profile
+            metadata["mithi_special_solutions"] = narrative.mithi_special_solutions
+            metadata["mithi_data_center"] = narrative.mithi_data_center
+            metadata["mithi_hardware_inventory"] = narrative.mithi_hardware_inventory
+            
+            metadata["mithi_security_dr"] = narrative.mithi_security_dr
+            metadata["mithi_data_archiving"] = narrative.mithi_data_archiving
+            metadata["mithi_ict_issues"] = narrative.mithi_ict_issues
+
+            metadata["implementation_schedules"] = narrative.implementation_schedules
+            
+            metadata["agency_logo_url"] = resolve_local_img_path(narrative.agency_logo_url or "https://upload.wikimedia.org/wikipedia/en/thumb/8/8e/Camarines_Sur_Polytechnic_Colleges_logo.png/220px-Camarines_Sur_Polytechnic_Colleges_logo.png")
+            metadata["org_chart_url"] = resolve_local_img_path(narrative.org_chart_url)
+            metadata["conceptual_framework_url"] = resolve_local_img_path(narrative.conceptual_framework_url)
+            metadata["functional_interface_url"] = resolve_local_img_path(narrative.functional_interface_url)
+            metadata["existing_ict_org_url"] = resolve_local_img_path(narrative.existing_ict_org_url)
+            metadata["proposed_ict_org_url"] = resolve_local_img_path(narrative.proposed_ict_org_url)
+            metadata["placement_ict_org_url"] = resolve_local_img_path(narrative.placement_ict_org_url)
+
+            metadata["site_development_plan_url"] = resolve_local_img_path(narrative.site_development_plan_url)
+            metadata["fiber_backbone_url"] = resolve_local_img_path(narrative.fiber_backbone_url)
+            metadata["system_architecture_url"] = resolve_local_img_path(narrative.system_architecture_url)
+            metadata["network_diagram_url"] = resolve_local_img_path(narrative.network_diagram_url)
+            metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
+
+            metadata["transmittal_recipient"] = narrative.transmittal_recipient
+            metadata["transmittal_recipient_title"] = narrative.transmittal_recipient_title
+            metadata["transmittal_recipient_agency"] = narrative.transmittal_recipient_agency
+            metadata["transmittal_recipient_address"] = narrative.transmittal_recipient_address
+            metadata["transmittal_date"] = narrative.transmittal_date
+            
+            metadata["scope_json"] = narrative.scope_json
+
+            # Map the 9 system-specific network layout paths
+            metadata["net_layout_sias_url"] = resolve_local_img_path(narrative.net_layout_sias_url)
+            metadata["net_layout_library_url"] = resolve_local_img_path(narrative.net_layout_library_url)
+            metadata["net_layout_security_url"] = resolve_local_img_path(narrative.net_layout_security_url)
+            metadata["net_layout_hris_url"] = resolve_local_img_path(narrative.net_layout_hris_url)
+            metadata["net_layout_dms_url"] = resolve_local_img_path(narrative.net_layout_dms_url)
+            metadata["net_layout_supplies_url"] = resolve_local_img_path(narrative.net_layout_supplies_url)
+            metadata["net_layout_budget_url"] = resolve_local_img_path(narrative.net_layout_budget_url)
+            metadata["net_layout_sias_upgrade_url"] = resolve_local_img_path(narrative.net_layout_sias_upgrade_url)
+            metadata["net_layout_extension_url"] = resolve_local_img_path(narrative.net_layout_extension_url)
+
+            # Map core diagrams
+            metadata["b_3_a_ict_org_url"] = resolve_local_img_path(narrative.b_3_a_ict_org_url)
+            metadata["network_diagram_url"] = resolve_local_img_path(narrative.network_diagram_url)
+            metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
+            
+            if narrative.agency_name:
+                metadata["agency_name"] = narrative.agency_name
+            if narrative.signatory_prepared_by:
+                metadata["signatory_prepared_by"] = narrative.signatory_prepared_by
+            if narrative.signatory_approved_by:
+                metadata["signatory_approved_by"] = narrative.signatory_approved_by
+
+        self.update_state(state="PROGRESS", meta={"progress": 40, "status": "Compiling approved CapEx and MOOE items..."})
+        
+        approved_proposals = db.query(Proposal).options(
+            joinedload(Proposal.department),
+            joinedload(Proposal.deployments_relation)
+        ).filter(
+            Proposal.status == ProposalStatus.APPROVED,
+            Proposal.issp_period == issp_period,
+            Proposal.is_archived == False
+        ).all()
+
+        approved_subscriptions = db.query(SubscriptionProposal).options(
+            joinedload(SubscriptionProposal.department)
+        ).filter(
+            SubscriptionProposal.status == ProposalStatus.APPROVED,
+            SubscriptionProposal.issp_period == issp_period,
+            SubscriptionProposal.is_archived == False
+        ).all()
+
+        needs_assessments = db.query(NeedsAssessment).filter(NeedsAssessment.is_archived == False).all()
+        
+        css_style = f'''
+        <style>
+            @page {{ 
+                margin: 0.75in;
+                @top-left {{
+                    content: "";
+                    background-image: url("{metadata.get("agency_logo_url")}");
+                    background-size: contain;
+                    background-repeat: no-repeat;
+                    background-position: left center;
+                    height: 40px;
+                    width: 40px;
+                    border-bottom: 1px solid #cbd5e1;
+                    padding-bottom: 8px;
+                }}
+                @top-center {{
+                    content: "Republic of the Philippines\\A CAMARINES SUR POLYTECHNIC COLLEGES\\A Nabua, Camarines Sur";
+                    font-family: Arial, sans-serif;
+                    font-size: 7.5pt;
+                    font-weight: bold;
+                    color: #475569;
+                    text-align: left;
+                    white-space: pre-wrap;
+                    line-height: 1.3;
+                    padding-left: 8px;
+                    border-bottom: 1px solid #cbd5e1;
+                    padding-bottom: 8px;
+                }}
+                @top-right {{
+                    content: "INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\\A {metadata.get("issp_period_years", "2026-2028")}";
+                    font-family: Arial, sans-serif;
+                    font-size: 8pt;
+                    font-weight: bold;
+                    color: #1e3a8a;
+                    text-align: right;
+                    white-space: pre-wrap;
+                    line-height: 1.3;
+                    border-bottom: 1px solid #cbd5e1;
+                    padding-bottom: 8px;
+                }}
+                @bottom-right {{
+                    content: "Page " counter(page) " of " counter(pages);
+                    font-family: Arial, sans-serif;
+                    font-size: 8pt;
+                    color: #64748b;
+                }}
+            }}
+            
+            /* Named Page Selectors for Multi-Scoped Resets */
+            @page cover_page {{
+                size: portrait;
+                margin: 0;
+                @top-left {{ content: none; }}
+                @top-center {{ content: none; }}
+                @top-right {{ content: none; }}
+                @bottom-right {{ content: none; }}
+            }}
+            
+            @page transmittal_page {{
+                size: portrait;
+                margin: 0.75in;
+                @top-left {{ content: none; }}
+                @top-center {{ content: none; }}
+                @top-right {{ content: none; }}
+                @bottom-right {{ content: none; }}
+            }}
+
+            @page portrait_section {{
+                size: portrait;
+                margin: 0.75in;
+            }}
+
+            @page landscape_section {{
+                size: landscape;
+                margin: 0.5in 0.75in;
+            }}
+
+            /* Map named page selectors to class containers */
+            .page-cover {{ page: cover_page; }}
+            .page-transmittal {{ page: transmittal_page; }}
+            .page-portrait {{ page: portrait_section; }}
+            .page-landscape {{ page: landscape_section; }}
+
+            /* Enforce Explicit Page Breaks */
+            .force-page-break {{
+                page-break-before: always;
+                break-before: page;
+            }}
+
+            /* running header boundary pushing */
+            .content-wrapper {{
+                padding-top: 80px;
+            }}
+
+            /* Table of Contents Restructured Flexbox Layout with Dot Leaders */
+            .toc-list {{
+                list-style: none;
+                padding: 0;
+                margin: 0;
+            }}
+            .toc-list li {{
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-end;
+                margin-bottom: 8px;
+                font-size: 10pt;
+                line-height: 1.2;
+            }}
+            .indent-0 {{ padding-left: 0; }}
+            .indent-1 {{ padding-left: 20px; }}
+            .indent-2 {{ padding-left: 40px; }}
+            .indent-3 {{ padding-left: 60px; }}
+            
+            .toc-text {{
+                flex-shrink: 0;
+                max-width: 70%;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }}
+            .toc-dots {{
+                flex-grow: 1;
+                border-bottom: 1px dotted #444;
+                margin: 0 10px;
+                position: relative;
+                top: -4px;
+            }}
+            .toc-num {{
+                flex-shrink: 0;
+                text-align: right;
+                min-width: 30px;
+                font-weight: bold;
+                color: #1e3a8a;
+            }}
+
+            /* Image Sizing and Aspect Ratio Preserving Containers */
+            .full-page-media {{
+                display: block;
+                box-sizing: border-box;
+                padding: 10px 20px;
+                page-break-inside: avoid;
+            }}
+            .media-header {{
+                font-size: 14pt;
+                text-transform: uppercase;
+                color: #1e3a8a;
+                border-bottom: 2px solid #1e3a8a;
+                padding-bottom: 5px;
+                margin-bottom: 20px;
+            }}
+            .image-wrapper {{
+                display: block;
+                text-align: center;
+                width: 100%;
+            }}
+            .image-wrapper img {{
+                max-width: 100%;
+                max-height: 420px; /* Limits height to fit the title and header on the same page */
+                height: auto;
+                object-fit: contain;
+                display: block;
+                margin: 0 auto;
+            }}
+
+            .page-number-ref-part1::after {{ content: target-counter(#part_1_org_profile, page); }}
+            .page-number-ref-part1b::after {{ content: target-counter(#part_1_b_manpower, page); }}
+            .page-number-ref-part1c::after {{ content: target-counter(#core_process_flow, page); }}
+            .page-number-ref-part1d::after {{ content: target-counter(#part_1_org_profile, page); }}
+            .page-number-ref-part1e::after {{ content: target-counter(#part_1_e_concerns, page); }}
+            .page-number-ref-part2::after {{ content: target-counter(#part_2_is_strategy, page); }}
+            .page-number-ref-part2-cards::after {{ content: target-counter(#part-2-b-c-databases, page); }}
+            .page-number-ref-part3::after {{ content: target-counter(#part_3_ict_projects, page); }}
+            .page-number-ref-pmf::after {{ content: target-counter(#part_3_ict_projects, page); }}
+            .page-number-ref-part4::after {{ content: target-counter(#part_4_b_org_structure, page); }}
+            .page-number-ref-schedules::after {{ content: target-counter(#part_5_schedules, page); }}
+            .page-number-ref-investments::after {{ content: target-counter(#part_5_investments, page); }}
+            .page-number-ref-annex1::after {{ content: target-counter(#annex_master, page); }}
+            .page-number-ref-annexa3::after {{ content: target-counter(#annex_a3_functions, page); }}
+            .page-number-ref-annexa4::after {{ content: target-counter(#annex_a4_programs, page); }}
+            
+            body {{ 
+                font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
+                line-height: 1.5; 
+                color: #334155; 
+                margin: 0; 
+                padding: 0; 
+                background-color: #ffffff;
+            }}
+            
+            h1, h2, h3, h4, h5 {{ color: #0f172a; margin-top: 0; }}
+
+            .section-title {{
+                font-size: 13pt; 
+                color: #1e3a8a; 
+                border-bottom: 1px solid #1e3a8a; 
+                padding-bottom: 4px; 
+                margin-top: 10px;
+                margin-bottom: 15px; 
+                text-transform: uppercase; 
+                font-weight: bold;
+                letter-spacing: 0.5px;
+            }}
+
+            .sub-section-title {{
+                color: #1e3a8a; 
+                font-size: 10pt; 
+                margin-top: 15px; 
+                margin-bottom: 8px; 
+                text-transform: uppercase; 
+                font-weight: bold;
+                letter-spacing: 0.3px;
+            }}
+            
+            table {{ 
+                width: 100%; 
+                border-collapse: collapse; 
+                margin-bottom: 15px; 
+                page-break-inside: avoid; 
+            }}
+            
+            th {{ 
+                background-color: #f0f7ff; 
+                color: #1e3a8a; 
+                padding: 6px 8px; 
+                font-size: 8pt; 
+                text-align: left; 
+                text-transform: uppercase; 
+                border: 1px solid #cbd5e1; 
+            }}
+            
+            td {{ 
+                padding: 6px 8px; 
+                border: 1px solid #cbd5e1; 
+                font-size: 8pt; 
+                color: #334155; 
+            }}
+            
+            tr {{ page-break-inside: avoid; }}
+            th {{ text-transform: uppercase; letter-spacing: 0.5px; }}
+        </style>
+        '''
+
+        try:
+            from weasyprint import HTML
+        except OSError as os_err:
+            logger.critical(f"CRITICAL HOST SYSTEM OS FAILURE: weasyprint shared library dependencies are missing: {str(os_err)}")
+            raise RuntimeError(
+                "PDF Compilation Engine cannot boot: Host OS shared libraries (libpango, libcairo) are missing. "
+                "Please run: 'sudo apt-get install libpango-1.0-0 libcairo2 libpangoft2-1.0-0' to resolve."
+            ) from os_err
+        except Exception as generic_err:
+            logger.critical(f"Failed to initialize weasyprint compilation libraries: {str(generic_err)}")
+            raise RuntimeError("PDF compilation engine initialization failed.") from generic_err
+
+        # ==========================================================
+        # TREE TRAVERSAL & COMPILATION FLOW
+        # ==========================================================
+        self.update_state(state="PROGRESS", meta={"progress": 50, "status": "Executing Pass 1: Calculating layout geometry & final page count..."})
+
+        # Query all standard sections matching the structure of the official CSPC guide format
+        html_blocks_pass1 = []
+        for format_item in STANDARD_ISSP_FORMAT:
+            rendered = ISSPDynamicCompiler.render_section(
+                format_item["schema_id"], 
+                metadata, 
+                approved_proposals, 
+                approved_subscriptions, 
+                needs_assessments,
+                planning_years
+            )
+            
+            # Map cover and transmittal sheets to custom clean page styles to remove running headers/footers
+            if format_item["schema_id"] == "core_cover":
+                orientation_class = "page-cover"
+            elif format_item["schema_id"] == "core_transmittal":
+                orientation_class = "page-transmittal"
+            else:
+                orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+                
+            break_class = "force-page-break" if format_item["force_page_break"] else ""
+            
+            html_blocks_pass1.append(f'''
+            <div class="{orientation_class} {break_class} content-wrapper" id="{format_item["schema_id"]}">
+                {rendered}
+            </div>
+            ''')
+        combined_body_pass1 = "".join(html_blocks_pass1)
+
+        html_raw_pass1 = f"<html><head>{css_style}</head><body>{combined_body_pass1}</body></html>"
+        
+        html_doc_pass1 = HTML(string=html_raw_pass1, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))
+        rendered_doc_pass1 = html_doc_pass1.render()
+        
+        core_pages = []
+        for p in rendered_doc_pass1.pages:
+            p_name = getattr(p, "page_name", getattr(p, "_page_name", None))
+            if p_name in ["portrait_section", "landscape_section"]:
+                core_pages.append(p)
+                
+        total_page_count = len(core_pages) if core_pages else len(rendered_doc_pass1.pages)
+
+        self.update_state(state="PROGRESS", meta={"progress": 80, "status": f"Executing Pass 2: Drawing table layouts for {total_page_count} certified pages..."})
+        metadata["computed_total_pages"] = str(total_page_count)
+
+        # Execution Pass 2
+        html_blocks_pass2 = []
+        for format_item in STANDARD_ISSP_FORMAT:
+            rendered = ISSPDynamicCompiler.render_section(
+                format_item["schema_id"], 
+                metadata, 
+                approved_proposals, 
+                approved_subscriptions, 
+                needs_assessments,
+                planning_years
+            )
+            if format_item["schema_id"] == "core_cover":
+                orientation_class = "page-cover"
+            elif format_item["schema_id"] == "core_transmittal":
+                orientation_class = "page-transmittal"
+            else:
+                orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+            break_class = "force-page-break" if format_item["force_page_break"] else ""
+            
+            html_blocks_pass2.append(f'''
+            <div class="{orientation_class} {break_class} content-wrapper" id="{format_item["schema_id"]}">
+                {rendered}
+            </div>
+            ''')
+        combined_body_pass2 = "".join(html_blocks_pass2)
+
+        html_raw_pass2 = f"<html><head>{css_style}</head><body>{combined_body_pass2}</body></html>"
+
+        html_doc_pass2 = HTML(string=html_raw_pass2, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))
+        pdf_buffer = io.BytesIO()
+        html_doc_pass2.write_pdf(target=pdf_buffer)
+        
+        self.update_state(state="PROGRESS", meta={"progress": 95, "status": "Uploading output binary to secure storage..."})
+        file_bytes = pdf_buffer.getvalue()
+        
+        issp_id = metadata.get("issp_id", "ISSP-COMPILATION-DEFAULT")
+        storage_client.upload_compiled_pdf(file_bytes, issp_id)
+        
+        download_url = storage_client.generate_download_url(storage_client.get_generated_pdf_key(issp_id))
+        
+        return {
+            "status": "SUCCESS",
+            "file_url": download_url,
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+    except SoftTimeLimitExceeded as timeout_exc:
+        db.rollback()
+        logger.error(f"Celery SoftTimeLimitExceeded hit during PDF compilation: {str(timeout_exc)}")
+        raise Exception("CompilationError: PDF generation soft timeout limit exceeded.")
+        
+    except ValueError as validation_exc:
+        db.rollback()
+        logger.warning(f"ISSP Compliance Validation Block: {str(validation_exc)}")
+        raise Exception(f"ValidationError: {str(validation_exc)}")
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Async dynamic compilation failed: {str(e)}", exc_info=True)
+        raise Exception(f"CompilationError: {str(e)}")
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True, 
+    name="app.tasks.pdf_tasks.compile_issp_document",
+    time_limit=310,
+    soft_time_limit=300
+)
+def compile_issp_document(self, metadata: dict):
+    """
+    Orchestrates the dynamic multi-pass layout compilation of the e-ISSP PDF document.
+    Maintains clean database session cleanup and secure string error logging on failure
+    to prevent inconsistent metadata serialization issues within the Redis result backend.
+    """
+    db = SessionLocal()
+    try:
+        self.update_state(state="PROGRESS", meta={"progress": 10, "status": "Acquiring database session..."})
+        
+        issp_period = metadata.get("issp_period_years", "2026-2028")
+        
+        self.update_state(state="PROGRESS", meta={"progress": 15, "status": "Executing master narrative compliance validations..."})
+        narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
+        
+        # --------------------------------------------------
+        # ISSP COMPLETENESS VALIDATION SUITE (DICT Standard)
+        # --------------------------------------------------
+        missing_elements = []
+
+        if not narrative:
+            missing_elements.append("Part I: Master Narrative Record (Not created for this period)")
+        else:
+            # Check mandatory text/HTML chapters
+            if not narrative.mandate_html or len(narrative.mandate_html.strip()) < 10:
+                missing_elements.append("Part I.A.1: SUC Legal Mandate Background (mandate_html)")
+            if not narrative.vision_html or len(narrative.vision_html.strip()) < 5:
+                missing_elements.append("Part I.A.2: SUC Vision Statement (vision_html)")
+            if not narrative.mission_html or len(narrative.mission_html.strip()) < 5:
+                missing_elements.append("Part I.A.2: SUC Mission Statement (mission_html)")
+            if not narrative.present_situation_html or len(narrative.present_situation_html.strip()) < 10:
+                missing_elements.append("Part I.D: Present SUC ICT Situation (present_situation_html)")
+            
+            # Check mandatory diagrams / S3 keys
+            if not narrative.conceptual_framework_url:
+                missing_elements.append("Part II.A: Conceptual Framework of IS Interface Diagram (conceptual_framework_url)")
+            if not narrative.network_diagram_url:
+                missing_elements.append("Part II.D: CSPC Network Diagram & Core Topology (network_diagram_url)")
+            if not narrative.system_architecture_url:
+                missing_elements.append("Part II.D: CSPC Unified System Architecture Diagram (system_architecture_url)")
+            if not narrative.process_flow_diagram_url:
+                missing_elements.append("Part I: ISSP Process Flow Diagram (process_flow_diagram_url)")
+
+            # Verify Planners Team
+            if not narrative.planners_json or len(narrative.planners_json) == 0:
+                missing_elements.append("Part I.B: SUC Designated Planners Profile Matrix (No planners configured)")
+                
+        # Verify relational strategic KRA matrices
+        strategic_concerns_count = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).count()
+        if strategic_concerns_count == 0:
+            missing_elements.append("Part I.E: Strategic Concerns for ICT Use Matrix (No concerns registered)")
+
+        # Verify Annex A-3 Core Offices Functions
+        core_offices_count = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).count()
+        if core_offices_count == 0:
+            missing_elements.append("Annex A-3: Core SUC Offices Functions Directory (No offices registered)")
+
+        # Verify PMF framework matrix targets
+        pmf_metrics_count = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).count()
+        if pmf_metrics_count == 0:
+            missing_elements.append("Part III.C: Performance Measurement Framework Matrix (No metrics configured)")
+
+        # Abort compilation if compliance elements are missing
+        if missing_elements:
+            error_msg = "ISSP Compilation Blocked: The following mandatory compliance parts are missing or incomplete:\n" + \
+                        "\n".join(f"  - {element}" for element in missing_elements)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+            
+        self.update_state(state="PROGRESS", meta={"progress": 25, "status": "Fetching authored Part I-V narratives..."})
+        
+        issp_period_from = narrative.issp_period_from if narrative and narrative.issp_period_from else None
+        issp_period_to = narrative.issp_period_to if narrative and narrative.issp_period_to else None
+        
+        if issp_period_from and issp_period_to:
+            planning_years = [str(y) for y in range(issp_period_from, issp_period_to + 1)]
+        else:
+            try:
+                parts = issp_period.split("-")
+                planning_years = [str(y) for y in range(int(parts[0]), int(parts[1]) + 1)]
+            except Exception:
+                planning_years = ["2026", "2027", "2028"]
+
+        # --------------------------------------------------
+        # Extract Database-Backed Dynamic Modules
+        # --------------------------------------------------
+        self.update_state(state="PROGRESS", meta={"progress": 35, "status": "Synchronizing glossary, campuses, and survey databases..."})
+        
+        campuses = db.query(Campus).all()
+        campuses_data = []
+        for campus in campuses:
+            depts = db.query(Department).filter(Department.campus_id == campus.id).all()
+            campus_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).\
+                join(Department).filter(Department.campus_id == campus.id).scalar() or Decimal("0.00")
+            
+            campus_planners = []
+            if narrative and narrative.planners_json:
+                campus_planners = [p for p in narrative.planners_json]
+                
+            campuses_data.append({
+                "name": campus.name,
+                "location": campus.location,
+                "code": campus.code,
+                "departments_count": len(depts),
+                "total_spent": float(campus_spent),
+                "planners": campus_planners
+            })
+        metadata["campuses"] = campuses_data
+
+        degree_offerings = db.query(DegreeOffering).order_by(DegreeOffering.department_name.asc()).all()
+        metadata["degree_offerings"] = [
+            {
+                "department": d.department_name,
+                "degree": d.degree_name,
+                "level": d.level,
+                "accreditation": d.accreditation_status
+            } for d in degree_offerings
+        ]
+
+        gaa_performance_metrics = db.query(GaaPerformance).all()
+        metadata["gaa_performance"] = [
+            {
+                "indicator": m.indicator_name,
+                "target": m.target_value
+            } for m in gaa_performance_metrics
+        ]
+
+        strategic_concerns_db = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).all()
+        metadata["strategic_concerns_json"] = [
+            {
+                "key_result_area": c.mfo,
+                "concern_description": c.critical_system,
+                "intended_solution": f"Problems: {c.problems} | Solution: {c.intended_use}"
+            } for c in strategic_concerns_db
+        ]
+
+        glossary_db = db.query(GlossaryTerm).order_by(GlossaryTerm.term.asc()).all()
+        metadata["glossary_terms"] = [{"term": g.term, "definition": g.definition} for g in glossary_db]
+
+        instructions_db = db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
+        metadata["general_instructions"] = [{"step_number": i.step_number, "instruction_text": i.instruction_text} for i in instructions_db]
+
+        capacities_db = db.query(ServerCapacityTrack).all()
+        metadata["server_capacities_json"] = [
+            {"tier": r.capacity_tier, "location": r.location, "quantity": r.quantity}
+            for r in capacities_db
+        ]
+
+        os_census_db = db.query(ClientOsCensus).all()
+        metadata["os_census_json"] = [
+            {"os_name": r.os_name, "workstations_count": r.workstations_count, "servers_count": r.servers_count}
+            for r in os_census_db
+        ]
+
+        software_census_db = db.query(OfficeSoftwareCensus).all()
+        metadata["office_software_census_json"] = [
+            {"software_name": r.software_name, "license_count": r.license_count}
+            for r in software_census_db
+        ]
+
+        core_offices_db = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).all()
+        metadata["core_offices_json"] = [
+            {
+                "office_name": o.office_name,
+                "division": o.division,
+                "description": o.description
+            } for o in core_offices_db
+        ]
+
+        cross_projects_db = db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
+        metadata["cross_projects_json"] = [
+            {
+                "name": cp.name,
+                "objectives": cp.objectives,
+                "duration": cp.duration,
+                "deliverables": cp.deliverables,
+                "lead_agency": cp.lead_agency,
+                "implementing_agencies": cp.implementing_agencies
+            } for cp in cross_projects_db
+        ]
+
+        pmf_metrics_db = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
+        metadata["pmf_matrix_json"] = [
+            {
+                "project_title": pm.project_title,
+                "result_hierarchy": pm.result_hierarchy,
+                "indicator": pm.indicator,
+                "baseline": pm.baseline,
+                "target": pm.target,
+                "collection_method": pm.collection_method,
+                "responsibility": pm.responsibility
+            } for pm in pmf_metrics_db
+        ]
+
+        annual_costs_db = db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.issp_period == issp_period).all()
+        metadata["annual_costs_breakdown"] = [
+            {
+                "project_key": cb.project_key,
+                "cost_type": cb.cost_type,
+                "item_description": cb.item_description,
+                "unit_cost": float(cb.unit_cost),
+                "yearly_quantities": cb.yearly_quantities
+            } for cb in annual_costs_db if cb.cost_type == "Continuing"
+        ]
+
+        staff_positions_db = db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
+        metadata["staff_positions_json"] = [
+            {
+                "position_title": sp.position_title,
+                "status": sp.status,
+                "count": sp.count
+            } for sp in staff_positions_db
+        ]
+
+        if narrative:
+            metadata["agency_name"] = narrative.agency_name
+            metadata["agency_mandate"] = narrative.mandate_html
+            metadata["agency_vision"] = narrative.vision_html
+            metadata["agency_mission"] = narrative.mission_html
+            metadata["present_situation_html"] = narrative.present_situation_html
+            metadata["systems_json"] = narrative.systems_json
+            metadata["databases_json"] = narrative.databases_json
+            metadata["internal_projects_json"] = narrative.internal_projects_json
+            metadata["planners_json"] = narrative.planners_json
+            metadata["manpower_json"] = narrative.manpower_json
+            
+            metadata["annual_ict_budget"] = Decimal(str(narrative.annual_ict_budget)) if narrative.annual_ict_budget is not None else Decimal("0.00")
+            
+            metadata["existing_ict_org_url"] = narrative.existing_ict_org_url
+            metadata["proposed_ict_org_url"] = narrative.proposed_ict_org_url
+            metadata["placement_ict_org_url"] = narrative.placement_ict_org_url
+
+            metadata["mithi_network_profile"] = narrative.mithi_network_profile
+            metadata["mithi_special_solutions"] = narrative.mithi_special_solutions
+            metadata["mithi_data_center"] = narrative.mithi_data_center
+            metadata["mithi_hardware_inventory"] = narrative.mithi_hardware_inventory
+            
+            metadata["mithi_security_dr"] = narrative.mithi_security_dr
+            metadata["mithi_data_archiving"] = narrative.mithi_data_archiving
+            metadata["mithi_ict_issues"] = narrative.mithi_ict_issues
+
+            metadata["implementation_schedules"] = narrative.implementation_schedules
+            
+            metadata["agency_logo_url"] = resolve_local_img_path(narrative.agency_logo_url or "https://upload.wikimedia.org/wikipedia/en/thumb/8/8e/Camarines_Sur_Polytechnic_Colleges_logo.png/220px-Camarines_Sur_Polytechnic_Colleges_logo.png")
+            metadata["org_chart_url"] = resolve_local_img_path(narrative.org_chart_url)
+            metadata["conceptual_framework_url"] = resolve_local_img_path(narrative.conceptual_framework_url)
+            metadata["functional_interface_url"] = resolve_local_img_path(narrative.functional_interface_url)
+            metadata["existing_ict_org_url"] = resolve_local_img_path(narrative.existing_ict_org_url)
+            metadata["proposed_ict_org_url"] = resolve_local_img_path(narrative.proposed_ict_org_url)
+            metadata["placement_ict_org_url"] = resolve_local_img_path(narrative.placement_ict_org_url)
+
+            metadata["site_development_plan_url"] = resolve_local_img_path(narrative.site_development_plan_url)
+            metadata["fiber_backbone_url"] = resolve_local_img_path(narrative.fiber_backbone_url)
+            metadata["system_architecture_url"] = resolve_local_img_path(narrative.system_architecture_url)
+            metadata["network_diagram_url"] = resolve_local_img_path(narrative.network_diagram_url)
+            metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
+
+            metadata["transmittal_recipient"] = narrative.transmittal_recipient
+            metadata["transmittal_recipient_title"] = narrative.transmittal_recipient_title
+            metadata["transmittal_recipient_agency"] = narrative.transmittal_recipient_agency
+            metadata["transmittal_recipient_address"] = narrative.transmittal_recipient_address
+            metadata["transmittal_date"] = narrative.transmittal_date
+            
+            metadata["scope_json"] = narrative.scope_json
+
+            # Map the 9 system-specific network layout paths
+            metadata["net_layout_sias_url"] = resolve_local_img_path(narrative.net_layout_sias_url)
+            metadata["net_layout_library_url"] = resolve_local_img_path(narrative.net_layout_library_url)
+            metadata["net_layout_security_url"] = resolve_local_img_path(narrative.net_layout_security_url)
+            metadata["net_layout_hris_url"] = resolve_local_img_path(narrative.net_layout_hris_url)
+            metadata["net_layout_dms_url"] = resolve_local_img_path(narrative.net_layout_dms_url)
+            metadata["net_layout_supplies_url"] = resolve_local_img_path(narrative.net_layout_supplies_url)
+            metadata["net_layout_budget_url"] = resolve_local_img_path(narrative.net_layout_budget_url)
+            metadata["net_layout_sias_upgrade_url"] = resolve_local_img_path(narrative.net_layout_sias_upgrade_url)
+            metadata["net_layout_extension_url"] = resolve_local_img_path(narrative.net_layout_extension_url)
+
+            # Map core diagrams
+            metadata["b_3_a_ict_org_url"] = resolve_local_img_path(narrative.b_3_a_ict_org_url)
+            metadata["network_diagram_url"] = resolve_local_img_path(narrative.network_diagram_url)
+            metadata["process_flow_diagram_url"] = resolve_local_img_path(narrative.process_flow_diagram_url)
+            
+            if narrative.agency_name:
+                metadata["agency_name"] = narrative.agency_name
+            if narrative.signatory_prepared_by:
+                metadata["signatory_prepared_by"] = narrative.signatory_prepared_by
+            if narrative.signatory_approved_by:
+                metadata["signatory_approved_by"] = narrative.signatory_approved_by
+
+        self.update_state(state="PROGRESS", meta={"progress": 40, "status": "Compiling approved CapEx and MOOE items..."})
+        
+        approved_proposals = db.query(Proposal).options(
+            joinedload(Proposal.department),
+            joinedload(Proposal.deployments_relation)
+        ).filter(
+            Proposal.status == ProposalStatus.APPROVED,
+            Proposal.issp_period == issp_period,
+            Proposal.is_archived == False
+        ).all()
+
+        approved_subscriptions = db.query(SubscriptionProposal).options(
+            joinedload(SubscriptionProposal.department)
+        ).filter(
+            SubscriptionProposal.status == ProposalStatus.APPROVED,
+            SubscriptionProposal.issp_period == issp_period,
+            SubscriptionProposal.is_archived == False
+        ).all()
+
+        needs_assessments = db.query(NeedsAssessment).filter(NeedsAssessment.is_archived == False).all()
+        
+        css_style = f'''
+        <style>
+            @page {{ 
+                margin: 0.75in;
+                @top-left {{
+                    content: "";
+                    background-image: url("{metadata.get("agency_logo_url")}");
+                    background-size: contain;
+                    background-repeat: no-repeat;
+                    background-position: left center;
+                    height: 40px;
+                    width: 40px;
+                    border-bottom: 1px solid #cbd5e1;
+                    padding-bottom: 8px;
+                }}
+                @top-center {{
+                    content: "Republic of the Philippines\\A CAMARINES SUR POLYTECHNIC COLLEGES\\A Nabua, Camarines Sur";
+                    font-family: Arial, sans-serif;
+                    font-size: 7.5pt;
+                    font-weight: bold;
+                    color: #475569;
+                    text-align: left;
+                    white-space: pre-wrap;
+                    line-height: 1.3;
+                    padding-left: 8px;
+                    border-bottom: 1px solid #cbd5e1;
+                    padding-bottom: 8px;
+                }}
+                @top-right {{
+                    content: "INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\\A {metadata.get("issp_period_years", "2026-2028")}";
+                    font-family: Arial, sans-serif;
+                    font-size: 8pt;
+                    font-weight: bold;
+                    color: #1e3a8a;
+                    text-align: right;
+                    white-space: pre-wrap;
+                    line-height: 1.3;
+                    border-bottom: 1px solid #cbd5e1;
+                    padding-bottom: 8px;
+                }}
+                @bottom-right {{
+                    content: "Page " counter(page) " of " counter(pages);
+                    font-family: Arial, sans-serif;
+                    font-size: 8pt;
+                    color: #64748b;
+                }}
+            }}
+            
+            /* Named Page Selectors for Multi-Scoped Resets */
+            @page cover_page {{
+                size: portrait;
+                margin: 0;
+                @top-left {{ content: none; }}
+                @top-center {{ content: none; }}
+                @top-right {{ content: none; }}
+                @bottom-right {{ content: none; }}
+            }}
+            
+            @page transmittal_page {{
+                size: portrait;
+                margin: 0.75in;
+                @top-left {{ content: none; }}
+                @top-center {{ content: none; }}
+                @top-right {{ content: none; }}
+                @bottom-right {{ content: none; }}
+            }}
+
+            @page portrait_section {{
+                size: portrait;
+                margin: 0.75in;
+            }}
+
+            @page landscape_section {{
+                size: landscape;
+                margin: 0.5in 0.75in;
+            }}
+
+            /* Map named page selectors to class containers */
+            .page-cover {{ page: cover_page; }}
+            .page-transmittal {{ page: transmittal_page; }}
+            .page-portrait {{ page: portrait_section; }}
+            .page-landscape {{ page: landscape_section; }}
+
+            /* Enforce Explicit Page Breaks */
+            .force-page-break {{
+                page-break-before: always;
+                break-before: page;
+            }}
+
+            /* running header boundary pushing */
+            .content-wrapper {{
+                padding-top: 80px;
+            }}
+
+            /* Table of Contents Restructured Flexbox Layout with Dot Leaders */
+            .toc-list {{
+                list-style: none;
+                padding: 0;
+                margin: 0;
+            }}
+            .toc-list li {{
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-end;
+                margin-bottom: 8px;
+                font-size: 10pt;
+                line-height: 1.2;
+            }}
+            .indent-0 {{ padding-left: 0; }}
+            .indent-1 {{ padding-left: 20px; }}
+            .indent-2 {{ padding-left: 40px; }}
+            .indent-3 {{ padding-left: 60px; }}
+            
+            .toc-text {{
+                flex-shrink: 0;
+                max-width: 70%;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }}
+            .toc-dots {{
+                flex-grow: 1;
+                border-bottom: 1px dotted #444;
+                margin: 0 10px;
+                position: relative;
+                top: -4px;
+            }}
+            .toc-num {{
+                flex-shrink: 0;
+                text-align: right;
+                min-width: 30px;
+                font-weight: bold;
+                color: #1e3a8a;
+            }}
+
+            /* Image Sizing and Aspect Ratio Preserving Containers */
+            .full-page-media {{
+                display: block;
+                box-sizing: border-box;
+                padding: 10px 20px;
+                page-break-inside: avoid;
+            }}
+            .media-header {{
+                font-size: 14pt;
+                text-transform: uppercase;
+                color: #1e3a8a;
+                border-bottom: 2px solid #1e3a8a;
+                padding-bottom: 5px;
+                margin-bottom: 20px;
+            }}
+            .image-wrapper {{
+                display: block;
+                text-align: center;
+                width: 100%;
+            }}
+            .image-wrapper img {{
+                max-width: 100%;
+                max-height: 420px; /* Limits height to fit the title and header on the same page */
+                height: auto;
+                object-fit: contain;
+                display: block;
+                margin: 0 auto;
+            }}
+
+            .page-number-ref-part1::after {{ content: target-counter(#part_1_org_profile, page); }}
+            .page-number-ref-part1b::after {{ content: target-counter(#part_1_b_manpower, page); }}
+            .page-number-ref-part1c::after {{ content: target-counter(#core_process_flow, page); }}
+            .page-number-ref-part1d::after {{ content: target-counter(#part_1_org_profile, page); }}
+            .page-number-ref-part1e::after {{ content: target-counter(#part_1_e_concerns, page); }}
+            .page-number-ref-part2::after {{ content: target-counter(#part_2_is_strategy, page); }}
+            .page-number-ref-part2-cards::after {{ content: target-counter(#part-2-b-c-databases, page); }}
+            .page-number-ref-part3::after {{ content: target-counter(#part_3_ict_projects, page); }}
+            .page-number-ref-pmf::after {{ content: target-counter(#part_3_ict_projects, page); }}
+            .page-number-ref-part4::after {{ content: target-counter(#part_4_b_org_structure, page); }}
+            .page-number-ref-schedules::after {{ content: target-counter(#part_5_schedules, page); }}
+            .page-number-ref-investments::after {{ content: target-counter(#part_5_investments, page); }}
+            .page-number-ref-annex1::after {{ content: target-counter(#annex_master, page); }}
+            .page-number-ref-annexa3::after {{ content: target-counter(#annex_a3_functions, page); }}
+            .page-number-ref-annexa4::after {{ content: target-counter(#annex_a4_programs, page); }}
+            
+            body {{ 
+                font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
+                line-height: 1.5; 
+                color: #334155; 
+                margin: 0; 
+                padding: 0; 
+                background-color: #ffffff;
+            }}
+            
+            h1, h2, h3, h4, h5 {{ color: #0f172a; margin-top: 0; }}
+
+            .section-title {{
+                font-size: 13pt; 
+                color: #1e3a8a; 
+                border-bottom: 1px solid #1e3a8a; 
+                padding-bottom: 4px; 
+                margin-top: 10px;
+                margin-bottom: 15px; 
+                text-transform: uppercase; 
+                font-weight: bold;
+                letter-spacing: 0.5px;
+            }}
+
+            .sub-section-title {{
+                color: #1e3a8a; 
+                font-size: 10pt; 
+                margin-top: 15px; 
+                margin-bottom: 8px; 
+                text-transform: uppercase; 
+                font-weight: bold;
+                letter-spacing: 0.3px;
+            }}
+            
+            table {{ 
+                width: 100%; 
+                border-collapse: collapse; 
+                margin-bottom: 15px; 
+                page-break-inside: avoid; 
+            }}
+            
+            th {{ 
+                background-color: #f0f7ff; 
+                color: #1e3a8a; 
+                padding: 6px 8px; 
+                font-size: 8pt; 
+                text-align: left; 
+                text-transform: uppercase; 
+                border: 1px solid #cbd5e1; 
+            }}
+            
+            td {{ 
+                padding: 6px 8px; 
+                border: 1px solid #cbd5e1; 
+                font-size: 8pt; 
+                color: #334155; 
+            }}
+            
+            tr {{ page-break-inside: avoid; }}
+            th {{ text-transform: uppercase; letter-spacing: 0.5px; }}
+        </style>
+        '''
+
+        try:
+            from weasyprint import HTML
+        except OSError as os_err:
+            logger.critical(f"CRITICAL HOST SYSTEM OS FAILURE: weasyprint shared library dependencies are missing: {str(os_err)}")
+            raise RuntimeError(
+                "PDF Compilation Engine cannot boot: Host OS shared libraries (libpango, libcairo) are missing. "
+                "Please run: 'sudo apt-get install libpango-1.0-0 libcairo2 libpangoft2-1.0-0' to resolve."
+            ) from os_err
+        except Exception as generic_err:
+            logger.critical(f"Failed to initialize weasyprint compilation libraries: {str(generic_err)}")
+            raise RuntimeError("PDF compilation engine initialization failed.") from generic_err
+
+        # ==========================================================
+        # TREE TRAVERSAL & COMPILATION FLOW
+        # ==========================================================
+        self.update_state(state="PROGRESS", meta={"progress": 50, "status": "Executing Pass 1: Calculating layout geometry & final page count..."})
+
+        # Query all standard sections matching the structure of the official CSPC guide format
+        html_blocks_pass1 = []
+        for format_item in STANDARD_ISSP_FORMAT:
+            rendered = ISSPDynamicCompiler.render_section(
+                format_item["schema_id"], 
+                metadata, 
+                approved_proposals, 
+                approved_subscriptions, 
+                needs_assessments,
+                planning_years
+            )
+            
+            # Map cover and transmittal sheets to custom clean page styles to remove running headers/footers
+            if format_item["schema_id"] == "core_cover":
+                orientation_class = "page-cover"
+            elif format_item["schema_id"] == "core_transmittal":
+                orientation_class = "page-transmittal"
+            else:
+                orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+                
+            break_class = "force-page-break" if format_item["force_page_break"] else ""
+            
+            html_blocks_pass1.append(f'''
+            <div class="{orientation_class} {break_class} content-wrapper" id="{format_item["schema_id"]}">
+                {rendered}
+            </div>
+            ''')
+        combined_body_pass1 = "".join(html_blocks_pass1)
+
+        html_raw_pass1 = f"<html><head>{css_style}</head><body>{combined_body_pass1}</body></html>"
+        
+        html_doc_pass1 = HTML(string=html_raw_pass1, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))
+        rendered_doc_pass1 = html_doc_pass1.render()
+        
+        core_pages = []
+        for p in rendered_doc_pass1.pages:
+            p_name = getattr(p, "page_name", getattr(p, "_page_name", None))
+            if p_name in ["portrait_section", "landscape_section"]:
+                core_pages.append(p)
+                
+        total_page_count = len(core_pages) if core_pages else len(rendered_doc_pass1.pages)
+
+        self.update_state(state="PROGRESS", meta={"progress": 80, "status": f"Executing Pass 2: Drawing table layouts for {total_page_count} certified pages..."})
+        metadata["computed_total_pages"] = str(total_page_count)
+
+        # Execution Pass 2
+        html_blocks_pass2 = []
+        for format_item in STANDARD_ISSP_FORMAT:
+            rendered = ISSPDynamicCompiler.render_section(
+                format_item["schema_id"], 
+                metadata, 
+                approved_proposals, 
+                approved_subscriptions, 
+                needs_assessments,
+                planning_years
+            )
+            if format_item["schema_id"] == "core_cover":
+                orientation_class = "page-cover"
+            elif format_item["schema_id"] == "core_transmittal":
+                orientation_class = "page-transmittal"
+            else:
+                orientation_class = "page-portrait" if format_item["orientation"] == "portrait" else "page-landscape"
+            break_class = "force-page-break" if format_item["force_page_break"] else ""
+            
+            html_blocks_pass2.append(f'''
+            <div class="{orientation_class} {break_class} content-wrapper" id="{format_item["schema_id"]}">
+                {rendered}
+            </div>
+            ''')
+        combined_body_pass2 = "".join(html_blocks_pass2)
+
+        html_raw_pass2 = f"<html><head>{css_style}</head><body>{combined_body_pass2}</body></html>"
+
+        html_doc_pass2 = HTML(string=html_raw_pass2, base_url=str(Path(settings.LOCAL_UPLOAD_DIR).parent))
+        pdf_buffer = io.BytesIO()
+        html_doc_pass2.write_pdf(target=pdf_buffer)
+        
+        self.update_state(state="PROGRESS", meta={"progress": 95, "status": "Uploading output binary to secure storage..."})
+        file_bytes = pdf_buffer.getvalue()
+        
+        issp_id = metadata.get("issp_id", "ISSP-COMPILATION-DEFAULT")
+        storage_client.upload_compiled_pdf(file_bytes, issp_id)
+        
+        download_url = storage_client.generate_download_url(storage_client.get_generated_pdf_key(issp_id))
+        
+        return {
+            "status": "SUCCESS",
+            "file_url": download_url,
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+    except SoftTimeLimitExceeded as timeout_exc:
+        db.rollback()
+        logger.error(f"Celery SoftTimeLimitExceeded hit during PDF compilation: {str(timeout_exc)}")
+        raise Exception("CompilationError: PDF generation soft timeout limit exceeded.")
+        
+    except ValueError as validation_exc:
+        db.rollback()
+        logger.warning(f"ISSP Compliance Validation Block: {str(validation_exc)}")
+        raise Exception(f"ValidationError: {str(validation_exc)}")
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Async dynamic compilation failed: {str(e)}", exc_info=True)
+        raise Exception(f"CompilationError: {str(e)}")
+    finally:
+        db.close()
+

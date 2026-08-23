@@ -38,19 +38,60 @@ export default function DiagramVault() {
     org_chart: null,
     functional_interface: null,
     conceptual_framework: null,
-    network_layout: null,
+    net_layout_sias: null,
+    net_layout_library: null,
+    net_layout_security: null,
+    net_layout_hris: null,
+    net_layout_dms: null,
+    net_layout_supplies: null,
+    net_layout_budget: null,
+    net_layout_sias_upgrade: null,
+    net_layout_extension: null,
     existing_ict_org: null,
     proposed_ict_org: null,
     placement_ict_org: null,
+    b_3_a_ict_org: null,
     site_development_plan: null,
+    network_diagram: null,
     fiber_backbone: null,
-    system_architecture: null,
-    network_topology: null
+    system_architecture: null
   });
 
   const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
   const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
   const token = user?.token;
+
+  const categories = [
+    { key: "agency_logo", title: "Institutional Brand Logo (Page 1)", defaultRole: "logo" },
+    { key: "cert_logo", title: "TUV SUD Certification Badge (Page 1)", defaultRole: "logo" },
+    { key: "process_flow_diagram", title: "ISSP Process Flow Diagram (Page 5)", defaultRole: "full_page_diagram" },
+    { key: "org_chart", title: "General SUC Org Structure (Page 15)", defaultRole: "full_page_diagram" },
+    { key: "functional_interface", title: "I.C. SUC Functional Interface Diagram (Page 18)", defaultRole: "full_page_diagram" },
+    { key: "conceptual_framework", title: "Conceptual IS Architecture (Page 33)", defaultRole: "full_page_diagram" },
+    
+    // Explicitly separated system network layouts
+    { key: "net_layout_sias", title: "Network Layout: SIAS / Enrollment (Page 52)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_library", title: "Network Layout: Library IS (Page 53)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_security", title: "Network Layout: School Security (Page 54)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_hris", title: "Network Layout: HRIS & Payroll (Page 55)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_dms", title: "Network Layout: Document Management (Page 56)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_supplies", title: "Network Layout: Supplies Management (Page 57)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_budget", title: "Network Layout: Budget Management (Page 58)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_sias_upgrade", title: "Network Layout: SIAS / Accounting (Page 59)", defaultRole: "full_page_diagram" },
+    { key: "net_layout_extension", title: "Network Layout: Extension Services (Page 60)", defaultRole: "full_page_diagram" },
+
+    // SUC Organizational Charts
+    { key: "existing_ict_org", title: "Part IV.B: Existing ICT Organizational Structure (Page 100)", defaultRole: "full_page_diagram" },
+    { key: "proposed_ict_org", title: "Part IV.B: Proposed ICT Organizational Structure (Page 101)", defaultRole: "full_page_diagram" },
+    { key: "placement_ict_org", title: "Part IV.B: Placement of Proposed ICT (Page 102)", defaultRole: "full_page_diagram" },
+    { key: "b_3_a_ict_org", title: "Part IV.B: SUC MIS/ICT Org Chart (Page 103)", defaultRole: "full_page_diagram" },
+
+    // Annex layouts
+    { key: "site_development_plan", title: "Annex A-2: Campus Site Development Plan (Page 128)", defaultRole: "full_page_diagram" },
+    { key: "network_diagram", title: "Annex A-2: CSPC Network Diagram (Page 129)", defaultRole: "full_page_diagram" },
+    { key: "fiber_backbone", title: "Annex A-2: Fiber Optic Backbone Cabling Layout (Page 130)", defaultRole: "full_page_diagram" },
+    { key: "system_architecture", title: "Annex A-2: CSPC Unified System Architecture (Page 131)", defaultRole: "full_page_diagram" }
+  ];
 
   const fetchDiagrams = async () => {
     setLoading(true);
@@ -68,14 +109,23 @@ export default function DiagramVault() {
           org_chart: data.org_chart_url,
           functional_interface: data.functional_interface_url,
           conceptual_framework: data.conceptual_framework_url,
-          network_layout: data.network_layout_url,
+          net_layout_sias: data.net_layout_sias_url,
+          net_layout_library: data.net_layout_library_url,
+          net_layout_security: data.net_layout_security_url,
+          net_layout_hris: data.net_layout_hris_url,
+          net_layout_dms: data.net_layout_dms_url,
+          net_layout_supplies: data.net_layout_supplies_url,
+          net_layout_budget: data.net_layout_budget_url,
+          net_layout_sias_upgrade: data.net_layout_sias_upgrade_url,
+          net_layout_extension: data.net_layout_extension_url,
           existing_ict_org: data.existing_ict_org_url,
           proposed_ict_org: data.proposed_ict_org_url,
           placement_ict_org: data.placement_ict_org_url,
+          b_3_a_ict_org: data.b_3_a_ict_org_url,
           site_development_plan: data.site_development_plan_url,
+          network_diagram: data.network_diagram_url,
           fiber_backbone: data.fiber_backbone_url,
-          system_architecture: data.system_architecture_url,
-          network_topology: data.network_topology_url
+          system_architecture: data.system_architecture_url
         });
 
         // Initialize layout properties from metadata dynamically
@@ -107,7 +157,6 @@ export default function DiagramVault() {
     }
   }, [token, activeCycle]);
 
-  // Evaluates image files on the client side to verify aspect-ratio parameters
   const validateImageAspect = (category, file) => {
     if (!file) return;
     const img = new Image();
@@ -123,13 +172,11 @@ export default function DiagramVault() {
       const activeRole = assetRoles[category];
 
       if (activeRole === "full_page_diagram") {
-        // Enforce landscape aspect bounds (ideal ratio ~ 1.414 for landscape A4 layouts)
         if (ratio < 1.2) {
           hasWarning = true;
           warningText = `Sizing Warning: This diagram has a portrait-leaning aspect ratio (${ratio.toFixed(2)}). Full-Page Charts must be landscape oriented to prevent layout overflows.`;
         }
       } else if (category === "agency_logo" || category === "cert_logo") {
-        // Enforce square/clerical aspect bounds
         if (ratio < 0.8 || ratio > 1.2) {
           hasWarning = true;
           warningText = `Sizing Warning: Branding logos should ideally have a 1:1 aspect ratio. High variance (${ratio.toFixed(2)}) may cause header line shifts.`;
@@ -177,23 +224,6 @@ export default function DiagramVault() {
       setUploading(prev => ({ ...prev, [category]: false }));
     }
   };
-
-  const categories = [
-    { key: "agency_logo", title: "Institutional Brand Logo", defaultRole: "logo" },
-    { key: "cert_logo", title: "Certification Badge (TUV SUD)", defaultRole: "logo" },
-    { key: "process_flow_diagram", title: "ISSP Process Flow Diagram", defaultRole: "full_page_diagram" },
-    { key: "org_chart", title: "General College Org Structure", defaultRole: "full_page_diagram" },
-    { key: "functional_interface", title: "I.C. SUC Functional Interface Diagram", defaultRole: "full_page_diagram" },
-    { key: "conceptual_framework", title: "Conceptual IS Architecture", defaultRole: "full_page_diagram" },
-    { key: "network_layout", title: "Logical LAN Network Layout", defaultRole: "full_page_diagram" },
-    { key: "existing_ict_org", title: "Part IV.B: Existing ICT Organizational Chart", defaultRole: "full_page_diagram" },
-    { key: "proposed_ict_org", title: "Part IV.B: Proposed ICT Organizational Structure", defaultRole: "full_page_diagram" },
-    { key: "placement_ict_org", title: "Part IV.B: Placement of Proposed ICT in Institutional Chart", defaultRole: "full_page_diagram" },
-    { key: "site_development_plan", title: "Annex A-2 Campus Site Development Plan", defaultRole: "full_page_diagram" },
-    { key: "network_topology", title: "CSPC Network Diagram & Core Topology (Page 129)", defaultRole: "full_page_diagram" },
-    { key: "fiber_backbone", title: "Fiber Optic Backbone Cabling Layout (Page 130)", defaultRole: "full_page_diagram" },
-    { key: "system_architecture", title: "CSPC Unified System Architecture (Page 131)", defaultRole: "full_page_diagram" }
-  ];
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto text-xs text-slate-100 select-none">
@@ -258,7 +288,7 @@ export default function DiagramVault() {
                 </div>
 
                 {/* layout configurator properties panel */}
-                <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-850/80 space-y-3 font-sans">
+                <div className="bg-slate-955/60 p-3 rounded-lg border border-slate-850/80 space-y-3 font-sans">
                   <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
                     <span className="flex items-center gap-1"><Layout className="w-3.5 h-3.5" /> Layout Role:</span>
                     <div className="flex gap-1.5">

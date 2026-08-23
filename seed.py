@@ -4,6 +4,7 @@ import logging
 import sys
 import argparse
 from decimal import Decimal
+from datetime import datetime, timedelta
 import bcrypt
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
@@ -597,6 +598,10 @@ def bootstrap_metadata(db):
             logger.info(f"GAA Target metric seeded: '{metric['indicator_name']}'")
 
     logger.info("Seeding baseline Catalog Items with standard DICT Categories...")
+    
+    # Establish a default canvas expiration window (e.g. 365 days in the future)
+    default_expiry = datetime.utcnow() + timedelta(days=365)
+    
     catalog_items = [
         {
             "item_key": "pc_standard",
@@ -737,7 +742,8 @@ def bootstrap_metadata(db):
                 is_active=True,
                 allowed_offices=item["allowed_offices"],
                 canvas_evidence_url=item["canvas_evidence_url"],
-                supplier_name=item["supplier_name"]
+                supplier_name=item["supplier_name"],
+                canvas_expiration_date=default_expiry  # Add expiration date
             )
             db.add(db_item)
             logger.info(f"Catalog Item seeded: '{item['display_name']}'")
@@ -1234,22 +1240,28 @@ def bootstrap_metadata(db):
     ]
 
     for p in proposals_matrix:
-        db_p = Proposal(
-            department_id=engineering_dept_id,
-            issp_period=baseline_period,
-            status=ProposalStatus.APPROVED,
-            item_name=p["item_name"],
-            item_key=p["item_key"],
-            unit_cost=p["unit_cost"],
-            yearly_quantities=p["yearly_quantities"],
-            total_qty=sum(p["yearly_quantities"].values()),
-            project_key=p["project_key"],
-            payload={"comments": []},
-            is_archived=False,
-            s3_storage_class="STANDARD",
-            is_restoring=False
-        )
-        db.add(db_p)
+        existing_p = db.query(Proposal).filter(
+            Proposal.item_name == p["item_name"],
+            Proposal.project_key == p["project_key"],
+            Proposal.issp_period == baseline_period
+        ).first()
+        if not existing_p:
+            db_p = Proposal(
+                department_id=engineering_dept_id,
+                issp_period=baseline_period,
+                status=ProposalStatus.APPROVED,
+                item_name=p["item_name"],
+                item_key=p["item_key"],
+                unit_cost=p["unit_cost"],
+                yearly_quantities=p["yearly_quantities"],
+                total_qty=sum(p["yearly_quantities"].values()),
+                project_key=p["project_key"],
+                payload={"comments": []},
+                is_archived=False,
+                s3_storage_class="STANDARD",
+                is_restoring=False
+            )
+            db.add(db_p)
 
     # Multi-Year MOOE software subscriptions mapped from the guide
     subscriptions_matrix = [

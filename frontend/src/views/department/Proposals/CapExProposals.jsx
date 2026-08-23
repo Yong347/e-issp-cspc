@@ -6,6 +6,7 @@ import { useCycle } from "../../../context/CycleContext";
 import { 
   getProposals, 
   createDraftProposal, 
+  updateProposal, 
   deleteProposal, 
   submitProposal, 
   getDeptCatalog, 
@@ -31,7 +32,10 @@ import {
   CheckSquare, 
   RefreshCcw,
   Wallet, 
-  Building2
+  Building2,
+  Edit2, 
+  X,
+  Save
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -48,11 +52,11 @@ export default function CapExProposals() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   
-  // Budget Headroom State (Gap 30)
+  // Budget Headroom State
   const [headroom, setHeadroom] = useState(null);
   const [warning, setWarning] = useState(null);
   
-  // Form State
+  // Creation Form State
   const [itemSelect, setItemSelect] = useState("");
   const [customSpec, setCustomSpec] = useState("");
   const [unitCost, setUnitCost] = useState("");
@@ -84,6 +88,16 @@ export default function CapExProposals() {
   // Deep-linking Highlight State
   const [highlightedId, setHighlightedId] = useState(null);
 
+  // --- NEW EDIT STATE VARIABLES ---
+  const [editingProposal, setEditingProposal] = useState(null);
+  const [editItemSelect, setEditItemSelect] = useState("");
+  const [editCustomSpec, setEditCustomSpec] = useState("");
+  const [editUnitCost, setEditUnitCost] = useState("");
+  const [editYearlyQuantities, setEditYearlyQuantities] = useState({});
+  const [editTargetOffices, setEditTargetOffices] = useState("");
+  const [editIsExpansion, setEditIsExpansion] = useState(false);
+  const [updatingProposal, setUpdatingProposal] = useState(false);
+
   useEffect(() => {
     if (planningYears && planningYears.length > 0) {
       const initial = {};
@@ -94,7 +108,7 @@ export default function CapExProposals() {
     }
   }, [planningYears]);
 
-  // Fetch Budget Headroom Summary (Gap 30)
+  // Fetch Budget Headroom Summary
   const fetchHeadroomData = async () => {
     try {
       const res = await fetch(`${rawUrl}/api/dept/budget-summary`, {
@@ -163,14 +177,13 @@ export default function CapExProposals() {
     if (location.state?.highlightId && proposals.length > 0) {
       const targetId = location.state.highlightId;
       setHighlightedId(targetId);
-      setExpandedProposalId(targetId); // Auto-expand deployments sub-drawer
+      setExpandedProposalId(targetId);
 
       const timer = setTimeout(() => {
         const el = document.getElementById(`proposal-${targetId}`);
         if (el) {
           el.scrollIntoView({ behavior: "smooth", block: "center" });
           
-          // Clear highlight glow states after 4 seconds
           setTimeout(() => {
             setHighlightedId(null);
           }, 4000);
@@ -181,7 +194,7 @@ export default function CapExProposals() {
     }
   }, [location.state, proposals]);
 
-  // Budget Headroom Live Warning Calculation (Gap 30)
+  // Budget Headroom Live Warning Calculation
   useEffect(() => {
     if (!headroom) return;
     
@@ -189,7 +202,6 @@ export default function CapExProposals() {
     const currentTotalQty = Object.values(yearlyQuantities).reduce((a, b) => a + b, 0);
     const projectedTotalCost = currentUnitCost * currentTotalQty;
 
-    // Headroom check targets remaining CapEx balance
     const remaining = headroom.remaining_capex_headroom ?? headroom.remaining_headroom ?? 0.0;
     if (projectedTotalCost > remaining) {
       setWarning(
@@ -206,7 +218,7 @@ export default function CapExProposals() {
     }
   }, [unitCost, yearlyQuantities, headroom]);
 
-  // Active Polling for Glacier Restore Progress (Gap 28)
+  // Active Polling for Glacier Restore Progress
   useEffect(() => {
     const activeRestorations = proposals.filter(p => p.is_restoring);
     if (activeRestorations.length === 0) return;
@@ -222,7 +234,7 @@ export default function CapExProposals() {
             const data = await res.json();
             if (!data.is_restoring) {
               clearInterval(intervalId);
-              fetchData(); // Trigger full refresh to update file download state
+              fetchData();
             } else {
               setProposals(prev => 
                 prev.map(item => item.id === p.id ? { ...item, restore_progress: data.restore_progress } : item)
@@ -232,7 +244,7 @@ export default function CapExProposals() {
         } catch (pollErr) {
           console.error("Error polling Glacier restoration status:", pollErr);
         }
-      }, 10000); // Poll status every 10 seconds
+      }, 10000);
 
       return { id: p.id, intervalId };
     });
@@ -259,7 +271,6 @@ export default function CapExProposals() {
     setError(null);
     setSuccess(null);
 
-    // Strict validation check for custom unlisted items
     if (itemSelect === "other") {
       if (!canvasFile || !supplierName.trim()) {
         setError("Compliance Violation: Posing a custom unlisted item requires a supplier name and a canvas quotation document.");
@@ -281,11 +292,9 @@ export default function CapExProposals() {
     };
 
     try {
-      // 1. Log Proposal Draft
       const res = await createDraftProposal(payload);
       const proposalId = res.proposal_id;
 
-      // 2. Upload and link file sequentially if "Other" is selected
       if (itemSelect === "other" && canvasFile) {
         await uploadCanvas(proposalId, supplierName.trim(), canvasFile);
       }
@@ -425,6 +434,63 @@ export default function CapExProposals() {
       setComments(data);
     } catch (err) {
       alert(err.message || "Failed to resolve remark.");
+    }
+  };
+
+  // --- NEW EDIT DIALOG HANDLERS ---
+  const openEditModal = (p) => {
+    setError(null);
+    setSuccess(null);
+    setEditingProposal(p);
+    setEditItemSelect(p.item_key || "other");
+    setEditCustomSpec(p.custom_specification || "");
+    setEditUnitCost(String(p.unit_cost));
+    setEditIsExpansion(p.is_expansion || false);
+    setEditTargetOffices(p.target_offices_json && p.target_offices_json.length > 0 ? p.target_offices_json[0] : "");
+    
+    const prefill = {};
+    planningYears.forEach(year => {
+      prefill[String(year)] = p.yearly_quantities?.[String(year)] || 0;
+    });
+    setEditYearlyQuantities(prefill);
+  };
+
+  useEffect(() => {
+    if (editItemSelect && editItemSelect !== "other") {
+      const selected = catalog.find(item => item.item_key === editItemSelect);
+      if (selected) {
+        setEditUnitCost(String(selected.standard_unit_cost));
+        setEditCustomSpec("");
+      }
+    }
+  }, [editItemSelect, catalog]);
+
+  const handleUpdateProposal = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    setUpdatingProposal(true);
+
+    const parsedOffices = editTargetOffices ? [editTargetOffices] : [];
+
+    const payload = {
+      item_select: editItemSelect,
+      custom_specification: editItemSelect === "other" ? editCustomSpec : null,
+      yearly_quantities: editYearlyQuantities,
+      unit_cost: parseFloat(editUnitCost) || 0.0,
+      target_offices_json: parsedOffices,
+      is_expansion: editIsExpansion
+    };
+
+    try {
+      await updateProposal(editingProposal.id, payload);
+      setSuccess("Proposal draft updated successfully.");
+      setEditingProposal(null);
+      fetchData();
+    } catch (err) {
+      setError(err.message || "Failed to update proposal.");
+    } finally {
+      setUpdatingProposal(false);
     }
   };
 
@@ -726,7 +792,7 @@ export default function CapExProposals() {
                       <th className="py-3 px-2 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-850">
+                  <tbody className="divide-y divide-slate-855">
                     {proposals.map(p => {
                       const isCustom = p.item_key === "other";
                       const filename = p.canvas_evidence_url ? p.canvas_evidence_url.split("/").pop() : null;
@@ -776,7 +842,6 @@ export default function CapExProposals() {
                                   </a>
                                   {p.s3_storage_class === "GLACIER" ? (
                                     p.is_restoring ? (
-                                      /* Active Time-Based S3 Glacier Progress Bar Indicator */
                                       <div className="space-y-1 w-full max-w-[120px] pt-1">
                                         <div className="flex justify-between text-[8px] font-mono text-amber-400 font-semibold">
                                           <span>RESTORING</span>
@@ -843,6 +908,13 @@ export default function CapExProposals() {
                                 {p.status === "Draft" || p.status === "Returned" ? (
                                   <>
                                     <button
+                                      onClick={() => openEditModal(p)}
+                                      className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+                                      title="Edit Draft Parameters"
+                                    >
+                                      <Edit2 className="w-4 h-4" />
+                                    </button>
+                                    <button
                                       onClick={() => handleSubmit(p.id)}
                                       className="p-1 text-slate-400 hover:text-emerald-400 transition-colors cursor-pointer"
                                       title="Submit Proposal"
@@ -866,7 +938,7 @@ export default function CapExProposals() {
                           
                           {/* Table IV.A Deployments Mapping Sub-Drawer (Gap 13) */}
                           {expandedProposalId === p.id && (
-                            <tr className="bg-slate-950/30">
+                            <tr className="bg-slate-955/30">
                               <td colSpan="6" className="p-4 border-t border-b border-slate-800/80">
                                 <DeploymentsMapping 
                                   proposalId={p.id} 
@@ -891,8 +963,119 @@ export default function CapExProposals() {
         </div>
       </div>
 
+      {/* --- NEW EDIT PROPOSAL MODAL DIALOG --- */}
+      {editingProposal && (
+        <div className="fixed inset-0 bg-slate-955/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+              <h3 className="font-bold text-white text-sm">Edit Proposal Draft</h3>
+              <button 
+                onClick={() => setEditingProposal(null)}
+                className="text-slate-400 hover:text-white font-bold text-lg cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateProposal} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Catalog Item</label>
+                <select
+                  value={editItemSelect}
+                  onChange={(e) => setEditItemSelect(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-slate-100 cursor-pointer"
+                >
+                  {catalog.map(item => (
+                    <option key={item.item_key} value={item.item_key}>
+                      {item.display_name}
+                    </option>
+                  ))}
+                  <option value="other">-- Custom / Unlisted (Other) --</option>
+                </select>
+              </div>
+
+              {editItemSelect === "other" && (
+                <div>
+                  <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Specifications</label>
+                  <input
+                    type="text" required value={editCustomSpec}
+                    onChange={(e) => setEditCustomSpec(e.target.value)}
+                    className="w-full p-2 bg-slate-950 border border-slate-800 rounded text-white"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Unit Cost (PHP)</label>
+                <input
+                  type="number" step="0.01" required
+                  disabled={editItemSelect !== "other"}
+                  value={editUnitCost}
+                  onChange={(e) => setEditUnitCost(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+
+              <div className="space-y-2 p-3 bg-slate-950 rounded-lg border border-slate-850">
+                <span className="block text-[9px] uppercase font-bold text-slate-500">Yearly Quantities</span>
+                {planningYears.map(year => (
+                  <div key={year} className="flex justify-between items-center">
+                    <span className="font-semibold text-slate-400">FY {year}</span>
+                    <input
+                      type="number" min="0" required
+                      value={editYearlyQuantities[String(year)] || 0}
+                      onChange={(e) => setEditYearlyQuantities({
+                        ...editYearlyQuantities,
+                        [String(year)]: parseInt(e.target.value, 10) || 0
+                      })}
+                      className="w-20 p-1.5 bg-slate-900 border border-slate-800 text-center rounded text-white font-mono"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2 p-3 bg-slate-955/50 border border-slate-850 rounded-lg">
+                <input
+                  type="checkbox" id="edit_is_expansion" checked={editIsExpansion}
+                  onChange={(e) => setEditIsExpansion(e.target.checked)}
+                  className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
+                />
+                <label htmlFor="edit_is_expansion" className="text-[10px] font-bold text-slate-300 uppercase tracking-wider cursor-pointer">
+                  Is this an expansion project?
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Deployment Location</label>
+                <select
+                  value={editTargetOffices}
+                  onChange={(e) => setEditTargetOffices(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-slate-100 cursor-pointer"
+                  required={editIsExpansion}
+                >
+                  <option value="">-- Select Deployment Location --</option>
+                  {officesRegistry.map((off) => (
+                    <option key={off.id} value={off.office_name}>
+                      {off.office_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="submit" disabled={updatingProposal}
+                className="w-full p-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Save className="w-4 h-4" />
+                <span>{updatingProposal ? "Updating Draft..." : "Save Modifications"}</span>
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {activeCommentsProposal && (
-        <div className="fixed inset-0 bg-slate-955/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-slate-955/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col h-[500px] animate-fadeIn">
             <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-955/50 rounded-t-xl">
               <div>

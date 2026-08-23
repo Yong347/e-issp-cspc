@@ -6,6 +6,7 @@ import { useCycle } from "../../../context/CycleContext";
 import { 
   getSubscriptions, 
   createSubscription, 
+  updateSubscription, // Ensure updateSubscription is imported
   deleteSubscription, 
   submitSubscription, 
   uploadCanvas,
@@ -29,7 +30,10 @@ import {
   CheckSquare, 
   RefreshCcw,
   Clock,
-  HardDrive
+  HardDrive,
+  Edit2, // Added edit icon
+  X,
+  Save
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -45,7 +49,7 @@ export default function MooeSubscriptions() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   
-  // Form State
+  // Creation Form State
   const [subscriptionType, setSubscriptionType] = useState("SaaS");
   const [softwareName, setSoftwareName] = useState("");
   const [justification, setJustification] = useState("");
@@ -72,6 +76,16 @@ export default function MooeSubscriptions() {
 
   // Deep-linking Highlight State
   const [highlightedId, setHighlightedId] = useState(null);
+
+  // --- NEW EDIT STATE VARIABLES ---
+  const [editingSubscription, setEditingSubscription] = useState(null);
+  const [editSubscriptionType, setEditSubscriptionType] = useState("SaaS");
+  const [editSoftwareName, setEditSoftwareName] = useState("");
+  const [editJustification, setEditJustification] = useState("");
+  const [editAnnualCostPerUser, setEditAnnualCostPerUser] = useState("");
+  const [editYearlyUsers, setEditYearlyUsers] = useState({});
+  const [editTargetOffices, setEditTargetOffices] = useState("");
+  const [updatingSubscription, setUpdatingSubscription] = useState(false);
 
   useEffect(() => {
     if (planningYears && planningYears.length > 0) {
@@ -335,6 +349,55 @@ export default function MooeSubscriptions() {
     }
   };
 
+  // Prefill configuration for the edit workflow
+  const openEditModal = (s) => {
+    setError(null);
+    setSuccess(null);
+    setEditingSubscription(s);
+    setEditSubscriptionType(s.subscription_type);
+    setEditSoftwareName(s.software_name);
+    setEditJustification(s.justification);
+    setEditAnnualCostPerUser(String(s.annual_cost_per_user));
+    setEditTargetOffices(s.target_offices_json ? s.target_offices_json.join(", ") : "");
+    
+    const prefill = {};
+    planningYears.forEach(year => {
+      prefill[String(year)] = s.yearly_users?.[String(year)] || 0;
+    });
+    setEditYearlyUsers(prefill);
+  };
+
+  const handleUpdateSubscription = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    setUpdatingSubscription(true);
+
+    const parsedOffices = editTargetOffices
+      ? editTargetOffices.split(",").map(o => o.trim()).filter(o => o.length > 0)
+      : [];
+
+    const payload = {
+      subscription_type: editSubscriptionType,
+      software_name: editSoftwareName.trim(),
+      justification: editJustification.trim(),
+      yearly_users: editYearlyUsers,
+      annual_cost_per_user: parseFloat(editAnnualCostPerUser) || 0.0,
+      target_offices_json: parsedOffices
+    };
+
+    try {
+      await updateSubscription(editingSubscription.id, payload);
+      setSuccess("Subscription proposal draft updated successfully.");
+      setEditingSubscription(null);
+      fetchData();
+    } catch (err) {
+      setError(err.message || "Failed to update subscription.");
+    } finally {
+      setUpdatingSubscription(false);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-6xl mx-auto select-none">
       <div className="flex justify-between items-center bg-slate-900 p-6 rounded-xl border border-slate-800">
@@ -359,14 +422,14 @@ export default function MooeSubscriptions() {
 
       {error && (
         <div className="p-4 bg-red-955/40 border border-red-900/50 text-red-300 rounded-lg flex items-start gap-2.5 text-xs">
-          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{typeof error === "object" ? error.message : error}</span>
         </div>
       )}
 
       {success && (
         <div className="p-4 bg-emerald-950/40 border border-emerald-900/50 text-emerald-300 rounded-lg flex items-start gap-2.5 text-xs">
-          <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <CheckCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{success}</span>
         </div>
       )}
@@ -491,7 +554,7 @@ export default function MooeSubscriptions() {
                 value={justification}
                 onChange={(e) => setJustification(e.target.value)}
                 placeholder="How this license directly maps to MFO outcomes and curriculum"
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all resize-none"
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all resize-none"
               />
             </div>
 
@@ -692,6 +755,13 @@ export default function MooeSubscriptions() {
                               {sub.status === "Draft" || sub.status === "Returned" ? (
                                 <>
                                   <button
+                                    onClick={() => openEditModal(sub)}
+                                    className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+                                    title="Edit Subscription Parameters"
+                                  >
+                                    <Edit2 className="w-4 h-4" />
+                                  </button>
+                                  <button
                                     onClick={() => handleSubmit(sub.id)}
                                     className="p-1 text-slate-400 hover:text-emerald-400 transition-colors cursor-pointer"
                                     title="Submit Proposal"
@@ -727,7 +797,7 @@ export default function MooeSubscriptions() {
       </div>
 
       {activeCommentsProposal && (
-        <div className="fixed inset-0 bg-slate-955/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-slate-955/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col h-[500px] animate-fadeIn">
             <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-955/50 rounded-t-xl">
               <div>
@@ -794,6 +864,102 @@ export default function MooeSubscriptions() {
                 className="p-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded cursor-pointer"
               >
                 Send
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- NEW EDIT SUBSCRIPTION MODAL DIALOG --- */}
+      {editingSubscription && (
+        <div className="fixed inset-0 bg-slate-955/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+              <h3 className="font-bold text-white text-sm">Edit MOOE Request</h3>
+              <button 
+                onClick={() => setEditingSubscription(null)}
+                className="text-slate-400 hover:text-white font-bold text-lg cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateSubscription} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1.5">Type</label>
+                <select
+                  value={editSubscriptionType}
+                  onChange={(e) => setEditSubscriptionType(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-slate-100 cursor-pointer"
+                >
+                  <option value="SaaS">SaaS</option>
+                  <option value="Cloud Subscription">Cloud Subscription</option>
+                  <option value="Annual License">Annual License</option>
+                  <option value="PaaS">PaaS</option>
+                  <option value="IaaS">IaaS</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1.5">Package Name</label>
+                <input
+                  type="text" required value={editSoftwareName}
+                  onChange={(e) => setEditSoftwareName(e.target.value)}
+                  className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1.5">Cost per User (PHP)</label>
+                <input
+                  type="number" step="0.01" required value={editAnnualCostPerUser}
+                  onChange={(e) => setEditAnnualCostPerUser(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+
+              <div className="space-y-2 p-3 bg-slate-950 rounded-lg border border-slate-800">
+                <span className="block text-[9px] uppercase font-bold text-slate-500">Yearly Users</span>
+                {planningYears.map(year => (
+                  <div key={year} className="flex justify-between items-center">
+                    <span className="font-semibold text-slate-400 font-mono">FY {year}</span>
+                    <input
+                      type="number" min="0" required
+                      value={editYearlyUsers[String(year)] || 0}
+                      onChange={(e) => setEditYearlyUsers({
+                        ...editYearlyUsers,
+                        [String(year)]: parseInt(e.target.value, 10) || 0
+                      })}
+                      className="w-20 p-1.5 bg-slate-900 border border-slate-800 text-center rounded text-white font-mono"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1.5">Justification</label>
+                <textarea
+                  required rows={3} value={editJustification}
+                  onChange={(e) => setEditJustification(e.target.value)}
+                  className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1.5">Target Deployments</label>
+                <input
+                  type="text" required value={editTargetOffices}
+                  onChange={(e) => setEditTargetOffices(e.target.value)}
+                  className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              <button
+                type="submit" disabled={updatingSubscription}
+                className="w-full p-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Save className="w-4 h-4" />
+                <span>{updatingSubscription ? "Updating Draft..." : "Save Modifications"}</span>
               </button>
             </form>
           </div>

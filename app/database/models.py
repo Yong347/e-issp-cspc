@@ -313,7 +313,7 @@ class ContentType(str, enum.Enum):
     RICH_TEXT = "rich_text"
     KEY_VALUE_TABLE = "key_value_table"
     STAFFING_MATRIX = "staffing_matrix"
-    BUDGET_GRID = "budget_grid"
+    BUDGRID = "budget_grid"
 
 
 class AssetRole(str, enum.Enum):
@@ -533,6 +533,9 @@ class CatalogItem(Base):
     canvas_evidence_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     supplier_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
+    # Added: Explicit validity deadline of S3 quotation proof
+    canvas_expiration_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
 
 class ExistingInventory(Base):
     """
@@ -637,6 +640,9 @@ class Proposal(Base):
         nullable=False
     )
 
+    # Added: Explicit validity deadline of S3 quotation proof
+    canvas_expiration_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
     def sync_payload(self) -> None:
         """
         Forces explicit flat database fields to synchronize into the encrypted JSON
@@ -651,6 +657,7 @@ class Proposal(Base):
         self.payload["unit_cost"] = str(self.unit_cost)
         self.payload["project_key"] = self.project_key
         self.payload["is_expansion"] = self.is_expansion
+        self.payload["canvas_expiration_date"] = self.canvas_expiration_date.isoformat() if self.canvas_expiration_date else None
 
 
 class SubscriptionProposal(Base):
@@ -726,6 +733,9 @@ class SubscriptionProposal(Base):
         nullable=False
     )
 
+    # Added: Explicit validity deadline of S3 quotation proof
+    canvas_expiration_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
     def sync_payload(self) -> None:
         """
         Forces software subscription inputs to synchronize into the encrypted JSON
@@ -740,6 +750,7 @@ class SubscriptionProposal(Base):
         self.payload["annual_cost_per_user"] = str(self.annual_cost_per_user)
         self.payload["project_key"] = self.project_key
         self.payload["is_expansion"] = self.is_expansion
+        self.payload["canvas_expiration_date"] = self.canvas_expiration_date.isoformat() if self.canvas_expiration_date else None
 
 
 # ==========================================================
@@ -1190,7 +1201,6 @@ class MasterNarrative(Base):
     strategic_concerns_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
 
     conceptual_framework_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    network_layout_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     systems_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     databases_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
 
@@ -1217,8 +1227,22 @@ class MasterNarrative(Base):
     site_development_plan_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    network_topology_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     process_flow_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # Separated 9 System-Specific Network Layout Columns
+    net_layout_sias_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_library_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_security_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_hris_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_dms_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_supplies_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_budget_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_sias_upgrade_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    net_layout_extension_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # b_3_a SUC MIS/ICT Org Chart and CSPC Network Diagram (Page 129)
+    b_3_a_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    network_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     proposals: Mapped[List[Proposal]] = relationship(
         "Proposal", 

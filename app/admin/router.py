@@ -1197,12 +1197,14 @@ def return_proposal(
 # QUEUES & OVERRIDES
 # ==========================================================
 
-@router.get("/proposals", response_model=List[ProposalResponse])  # <--- Added response_model here
+@router.get("/proposals")
 def get_admin_master_queue(
     dept_id: Optional[int] = Query(None),
     status_filter: Optional[ProposalStatus] = Query(None),
+    issp_period: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, description="Search by item name or spec"),
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, le=1000),
+    limit: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
@@ -1213,14 +1215,28 @@ def get_admin_master_queue(
             query = query.filter(Proposal.department_id == dept_id)
         if status_filter:
             query = query.filter(Proposal.status == status_filter)
-            
-        return query.offset(skip).limit(limit).all()
+        if issp_period:
+            query = query.filter(Proposal.issp_period == issp_period)
+        if search:
+            query = query.filter(
+                or_(
+                    Proposal.item_name.ilike(f"%{search}%"),
+                    Proposal.custom_specification.ilike(f"%{search}%")
+                )
+            )
+
+        total_records = query.count()
+        results = query.order_by(Proposal.version.desc()).offset(skip).limit(limit).all()
+
+        return {
+            "total": total_records,
+            "skip": skip,
+            "limit": limit,
+            "data": results
+        }
     except Exception as e:
-        logger.error(f"Error querying master proposals queue: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to query master proposals queue: {str(e)}"
-        )
+        logger.error(f"Error querying paginated master queue: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch paginated master queue.")
 
 
 @router.get("/subscriptions", response_model=List[SubscriptionProposalResponse])  # <--- Added response_model here
@@ -1344,9 +1360,9 @@ def admin_override_proposal(
             ).scalar() or Decimal("0.00")
 
             other_mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
-                SubscriptionProposal.department_id == hw_proposal.department_id,
+                SubscriptionProposal.department_id == sub_proposal.department_id,
                 SubscriptionProposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
-                SubscriptionProposal.issp_period == hw_proposal.issp_period,
+                SubscriptionProposal.issp_period == sub_proposal.issp_period,
                 or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
             ).scalar() or Decimal("0.00")
 
@@ -2243,7 +2259,12 @@ def get_master_narrative(
 @router.post("/narratives/{issp_period}/upload-diagram", tags=["Admin Master Authorship"])
 async def upload_system_diagram(
     issp_period: str,
-    category: str = Query(..., description="Valid Categories: agency_logo, cert_logo, org_chart, functional_interface, conceptual_framework, network_layout, existing_ict_org, proposed_ict_org, placement_ict_org, site_development_plan, fiber_backbone, system_architecture, network_topology, process_flow_diagram"),
+    category: str = Query(..., description="Valid Categories: agency_logo, cert_logo, org_chart, functional_interface, "
+                                           "conceptual_framework, net_layout_sias, net_layout_library, net_layout_security, "
+                                           "net_layout_hris, net_layout_dms, net_layout_supplies, net_layout_budget, "
+                                           "net_layout_sias_upgrade, net_layout_extension, existing_ict_org, "
+                                           "proposed_ict_org, placement_ict_org, b_3_a_ict_org, site_development_plan, "
+                                           "fiber_backbone, system_architecture, network_diagram, process_flow_diagram"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
@@ -2251,10 +2272,11 @@ async def upload_system_diagram(
     try:
         allowed_categories = [
             "agency_logo", "cert_logo", "org_chart", "functional_interface",
-            "conceptual_framework", "network_layout", "existing_ict_org",
-            "proposed_ict_org", "placement_ict_org", "site_development_plan",
-            "fiber_backbone", "system_architecture", "network_topology",
-            "process_flow_diagram"
+            "conceptual_framework", "net_layout_sias", "net_layout_library", "net_layout_security",
+            "net_layout_hris", "net_layout_dms", "net_layout_supplies", "net_layout_budget",
+            "net_layout_sias_upgrade", "net_layout_extension", "existing_ict_org",
+            "proposed_ict_org", "placement_ict_org", "b_3_a_ict_org", "site_development_plan",
+            "fiber_backbone", "system_architecture", "network_diagram", "process_flow_diagram"
         ]
         if category not in allowed_categories:
             raise HTTPException(
@@ -2277,7 +2299,6 @@ async def upload_system_diagram(
                 detail="Upload Failed: Image exceeds the maximum permitted size limit of 5MB."
             )
 
-        # Fix (Anomaly 14): Validate image and PDF layout diagrams content types using signature magic bytes
         is_valid_file = (
             file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or  # PNG
             file_bytes.startswith(b"\xff\xd8\xff") or        # JPEG
@@ -2298,15 +2319,7 @@ async def upload_system_diagram(
                 signatory_approved_by="Not Configured"
             )
             db.add(narrative)
-            try:
-                db.flush()
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Failed to create placeholder master narrative shell during diagram prep: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to create placeholder master narrative shell: {str(e)}"
-                )
+            db.flush()
 
         safe_filename = secure_filename(file.filename)
         key = storage_client.get_diagram_key(category, safe_filename)
@@ -2330,34 +2343,44 @@ async def upload_system_diagram(
             narrative.functional_interface_url = download_url
         elif category == "conceptual_framework":
             narrative.conceptual_framework_url = download_url
-        elif category == "network_layout":
-            narrative.network_layout_url = download_url
+        elif category == "net_layout_sias":
+            narrative.net_layout_sias_url = download_url
+        elif category == "net_layout_library":
+            narrative.net_layout_library_url = download_url
+        elif category == "net_layout_security":
+            narrative.net_layout_security_url = download_url
+        elif category == "net_layout_hris":
+            narrative.net_layout_hris_url = download_url
+        elif category == "net_layout_dms":
+            narrative.net_layout_dms_url = download_url
+        elif category == "net_layout_supplies":
+            narrative.net_layout_supplies_url = download_url
+        elif category == "net_layout_budget":
+            narrative.net_layout_budget_url = download_url
+        elif category == "net_layout_sias_upgrade":
+            narrative.net_layout_sias_upgrade_url = download_url
+        elif category == "net_layout_extension":
+            narrative.net_layout_extension_url = download_url
         elif category == "existing_ict_org":
             narrative.existing_ict_org_url = download_url
         elif category == "proposed_ict_org":
             narrative.proposed_ict_org_url = download_url
         elif category == "placement_ict_org":
             narrative.placement_ict_org_url = download_url
+        elif category == "b_3_a_ict_org":
+            narrative.b_3_a_ict_org_url = download_url
         elif category == "site_development_plan":
             narrative.site_development_plan_url = download_url
         elif category == "fiber_backbone":
             narrative.fiber_backbone_url = download_url
         elif category == "system_architecture":
             narrative.system_architecture_url = download_url
-        elif category == "network_topology":
-            narrative.network_topology_url = download_url
+        elif category == "network_diagram":
+            narrative.network_diagram_url = download_url
         elif category == "process_flow_diagram":
             narrative.process_flow_diagram_url = download_url
 
-        try:
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Failed committing diagram url configuration link: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database transaction failure during diagram upload tracking: {str(e)}"
-            )
+        db.commit()
         return {
             "status": "success",
             "category": category,
@@ -2367,7 +2390,7 @@ async def upload_system_diagram(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unhandled error uploading system diagram asset: {str(e)}", exc_info=True)
+        logger.error(f"Unhandled error uploading system diagram: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload graphic diagram: {str(e)}"
@@ -2431,7 +2454,8 @@ def create_catalog_item(
             is_active=payload.is_active,
             allowed_offices=payload.allowed_offices,
             canvas_evidence_url=payload.canvas_evidence_url,
-            supplier_name=payload.supplier_name
+            supplier_name=payload.supplier_name,
+            canvas_expiration_date=payload.canvas_expiration_date
         )
         db.add(new_item)
         try:
@@ -2509,6 +2533,8 @@ def update_catalog_item(
             item.canvas_evidence_url = payload.canvas_evidence_url
         if payload.supplier_name is not None:
             item.supplier_name = payload.supplier_name
+        if payload.canvas_expiration_date is not None:
+            item.canvas_expiration_date = payload.canvas_expiration_date
 
         try:
             db.commit()

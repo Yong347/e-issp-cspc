@@ -22,6 +22,7 @@ import {
   CheckSquare,
   Lock,
   ChevronRight,
+  ChevronLeft,
   ShieldAlert,
   Save,
   X
@@ -38,10 +39,13 @@ export default function ConsolidatedQueue() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Filters
+  // Server-Side Pagination & Filter States
   const [deptFilter, setDeptFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
+  const [totalCount, setTotalCount] = useState(0);
+  const [skip, setSkip] = useState(0);
+  const [limit] = useState(15); // Strict items limit per page
 
   // Deep-Linking Highlight State
   const [highlightedId, setHighlightedId] = useState(null);
@@ -82,17 +86,26 @@ export default function ConsolidatedQueue() {
     setLoading(true);
     setError(null);
     try {
-      let queryParams = `?skip=0&limit=1000`;
+      let queryParams = `?skip=${skip}&limit=${limit}`;
       if (deptFilter) queryParams += `&dept_id=${deptFilter}`;
       if (statusFilter) queryParams += `&status_filter=${statusFilter}`;
+      if (searchTerm) queryParams += `&search=${encodeURIComponent(searchTerm)}`;
+      if (activeCycle) queryParams += `&issp_period=${encodeURIComponent(activeCycle)}`;
 
       const endpoint = activeTab === "capex" ? "proposals" : "subscriptions";
       const res = await fetch(`${apiUrl}/api/admin/${endpoint}${queryParams}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!res.ok) throw new Error(`Failed to load ${activeTab === "capex" ? "CapEx" : "MOOE"} queue.`);
-      const data = await res.json();
-      setProposals(data);
+      
+      const payload = await res.json();
+      
+      // Robust Parsing: Accommodate unpaginated legacy array structures safely
+      const itemsList = Array.isArray(payload) ? payload : (payload.data || []);
+      const totalItemsCount = Array.isArray(payload) ? payload.length : (payload.total || 0);
+
+      setProposals(itemsList);
+      setTotalCount(totalItemsCount);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -111,7 +124,7 @@ export default function ConsolidatedQueue() {
     if (token) {
       fetchQueue();
     }
-  }, [token, activeTab, deptFilter, statusFilter, activeCycle]);
+  }, [token, activeTab, deptFilter, statusFilter, skip, activeCycle]);
 
   // Handle auto-focus and scrolling glow effects
   useEffect(() => {
@@ -135,6 +148,24 @@ export default function ConsolidatedQueue() {
       return () => clearTimeout(timer);
     }
   }, [location.state, proposals]);
+
+  const triggerSearch = (e) => {
+    e.preventDefault();
+    setSkip(0);
+    fetchQueue();
+  };
+
+  const handlePrevPage = () => {
+    if (skip > 0) {
+      setSkip(Math.max(0, skip - limit));
+    }
+  };
+
+  const handleNextPage = () => {
+    if (skip + limit < totalCount) {
+      setSkip(skip + limit);
+    }
+  };
 
   // Transition: SUBMITTED -> APPROVED
   const handleApprove = async (id, itemName) => {
@@ -289,19 +320,6 @@ export default function ConsolidatedQueue() {
     }
   };
 
-  // Client-Side Search Filtering
-  const filteredProposals = proposals.filter(item => {
-    const query = searchTerm.toLowerCase().trim();
-    const label = item.item_name || item.software_name || "";
-    const spec = item.custom_specification || item.justification || "";
-    const dept = getDeptName(item.department_id);
-
-    return query === "" || 
-      label.toLowerCase().includes(query) || 
-      spec.toLowerCase().includes(query) ||
-      dept.toLowerCase().includes(query);
-  });
-
   return (
     <div className="space-y-6 max-w-6xl mx-auto text-xs text-slate-100 select-none">
       {/* Title */}
@@ -341,9 +359,9 @@ export default function ConsolidatedQueue() {
 
       {/* Tabs & Filters */}
       <div className="flex flex-col md:flex-row gap-4 justify-between items-center bg-slate-900/50 p-4 rounded-xl border border-slate-850">
-        <div className="flex gap-1.5 p-1 bg-slate-950 rounded-lg border border-slate-800 self-start">
+        <div className="flex gap-1.5 p-1 bg-slate-955 rounded-lg border border-slate-800 self-start">
           <button
-            onClick={() => { setActiveTab("capex"); setProposals([]); }}
+            onClick={() => { setSkip(0); setActiveTab("capex"); setProposals([]); }}
             className={`flex items-center gap-1.5 px-4 py-2 font-bold rounded-md transition-all cursor-pointer ${
               activeTab === "capex" 
                 ? "bg-blue-600 text-white" 
@@ -354,7 +372,7 @@ export default function ConsolidatedQueue() {
             <span>CapEx Hardware (A-6)</span>
           </button>
           <button
-            onClick={() => { setActiveTab("mooe"); setProposals([]); }}
+            onClick={() => { setSkip(0); setActiveTab("mooe"); setProposals([]); }}
             className={`flex items-center gap-1.5 px-4 py-2 font-bold rounded-md transition-all cursor-pointer ${
               activeTab === "mooe" 
                 ? "bg-indigo-600 text-white" 
@@ -366,8 +384,8 @@ export default function ConsolidatedQueue() {
           </button>
         </div>
 
-        {/* Filters */}
-        <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
+        {/* Paginated Search & Filters Form */}
+        <form onSubmit={triggerSearch} className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
           <div className="relative w-full sm:w-56">
             <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
               <Search className="w-3.5 h-3.5" />
@@ -377,13 +395,13 @@ export default function ConsolidatedQueue() {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Search queue records..."
-              className="w-full pl-8 pr-3 py-1.5 bg-slate-950 border border-slate-850 rounded text-xs text-white outline-none placeholder-slate-600"
+              className="w-full pl-8 pr-3 py-1.5 bg-slate-955 border border-slate-850 rounded text-xs text-white outline-none placeholder-slate-600"
             />
           </div>
 
           <select
             value={deptFilter}
-            onChange={(e) => setDeptFilter(e.target.value)}
+            onChange={(e) => { setSkip(0); setDeptFilter(e.target.value); }}
             className="p-2 bg-slate-950 border border-slate-855 rounded text-slate-300 font-semibold cursor-pointer outline-none w-full md:w-44 text-xs"
           >
             <option value="">-- All Departments --</option>
@@ -397,7 +415,7 @@ export default function ConsolidatedQueue() {
 
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => { setSkip(0); setStatusFilter(e.target.value); }}
             className="p-2 bg-slate-950 border border-slate-855 rounded text-slate-300 font-semibold cursor-pointer outline-none w-full md:w-40 text-xs"
           >
             <option value="">-- All Statuses --</option>
@@ -406,7 +424,7 @@ export default function ConsolidatedQueue() {
             <option value="Returned">Returned</option>
             <option value="Draft">Draft</option>
           </select>
-        </div>
+        </form>
       </div>
 
       {/* Main Table Container */}
@@ -417,7 +435,7 @@ export default function ConsolidatedQueue() {
               <RefreshCw className="w-6 h-6 animate-spin text-blue-500" />
               <span>Fetching dynamic queue records...</span>
             </div>
-          ) : filteredProposals.length > 0 ? (
+          ) : proposals.length > 0 ? (
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-950/40 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
@@ -431,7 +449,7 @@ export default function ConsolidatedQueue() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-850">
-                {filteredProposals.map((item) => {
+                {proposals.map((item) => {
                   const isCapEx = activeTab === "capex";
                   const label = isCapEx ? item.item_name : item.software_name;
                   const itemSpec = isCapEx ? item.custom_specification : item.justification;
@@ -442,8 +460,8 @@ export default function ConsolidatedQueue() {
                   const isHighlighted = item.id === highlightedId;
                   const rowClass = `transition-all duration-700 ${
                     isHighlighted 
-                      ? "bg-blue-950/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
-                      : "hover:bg-slate-950/20"
+                      ? "bg-blue-955/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
+                      : "hover:bg-slate-955/20"
                   }`;
 
                   return (
@@ -521,7 +539,7 @@ export default function ConsolidatedQueue() {
                         <div className="flex justify-end gap-1.5">
                           <button
                             onClick={() => openComments(item)}
-                            className="p-1.5 bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-blue-400 rounded border border-slate-850 transition-all cursor-pointer"
+                            className="p-1.5 bg-slate-955 hover:bg-slate-800 text-slate-400 hover:text-blue-400 rounded border border-slate-850 transition-all cursor-pointer"
                             title="Remarks & Thread Comments"
                           >
                             <MessageSquare className="w-3.5 h-3.5" />
@@ -571,10 +589,37 @@ export default function ConsolidatedQueue() {
         </div>
       </div>
 
+      {/* Pagination Controls Footer Container */}
+      <div className="flex items-center justify-between p-4 bg-slate-900 border border-slate-800 rounded-xl mt-4">
+        <span className="text-slate-500">
+          Showing <strong className="text-slate-300">{skip + 1}</strong> to{" "}
+          <strong className="text-slate-300">{Math.min(skip + limit, totalCount)}</strong> of{" "}
+          <strong className="text-slate-300">{totalCount}</strong> records
+        </span>
+        <div className="flex gap-2">
+          <button
+            onClick={handlePrevPage}
+            disabled={skip === 0}
+            className="p-2 bg-slate-955 border border-slate-850 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg flex items-center gap-1 font-bold text-slate-300 transition-all cursor-pointer"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            <span>Prev</span>
+          </button>
+          <button
+            onClick={handleNextPage}
+            disabled={skip + limit >= totalCount}
+            className="p-2 bg-slate-955 border border-slate-855 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg flex items-center gap-1 font-bold text-slate-300 transition-all cursor-pointer"
+          >
+            <span>Next</span>
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
       {/* Polymorphic Override Modal */}
       {activeOverrideItem && (
         <div className="fixed inset-0 bg-slate-955/75 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-lg p-6 space-y-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-lg p-6 space-y-4 shadow-2xl">
             <div className="flex justify-between items-center border-b border-slate-800 pb-3">
               <h3 className="font-bold text-white text-sm">Administrative Override Console</h3>
               <button 
@@ -623,13 +668,13 @@ export default function ConsolidatedQueue() {
                     required
                     value={overrideOffices}
                     onChange={(e) => setOverrideOffices(e.target.value)}
-                    className="w-full p-2.5 bg-slate-950 border border-slate-850 rounded-lg text-white"
+                    className="w-full p-2.5 bg-slate-955 border border-slate-850 rounded-lg text-white"
                   />
                 </div>
               </div>
 
               {/* Quantities / Users multi-year target grids */}
-              <div className="space-y-2.5 p-3 bg-slate-950 rounded-lg border border-slate-850">
+              <div className="space-y-2.5 p-3 bg-slate-955 rounded-lg border border-slate-850">
                 <span className="block text-[9px] uppercase font-bold text-slate-500 tracking-wider">
                   Adjust Multi-Year Target Capacities
                 </span>

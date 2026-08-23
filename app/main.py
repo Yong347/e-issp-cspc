@@ -40,53 +40,24 @@ elif isinstance(cors_origins, str):
     cors_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
 
 
+# app/main.py (Lifespan update)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Handles application startup and shutdown procedures.
-    Prints all registered endpoints to stdout on boot to verify route structures.
+    Handles application startup and shutdown procedures safely.
+    Guarantees exactly one yield to prevent Starlette runtime errors.
     """
     logger.info("=" * 70)
     logger.info("INITIALIZING CSPC E-ISSP COMPLIANCE ENGINE")
     logger.info("=" * 70)
     
-    # Run database migrations/initialization safely
-    alembic_ini_path = os.path.join(settings.BASE_DIR, "alembic.ini")
-    if os.path.exists(alembic_ini_path):
-        try:
-            from sqlalchemy import inspect
-            import alembic.config
-            import alembic.command
-            
-            alembic_cfg = alembic.config.Config(alembic_ini_path)
-            inspector = inspect(engine)
-            tables = inspector.get_table_names()
-            
-            # If the database is completely empty, build the base schema and stamp it
-            if not tables:
-                logger.info("Fresh database detected. Creating tables via metadata and stamping Alembic head...")
-                Base.metadata.create_all(bind=engine)
-                alembic.command.stamp(alembic_cfg, "head")
-                logger.info("Database initialized and stamped successfully.")
-            else:
-                logger.info("Existing database detected. Running database migrations via Alembic head upgrade...")
-                alembic.command.upgrade(alembic_cfg, "head")
-                logger.info("Database schema migrations completed successfully.")
-        except Exception as e:
-            logger.error(f"Failed to auto-upgrade database schema via Alembic: {str(e)}", exc_info=True)
-            try:
-                logger.warning("Attempting database metadata creation fallback...")
-                Base.metadata.create_all(bind=engine)
-                logger.info("Fallback database metadata creation completed successfully.")
-            except Exception as fallback_err:
-                logger.critical(f"Failed to run database metadata creation fallback: {str(fallback_err)}")
-    else:
-        try:
-            logger.info("alembic.ini not found. Creating tables via metadata...")
-            Base.metadata.create_all(bind=engine)
-            logger.info("Database base tables verified successfully.")
-        except Exception as e:
-            logger.critical(f"Failed to initialize metadata tables: {str(e)}")
+    # Safely verify and build schemas without blocking startup threads
+    try:
+        logger.info("Verifying database schema structures...")
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database base tables verified successfully.")
+    except Exception as e:
+        logger.critical(f"Failed to initialize metadata tables on startup: {str(e)}")
 
     # --- DEFENSIVE SCHEMA ALIGNMENT CHECK ---
     try:
@@ -97,19 +68,17 @@ async def lifespan(app: FastAPI):
         if "subscription_proposals" in inspector.get_table_names():
             sub_cols = [c['name'] for c in inspector.get_columns('subscription_proposals')]
             if 'is_archived' not in sub_cols:
-                logger.info("Defensive Sync: 'is_archived' column missing in 'subscription_proposals' table. Appending column...")
+                logger.info("Defensive Sync: 'is_archived' column missing in 'subscription_proposals'. Appending column...")
                 with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE subscription_proposals ADD COLUMN is_archived BOOLEAN DEFAULT 0"))
-                logger.info("Defensive Sync: 'is_archived' successfully appended to 'subscription_proposals'.")
+                    conn.execute(text("ALTER TABLE subscription_proposals ADD COLUMN is_archived BOOLEAN DEFAULT false"))
 
         # Check and fix 'issp_core' table
         if "issp_core" in inspector.get_table_names():
             core_cols = [c['name'] for c in inspector.get_columns('issp_core')]
             if 'is_archived' not in core_cols:
-                logger.info("Defensive Sync: 'is_archived' column missing in 'issp_core' table. Appending column...")
+                logger.info("Defensive Sync: 'is_archived' column missing in 'issp_core'. Appending column...")
                 with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE issp_core ADD COLUMN is_archived BOOLEAN DEFAULT 0"))
-                logger.info("Defensive Sync: 'is_archived' successfully appended to 'issp_core'.")
+                    conn.execute(text("ALTER TABLE issp_core ADD COLUMN is_archived BOOLEAN DEFAULT false"))
     except Exception as schema_err:
         logger.error(f"Failed to execute defensive schema alignment: {str(schema_err)}")
     
@@ -126,8 +95,13 @@ async def lifespan(app: FastAPI):
         
     logger.info(f"Scan complete: {len(app.routes)} active routes registered.")
     logger.info("=" * 70)
-    yield
+    
+    yield # Startup complete, begin listening for requests
+    
+    logger.info("=" * 70)
+    logger.info("SHUTTING DOWN CSPC E-ISSP COMPLIANCE ENGINE")
     logger.info("De-allocating application system engine instances...")
+    logger.info("=" * 70)
 
 
 # Initialize the API engine with lifespan
