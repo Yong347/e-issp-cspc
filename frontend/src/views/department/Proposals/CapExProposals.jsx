@@ -35,7 +35,8 @@ import {
   Building2,
   Edit2, 
   X,
-  Save
+  Save,
+  Calendar
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -69,6 +70,7 @@ export default function CapExProposals() {
   const [supplierName, setSupplierName] = useState("");
   const [canvasFile, setCanvasFile] = useState(null);
   const [creatingProposal, setCreatingProposal] = useState(false);
+  const [canvasExpirationDate, setCanvasExpirationDate] = useState("");
   
   // Secondary post-creation upload state (standard replacement uploads)
   const [uploadProposalId, setUploadProposalId] = useState(null);
@@ -96,6 +98,7 @@ export default function CapExProposals() {
   const [editYearlyQuantities, setEditYearlyQuantities] = useState({});
   const [editTargetOffices, setEditTargetOffices] = useState("");
   const [editIsExpansion, setEditIsExpansion] = useState(false);
+  const [editCanvasExpirationDate, setEditCanvasExpirationDate] = useState("");
   const [updatingProposal, setUpdatingProposal] = useState(false);
 
   useEffect(() => {
@@ -142,12 +145,13 @@ export default function CapExProposals() {
     }
   }, [user]);
 
-  const fetchData = async () => {
+ const fetchData = async () => {
     setLoading(true);
     setError(null);
     try {
       const [proposalsData, catalogData] = await Promise.all([
-        getProposals(activeCycle),
+        // Pass "", 0, 500 to expand the list limit parameter on the server
+        getProposals(activeCycle, "", 0, 500),
         getDeptCatalog()
       ]);
       setProposals(proposalsData);
@@ -272,14 +276,15 @@ export default function CapExProposals() {
     setSuccess(null);
 
     if (itemSelect === "other") {
-      if (!canvasFile || !supplierName.trim()) {
-        setError("Compliance Violation: Posing a custom unlisted item requires a supplier name and a canvas quotation document.");
+      if (!canvasFile || !supplierName.trim() || !canvasExpirationDate) {
+        setError("Compliance Violation: Posing a custom unlisted item requires a supplier name, a canvas quotation document, and a validity expiration date.");
         return;
       }
     }
     
     setCreatingProposal(true);
     const parsedOffices = targetOffices ? [targetOffices] : [];
+    const expirationPayload = canvasExpirationDate ? new Date(canvasExpirationDate).toISOString() : null;
       
     const payload = {
       item_select: itemSelect,
@@ -288,7 +293,8 @@ export default function CapExProposals() {
       unit_cost: parseFloat(unitCost) || 0.0,
       target_offices_json: parsedOffices,
       is_expansion: isExpansion,
-      canvas_evidence_url: null
+      canvas_evidence_url: null,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -305,6 +311,7 @@ export default function CapExProposals() {
       setIsExpansion(false);
       setSupplierName("");
       setCanvasFile(null);
+      setCanvasExpirationDate("");
       
       const fileInput = document.getElementById("inline-canvas-input");
       if (fileInput) fileInput.value = "";
@@ -447,6 +454,7 @@ export default function CapExProposals() {
     setEditUnitCost(String(p.unit_cost));
     setEditIsExpansion(p.is_expansion || false);
     setEditTargetOffices(p.target_offices_json && p.target_offices_json.length > 0 ? p.target_offices_json[0] : "");
+    setEditCanvasExpirationDate(p.canvas_expiration_date ? p.canvas_expiration_date.split("T")[0] : "");
     
     const prefill = {};
     planningYears.forEach(year => {
@@ -472,6 +480,7 @@ export default function CapExProposals() {
     setUpdatingProposal(true);
 
     const parsedOffices = editTargetOffices ? [editTargetOffices] : [];
+    const expirationPayload = editCanvasExpirationDate ? new Date(editCanvasExpirationDate).toISOString() : null;
 
     const payload = {
       item_select: editItemSelect,
@@ -479,7 +488,8 @@ export default function CapExProposals() {
       yearly_quantities: editYearlyQuantities,
       unit_cost: parseFloat(editUnitCost) || 0.0,
       target_offices_json: parsedOffices,
-      is_expansion: editIsExpansion
+      is_expansion: editIsExpansion,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -582,7 +592,7 @@ export default function CapExProposals() {
             </div>
 
             {itemSelect === "other" && (
-              <div className="space-y-4 p-3.5 bg-slate-950 border border-slate-855 rounded-lg animate-fadeIn">
+              <div className="space-y-4 p-3.5 bg-slate-955 border border-slate-850 rounded-lg animate-fadeIn">
                 <span className="block text-[9px] uppercase font-extrabold text-blue-400 tracking-wider">
                   Mandatory Market Canvas Verification
                 </span>
@@ -623,6 +633,20 @@ export default function CapExProposals() {
                     accept="application/pdf"
                     onChange={(e) => setCanvasFile(e.target.files[0])}
                     className="w-full text-slate-300 text-xs"
+                  />
+                </div>
+                {/* NEW CAPEX EXPIRATION DATE INPUT */}
+                <div>
+                  <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Canvas Expiration Date</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={canvasExpirationDate}
+                    onChange={(e) => setCanvasExpirationDate(e.target.value)}
+                    className="w-full p-2 bg-slate-900 border border-slate-800 rounded text-white font-mono"
                   />
                 </div>
               </div>
@@ -823,7 +847,7 @@ export default function CapExProposals() {
                             <td className="py-3.5 px-2">
                               <div className="font-semibold text-slate-300">Total: {p.total_qty} units</div>
                               <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
-                                {planningYears.map(y => `${y}: ${p.yearly_quantities?.[String(y)] || 0}`).join(" | ")}
+                                {planningYears.map(y => y + ": " + (p.yearly_quantities?.[String(y)] || 0)).join(" | ")}
                               </div>
                             </td>
                             <td className="py-3.5 px-2 font-mono text-slate-200">
@@ -840,6 +864,14 @@ export default function CapExProposals() {
                                   >
                                     {filename}
                                   </a>
+                                  {p.canvas_expiration_date ? (
+                                    <span className="text-[9px] text-amber-500 font-mono font-semibold flex items-center gap-1">
+                                      <Calendar className="w-3 h-3" />
+                                      <span>Expires: {new Date(p.canvas_expiration_date).toLocaleDateString()}</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-[9px] text-slate-500 italic">No Expiry Set</span>
+                                  )}
                                   {p.s3_storage_class === "GLACIER" ? (
                                     p.is_restoring ? (
                                       <div className="space-y-1 w-full max-w-[120px] pt-1">
@@ -876,7 +908,7 @@ export default function CapExProposals() {
                               ) : (
                                 <button 
                                   onClick={() => setUploadProposalId(p.id)}
-                                  className="text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-1 cursor-pointer"
+                                  className="text-blue-400 underline font-semibold flex items-center gap-1 cursor-pointer"
                                 >
                                   <Upload className="w-3 h-3" />
                                   <span>Upload Canvas</span>
@@ -912,6 +944,7 @@ export default function CapExProposals() {
                                       className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
                                       title="Edit Draft Parameters"
                                     >
+                                      
                                       <Edit2 className="w-4 h-4" />
                                     </button>
                                     <button
@@ -1060,6 +1093,21 @@ export default function CapExProposals() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* NEW EDIT-MODAL HARDWARE CANVAS EXPIRATION FIELD */}
+              <div className="space-y-1.5 pt-1.5">
+                <label className="block text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Canvas Validity Expiration Date</span>
+                </label>
+                <input
+                  type="date"
+                  required={editItemSelect === "other"}
+                  value={editCanvasExpirationDate}
+                  onChange={(e) => setEditCanvasExpirationDate(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono text-xs outline-none"
+                />
               </div>
 
               <button

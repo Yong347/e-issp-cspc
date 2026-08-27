@@ -6,7 +6,7 @@ import argparse
 from decimal import Decimal
 from datetime import datetime, timedelta
 import bcrypt
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 # Import Base and ALL models to ensure SQLAlchemy registers the entire schema metadata
@@ -48,6 +48,39 @@ from app.config import settings
 
 logging.basicConfig(level=logging.INFO, format="[SYSTEM] %(asctime)s - %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def align_database_schemas(engine):
+    """
+    Defensively inspects target tables at runtime and appends any columns
+    defined in SQLAlchemy models that are missing physically from the database.
+    """
+    logger.info("Running defensive schema alignment checks...")
+    inspector = inspect(engine)
+    
+    # 1. Align 'master_narratives' table
+    if "master_narratives" in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('master_narratives')]
+        
+        columns_to_sync = {
+            "authoring_cycle_duration": "INTEGER",
+            "site_development_plan_url": "VARCHAR(500)",
+            "fiber_backbone_url": "VARCHAR(500)",
+            "system_architecture_url": "VARCHAR(500)",
+            "process_flow_diagram_url": "VARCHAR(500)"
+        }
+        
+        for col_name, col_type in columns_to_sync.items():
+            if col_name not in columns:
+                logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'master_narratives' table.")
+                try:
+                    with engine.begin() as conn:
+                        if "sqlite" in settings.DATABASE_URL.lower():
+                            conn.execute(text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_type}"))
+                        else:
+                            conn.execute(text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_type} NULL"))
+                except Exception as ex:
+                    logger.warning(f"Failed to append column '{col_name}' defensively: {str(ex)}")
 
 
 def seed_document_hierarchy(db):
@@ -1413,6 +1446,9 @@ def main():
             except Exception:
                 pass
             cursor.close()
+
+    # Align schemas before doing any actions or transactions (Gaps 4, 11, 12, 18, 19, 21, 22, 26)
+    align_database_schemas(engine)
 
     logger.info("Compiling and verifying database schema metadata...")
     Base.metadata.create_all(bind=engine)

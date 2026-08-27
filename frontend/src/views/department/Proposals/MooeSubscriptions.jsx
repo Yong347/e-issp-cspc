@@ -6,7 +6,7 @@ import { useCycle } from "../../../context/CycleContext";
 import { 
   getSubscriptions, 
   createSubscription, 
-  updateSubscription, // Ensure updateSubscription is imported
+  updateSubscription, 
   deleteSubscription, 
   submitSubscription, 
   uploadCanvas,
@@ -31,9 +31,10 @@ import {
   RefreshCcw,
   Clock,
   HardDrive,
-  Edit2, // Added edit icon
+  Edit2, 
   X,
-  Save
+  Save,
+  Calendar
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -61,6 +62,7 @@ export default function MooeSubscriptions() {
   const [supplierName, setSupplierName] = useState("");
   const [canvasFile, setCanvasFile] = useState(null);
   const [creatingSubscription, setCreatingSubscription] = useState(false);
+  const [canvasExpirationDate, setCanvasExpirationDate] = useState("");
   
   // Secondary post-creation upload state (standard replacement uploads)
   const [uploadSubscriptionId, setUploadSubscriptionId] = useState(null);
@@ -85,6 +87,7 @@ export default function MooeSubscriptions() {
   const [editAnnualCostPerUser, setEditAnnualCostPerUser] = useState("");
   const [editYearlyUsers, setEditYearlyUsers] = useState({});
   const [editTargetOffices, setEditTargetOffices] = useState("");
+  const [editCanvasExpirationDate, setEditCanvasExpirationDate] = useState("");
   const [updatingSubscription, setUpdatingSubscription] = useState(false);
 
   useEffect(() => {
@@ -180,8 +183,8 @@ export default function MooeSubscriptions() {
     setSuccess(null);
 
     // Strict validation check requiring quotation attachments on create
-    if (!canvasFile || !supplierName.trim()) {
-      setError("Compliance Violation: Setting up a subscription request requires an attached canvas quotation.");
+    if (!canvasFile || !supplierName.trim() || !canvasExpirationDate) {
+      setError("Compliance Violation: Setting up a subscription request requires a supplier name, canvas PDF, and validity expiration date.");
       return;
     }
     
@@ -189,6 +192,8 @@ export default function MooeSubscriptions() {
     const parsedOffices = targetOffices
       ? targetOffices.split(",").map(o => o.trim()).filter(o => o.length > 0)
       : [];
+
+    const expirationPayload = canvasExpirationDate ? new Date(canvasExpirationDate).toISOString() : null;
       
     const payload = {
       subscription_type: subscriptionType,
@@ -197,7 +202,8 @@ export default function MooeSubscriptions() {
       yearly_users: yearlyUsers,
       annual_cost_per_user: parseFloat(annualCostPerUser) || 0.0,
       target_offices_json: parsedOffices,
-      canvas_evidence_url: null
+      canvas_evidence_url: null,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -217,6 +223,7 @@ export default function MooeSubscriptions() {
       setTargetOffices("");
       setSupplierName("");
       setCanvasFile(null);
+      setCanvasExpirationDate("");
       
       const fileInput = document.getElementById("inline-canvas-mooe-input");
       if (fileInput) fileInput.value = "";
@@ -359,6 +366,7 @@ export default function MooeSubscriptions() {
     setEditJustification(s.justification);
     setEditAnnualCostPerUser(String(s.annual_cost_per_user));
     setEditTargetOffices(s.target_offices_json ? s.target_offices_json.join(", ") : "");
+    setEditCanvasExpirationDate(s.canvas_expiration_date ? s.canvas_expiration_date.split("T")[0] : "");
     
     const prefill = {};
     planningYears.forEach(year => {
@@ -377,13 +385,16 @@ export default function MooeSubscriptions() {
       ? editTargetOffices.split(",").map(o => o.trim()).filter(o => o.length > 0)
       : [];
 
+    const expirationPayload = editCanvasExpirationDate ? new Date(editCanvasExpirationDate).toISOString() : null;
+
     const payload = {
       subscription_type: editSubscriptionType,
       software_name: editSoftwareName.trim(),
       justification: editJustification.trim(),
       yearly_users: editYearlyUsers,
       annual_cost_per_user: parseFloat(editAnnualCostPerUser) || 0.0,
-      target_offices_json: parsedOffices
+      target_offices_json: parsedOffices,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -470,11 +481,11 @@ export default function MooeSubscriptions() {
                 value={softwareName}
                 onChange={(e) => setSoftwareName(e.target.value)}
                 placeholder="e.g. Adobe Creative Cloud, JetBrains Rider"
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
               />
             </div>
 
-            <div className="space-y-4 p-3.5 bg-slate-950 border border-slate-850 rounded-lg animate-fadeIn">
+            <div className="space-y-4 p-3.5 bg-slate-955 border border-slate-850 rounded-lg animate-fadeIn">
               <span className="block text-[9px] uppercase font-extrabold text-blue-400 tracking-wider">
                 Mandatory Market Canvas Verification
               </span>
@@ -502,6 +513,20 @@ export default function MooeSubscriptions() {
                   accept="application/pdf"
                   onChange={(e) => setCanvasFile(e.target.files[0])}
                   className="w-full text-slate-300 text-xs"
+                />
+              </div>
+              {/* NEW MOOE EXPIRATION DATE INPUT */}
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Canvas Expiration Date</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={canvasExpirationDate}
+                  onChange={(e) => setCanvasExpirationDate(e.target.value)}
+                  className="w-full p-2 bg-slate-900 border border-slate-800 rounded text-white font-mono"
                 />
               </div>
             </div>
@@ -568,7 +593,7 @@ export default function MooeSubscriptions() {
                 value={targetOffices}
                 onChange={(e) => setTargetOffices(e.target.value)}
                 placeholder="e.g. Design Faculty, CS Lab 1"
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
               />
             </div>
 
@@ -640,157 +665,154 @@ export default function MooeSubscriptions() {
             </h3>
 
             <div className="overflow-x-auto">
-              {loading ? (
-                <div className="flex flex-col items-center justify-center py-16 gap-2 text-slate-500">
-                  <RefreshCw className="w-6 h-6 animate-spin text-blue-500" />
-                  <span className="text-xs">Loading active queue...</span>
-                </div>
-              ) : subscriptions.length > 0 ? (
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800 text-slate-500 text-[10px] uppercase tracking-wider font-bold">
-                      <th className="py-3 px-2">Software Package</th>
-                      <th className="py-3 px-2">User License Seats</th>
-                      <th className="py-3 px-2">Annual Unit Rate</th>
-                      <th className="py-3 px-2">Quotation</th>
-                      <th className="py-3 px-2">Status</th>
-                      <th className="py-3 px-2 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-850">
-                    {subscriptions.map(sub => {
-                      const filename = sub.canvas_evidence_url ? sub.canvas_evidence_url.split("/").pop() : null;
-                      const totalSeats = Object.values(sub.yearly_users || {}).reduce((a, b) => a + b, 0);
-                      
-                      const isHighlighted = sub.id === highlightedId;
-                      const rowClass = `transition-all duration-700 ${
-                        isHighlighted 
-                          ? "bg-blue-955/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
-                          : "hover:bg-slate-950/20"
-                      }`;
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-500 text-[10px] uppercase tracking-wider font-bold">
+                    <th className="py-3 px-2">Software Package</th>
+                    <th className="py-3 px-2">User License Seats</th>
+                    <th className="py-3 px-2">Annual Unit Rate</th>
+                    <th className="py-3 px-2">Quotation</th>
+                    <th className="py-3 px-2">Status</th>
+                    <th className="py-3 px-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-855">
+                  {subscriptions.map(sub => {
+                    const filename = sub.canvas_evidence_url ? sub.canvas_evidence_url.split("/").pop() : null;
+                    const totalSeats = Object.values(sub.yearly_users || {}).reduce((a, b) => a + b, 0);
+                    
+                    const isHighlighted = sub.id === highlightedId;
+                    const rowClass = `transition-all duration-700 ${
+                      isHighlighted 
+                        ? "bg-blue-955/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
+                        : "hover:bg-slate-950/20"
+                    }`;
 
-                      return (
-                        <tr key={sub.id} id={`subscription-${sub.id}`} className={rowClass}>
-                          <td className="py-3.5 px-2">
-                            <div className="font-semibold text-slate-200">{sub.software_name}</div>
-                            <div className="text-[10px] text-slate-500 mt-0.5">{sub.subscription_type}</div>
-                          </td>
-                          <td className="py-3.5 px-2">
-                            <div className="font-semibold text-slate-300 font-sans">Total: {totalSeats} seats</div>
-                            <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
-                              {planningYears.map(y => `${y}: ${sub.yearly_users?.[String(y)] || 0}`).join(" | ")}
-                            </div>
-                          </td>
-                          <td className="py-3.5 px-2 font-mono text-slate-200">
-                            ₱{parseFloat(sub.annual_cost_per_user).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          </td>
-                          <td className="py-3.5 px-2">
-                            {sub.canvas_evidence_url ? (
-                              <div className="flex flex-col gap-1 items-start">
-                                <a 
-                                  href={sub.canvas_evidence_url} 
-                                  target="_blank" 
-                                  rel="noreferrer" 
-                                  className="text-blue-400 underline font-semibold truncate max-w-[120px]"
-                                >
-                                  {filename}
-                                </a>
-                                {sub.s3_storage_class === "GLACIER" ? (
-                                  sub.is_restoring ? (
-                                    /* Active Time-Based S3 Glacier Progress Bar Indicator */
-                                    <div className="space-y-1 w-full max-w-[120px] pt-1">
-                                      <div className="flex justify-between text-[8px] font-mono text-amber-400 font-semibold">
-                                        <span>RESTORING</span>
-                                        <span>{sub.restore_progress || 50}%</span>
-                                      </div>
-                                      <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden border border-slate-855">
-                                        <div 
-                                          className="h-full bg-amber-500 rounded-full transition-all duration-500 animate-pulse" 
-                                          style={{ width: `${sub.restore_progress || 50}%` }} 
-                                        />
-                                      </div>
+                    return (
+                      <tr key={sub.id} id={`subscription-${sub.id}`} className={rowClass}>
+                        <td className="py-3.5 px-2">
+                          <div className="font-semibold text-slate-200">{sub.software_name}</div>
+                          <div className="text-[10px] text-slate-500 mt-0.5">{sub.subscription_type}</div>
+                        </td>
+                        <td className="py-3.5 px-2">
+                          <div className="font-semibold text-slate-300 font-sans">Total: {totalSeats} seats</div>
+                          <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                            {planningYears.map(y => y + ": " + (sub.yearly_users?.[String(y)] || 0)).join(" | ")}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-2 font-mono text-slate-200">
+                          ₱{parseFloat(sub.annual_cost_per_user).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="py-3.5 px-2">
+                          {sub.canvas_evidence_url ? (
+                            <div className="flex flex-col gap-1 items-start">
+                              <a 
+                                href={sub.canvas_evidence_url} 
+                                target="_blank" 
+                                rel="noreferrer" 
+                                className="text-blue-400 underline font-semibold truncate max-w-[120px]"
+                              >
+                                {filename}
+                              </a>
+                              {sub.canvas_expiration_date ? (
+                                <span className="text-[9px] text-amber-500 font-mono font-semibold flex items-center gap-1">
+                                  <Calendar className="w-3 h-3" />
+                                  <span>Expires: {new Date(sub.canvas_expiration_date).toLocaleDateString()}</span>
+                                </span>
+                              ) : (
+                                <span className="text-[9px] text-slate-500 italic">No Expiry Set</span>
+                              )}
+                              {sub.s3_storage_class === "GLACIER" ? (
+                                sub.is_restoring ? (
+                                  /* Active Time-Based S3 Glacier Progress Bar Indicator */
+                                  <div className="space-y-1 w-full max-w-[120px] pt-1">
+                                    <div className="flex justify-between text-[8px] font-mono text-amber-400 font-semibold">
+                                      <span>RESTORING</span>
+                                      <span>{sub.restore_progress || 50}%</span>
                                     </div>
-                                  ) : (
-                                    <button 
-                                      onClick={() => handleGlacierRestore(sub.id)}
-                                      className="text-[9px] text-amber-400 hover:text-amber-300 underline font-semibold cursor-pointer"
-                                    >
-                                      S3 Glacier Restore
-                                    </button>
-                                  )
+                                    <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden border border-slate-855">
+                                      <div 
+                                        className="h-full bg-amber-500 rounded-full transition-all duration-500 animate-pulse" 
+                                        style={{ width: `${sub.restore_progress || 50}%` }} 
+                                      />
+                                    </div>
+                                  </div>
                                 ) : (
                                   <button 
-                                    onClick={() => handleMetadataSync(sub.id)}
-                                    title="Sync metadata class"
-                                    className="text-[9px] text-slate-500 hover:text-slate-400 flex items-center gap-0.5 cursor-pointer font-sans"
+                                    onClick={() => handleGlacierRestore(sub.id)}
+                                    className="text-[9px] text-amber-400 underline font-semibold"
                                   >
-                                    <RefreshCcw className="w-2.5 h-2.5" />
-                                    <span>Sync</span>
+                                    S3 Glacier Restore
                                   </button>
-                                )}
-                              </div>
-                            ) : (
-                              <button 
-                                onClick={() => setUploadSubscriptionId(sub.id)}
-                                className="text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-1 cursor-pointer"
-                              >
-                                <Upload className="w-3 h-3" />
-                                <span>Upload Canvas</span>
-                              </button>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-2">
-                            <StatusPill status={sub.status} />
-                          </td>
-                          <td className="py-3.5 px-2 text-right">
-                            <div className="flex justify-end gap-1.5">
-                              <button
-                                onClick={() => openComments(sub)}
-                                className="p-1 text-slate-400 hover:text-blue-400 transition-colors cursor-pointer"
-                                title="Comments thread"
-                              >
-                                <MessageCircle className="w-4 h-4" />
-                              </button>
-                              
-                              {sub.status === "Draft" || sub.status === "Returned" ? (
-                                <>
-                                  <button
-                                    onClick={() => openEditModal(sub)}
-                                    className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
-                                    title="Edit Subscription Parameters"
-                                  >
-                                    <Edit2 className="w-4 h-4" />
-                                  </button>
-                                  <button
-                                    onClick={() => handleSubmit(sub.id)}
-                                    className="p-1 text-slate-400 hover:text-emerald-400 transition-colors cursor-pointer"
-                                    title="Submit Proposal"
-                                  >
-                                    <Send className="w-4 h-4" />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDelete(sub.id)}
-                                    className="p-1 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
-                                    title="Delete Draft"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </>
+                                )
                               ) : (
-                                <span className="text-[10px] text-slate-500 italic">Locked</span>
+                                <button 
+                                  onClick={() => handleMetadataSync(sub.id)}
+                                  title="Sync metadata class"
+                                  className="text-[9px] text-slate-500 flex items-center gap-0.5 font-sans"
+                                >
+                                  <RefreshCcw className="w-2.5 h-2.5" />
+                                  <span>Sync</span>
+                                </button>
                               )}
                             </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="text-center py-16 text-slate-500">
-                  No active software licensing proposals logged. Create a draft using the panel on the left.
-                </div>
-              )}
+                          ) : (
+                            <button 
+                              onClick={() => setUploadSubscriptionId(sub.id)}
+                              className="text-blue-400 underline font-semibold flex items-center gap-1"
+                            >
+                              <Upload className="w-3.5 h-3.5" />
+                              <span>Upload Canvas</span>
+                            </button>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-2">
+                          <StatusPill status={sub.status} />
+                        </td>
+                        <td className="py-3.5 px-2 text-right">
+                          <div className="flex justify-end gap-1.5">
+                            <button
+                              onClick={() => openComments(sub)}
+                              className="p-1 text-slate-400 hover:text-blue-400 transition-colors cursor-pointer"
+                              title="Comments thread"
+                            >
+                              <MessageCircle className="w-4 h-4" />
+                            </button>
+                            
+                            {sub.status === "Draft" || sub.status === "Returned" ? (
+                              <>
+                                <button
+                                  onClick={() => openEditModal(sub)}
+                                  className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+                                  title="Edit Subscription Parameters"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleSubmit(sub.id)}
+                                  className="p-1 text-slate-400 hover:text-emerald-400 transition-colors cursor-pointer"
+                                  title="Submit Proposal"
+                                >
+                                  <Send className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(sub.id)}
+                                  className="p-1 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
+                                  title="Delete Draft"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            ) : (
+                              <span className="text-[10px] text-slate-500 italic">Locked</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -857,7 +879,7 @@ export default function MooeSubscriptions() {
                 value={newCommentText}
                 onChange={(e) => setNewCommentText(e.target.value)}
                 placeholder="Type your message..."
-                className="flex-1 p-2 bg-slate-950 border border-slate-800 rounded text-xs text-white outline-none"
+                className="flex-1 p-2 bg-slate-955 border border-slate-800 rounded text-xs text-white outline-none"
               />
               <button 
                 type="submit"
@@ -914,7 +936,7 @@ export default function MooeSubscriptions() {
                 <input
                   type="number" step="0.01" required value={editAnnualCostPerUser}
                   onChange={(e) => setEditAnnualCostPerUser(e.target.value)}
-                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono"
+                  className="w-full p-2.5 bg-slate-955 border border-slate-850 rounded-lg text-white font-mono"
                 />
               </div>
 
@@ -941,7 +963,7 @@ export default function MooeSubscriptions() {
                 <textarea
                   required rows={3} value={editJustification}
                   onChange={(e) => setEditJustification(e.target.value)}
-                  className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white resize-none"
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white resize-none"
                 />
               </div>
 
@@ -951,6 +973,21 @@ export default function MooeSubscriptions() {
                   type="text" required value={editTargetOffices}
                   onChange={(e) => setEditTargetOffices(e.target.value)}
                   className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              {/* NEW EDIT-MODAL SOFTWARE CANVAS EXPIRATION FIELD */}
+              <div className="space-y-1.5 pt-1.5">
+                <label className="block text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Canvas Validity Expiration Date</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={editCanvasExpirationDate}
+                  onChange={(e) => setEditCanvasExpirationDate(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono text-xs outline-none"
                 />
               </div>
 

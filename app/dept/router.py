@@ -601,6 +601,8 @@ def get_departmental_proposals(
     Retrieves active proposals submitted by the calling department within the active or selected cycle. 
     Provides explicit server-side logging for precise list diagnosis.
     """
+    from sqlalchemy import case, or_
+
     logger.info("=" * 60)
     logger.info("[DIAGNOSTIC] GET /proposals request received")
     logger.info(f"[DIAGNOSTIC] User Dept ID: {user['department_id']}")
@@ -614,15 +616,32 @@ def get_departmental_proposals(
     total_dept_items_count = db.query(Proposal).filter(Proposal.department_id == user["department_id"]).count()
     logger.info(f"[DIAGNOSTIC] Total raw items in DB for this department: {total_dept_items_count}")
 
+    # Build the base query, filtering out archived items defensively
     base_query = db.query(Proposal).filter(
-        Proposal.department_id == user["department_id"]
+        Proposal.department_id == user["department_id"],
+        or_(Proposal.is_archived == False, Proposal.is_archived == None)
     )
     if status_filter:
         logger.info(f"[DIAGNOSTIC] Filtering by status: {status_filter}")
         base_query = base_query.filter(Proposal.status == status_filter)
 
-    # Query with strict issp_period filter
-    results = base_query.filter(Proposal.issp_period == target_period).offset(skip).limit(limit).all()
+    # Define custom sorting order: Draft (1) -> Returned (2) -> Submitted (3) -> Approved (4)
+    status_order = case(
+        (Proposal.status == ProposalStatus.DRAFT, 1),
+        (Proposal.status == ProposalStatus.RETURNED, 2),
+        (Proposal.status == ProposalStatus.SUBMITTED, 3),
+        (Proposal.status == ProposalStatus.APPROVED, 4),
+        else_=5
+    )
+
+    # Query with strict issp_period filter, sorted by status order then alphabetically by name
+    results = (
+        base_query.filter(Proposal.issp_period == target_period)
+        .order_by(status_order.asc(), Proposal.item_name.asc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     logger.info(f"[DIAGNOSTIC] Strict period filter query found {len(results)} items.")
     
     # Print details of strict query results
@@ -632,7 +651,12 @@ def get_departmental_proposals(
     # Safety Fallback
     if not results:
         logger.warning("[DIAGNOSTIC] Strict filter returned 0 results. Triggering safety fallback query...")
-        results = base_query.offset(skip).limit(limit).all()
+        results = (
+            base_query.order_by(status_order.asc(), Proposal.item_name.asc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
         logger.info(f"[DIAGNOSTIC] Fallback query returned {len(results)} items.")
         for idx, r in enumerate(results):
              logger.info(f"  -> Fallback Item {idx+1}: ID={r.id}, Name={r.item_name}, Cycle={r.issp_period}, Archived={r.is_archived}, Status={r.status.value}")

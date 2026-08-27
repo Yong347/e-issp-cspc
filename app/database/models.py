@@ -1195,6 +1195,7 @@ class MasterNarrative(Base):
     manpower_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
     annual_ict_budget: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    authoring_cycle_duration: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     major_final_outputs: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     core_offices_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)

@@ -1,7 +1,7 @@
 // frontend/src/views/admin/Catalog/CatalogManager.jsx
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
-import { Plus, Settings2, RefreshCw, AlertCircle, CheckCircle, Package, ToggleLeft, ToggleRight, FileSearch } from "lucide-react";
+import { Plus, Settings2, RefreshCw, AlertCircle, CheckCircle, Package, ToggleLeft, ToggleRight, FileSearch, Calendar } from "lucide-react";
 
 export default function CatalogManager() {
   const { user } = useAuth();
@@ -12,7 +12,7 @@ export default function CatalogManager() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Form states matching CatalogItem schemas
+  // Form states matching CatalogItem schemas (Extended to support expiration dates)
   const [form, setForm] = useState({
     item_key: "",
     display_name: "",
@@ -20,7 +20,8 @@ export default function CatalogManager() {
     category: "computing_devices",
     allowed_offices: "",
     supplier_name: "",
-    canvas_evidence_url: ""
+    canvas_evidence_url: "",
+    canvas_expiration_date: "" // Added
   });
 
   const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -82,7 +83,8 @@ export default function CatalogManager() {
         standard_unit_cost: String(selected.unit_cost),
         category: selected.type === "CapEx" ? "computing_devices" : "software",
         supplier_name: selected.supplier_name,
-        canvas_evidence_url: selected.canvas_evidence_url
+        canvas_evidence_url: selected.canvas_evidence_url,
+        canvas_expiration_date: selected.canvas_expiration_date ? selected.canvas_expiration_date.split("T")[0] : "" // Auto-map existing date if available
       });
       setSuccess(`Referenced approved request fields compiled dynamically.`);
     }
@@ -104,6 +106,11 @@ export default function CatalogManager() {
       : [];
 
     try {
+      // Format expiration date into an ISO String or null before sending to the backend API
+      const expirationPayload = form.canvas_expiration_date 
+        ? new Date(form.canvas_expiration_date).toISOString() 
+        : null;
+
       const res = await fetch(`${apiUrl}/api/admin/catalog`, {
         method: "POST",
         headers: {
@@ -118,6 +125,7 @@ export default function CatalogManager() {
           allowed_offices: parsedOffices,
           supplier_name: form.supplier_name.trim() || null,
           canvas_evidence_url: form.canvas_evidence_url.trim() || null,
+          canvas_expiration_date: expirationPayload, // Bind mapped expiration payload
           is_active: true
         })
       });
@@ -135,7 +143,8 @@ export default function CatalogManager() {
         category: "computing_devices",
         allowed_offices: "",
         supplier_name: "",
-        canvas_evidence_url: ""
+        canvas_evidence_url: "",
+        canvas_expiration_date: "" // Reset field
       });
       fetchCatalog();
     } catch (err) {
@@ -194,15 +203,16 @@ export default function CatalogManager() {
         </button>
       </div>
 
+      {/* Status Notifications */}
       {error && (
-        <div className="p-4 bg-red-950/40 border border-red-900/50 text-red-300 rounded-lg flex items-start gap-2.5">
+        <div className="p-4 bg-red-955/40 border border-red-900/30 text-red-300 rounded-lg flex items-start gap-2.5">
           <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-950/40 border border-emerald-900/50 text-emerald-300 rounded-lg flex items-start gap-2.5">
+        <div className="p-4 bg-emerald-950/40 border border-emerald-900/30 text-emerald-300 rounded-lg flex items-start gap-2.5">
           <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <span>{success}</span>
         </div>
@@ -245,7 +255,7 @@ export default function CatalogManager() {
                 required
                 value={form.item_key}
                 onChange={(e) => setForm({ ...form, item_key: e.target.value })}
-                placeholder="e.g. tablet_standard_v2"
+                placeholder="e.g. projector_classroom_v2"
                 className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white text-xs outline-none font-mono"
               />
             </div>
@@ -342,12 +352,30 @@ export default function CatalogManager() {
                   className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 text-xs outline-none font-mono cursor-not-allowed"
                 />
               </div>
+
+              {/* NEW EXPIRATION DATE INPUT FIELD */}
+              <div className="space-y-1.5 pt-1.5">
+                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider flex justify-between items-center">
+                  <span className="flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Canvas Validity Expiration Date</span>
+                  </span>
+                  <span className="text-[9px] text-blue-400">Required</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={form.canvas_expiration_date}
+                  onChange={(e) => setForm({ ...form, canvas_expiration_date: e.target.value })}
+                  className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white text-xs outline-none font-mono focus:border-blue-500"
+                />
+              </div>
             </div>
 
             <button
               type="submit"
               disabled={submitting}
-              className="w-full p-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 mt-4"
+              className="w-full p-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 mt-4 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
               <span>{submitting ? "Processing..." : "Add Catalog Item"}</span>
@@ -379,13 +407,13 @@ export default function CatalogManager() {
                     <th className="py-3 px-2">Key / Label</th>
                     <th className="py-3 px-2">Category</th>
                     <th className="py-3 px-2">Standard Unit Cost</th>
-                    <th className="py-3 px-2">Scope Permissions</th>
+                    <th className="py-3 px-2">Scope / Validity</th>
                     <th className="py-3 px-2 text-right">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
                   {items.map((item) => (
-                    <tr key={item.id} className="hover:bg-slate-950/30 transition-colors">
+                    <tr key={item.id} className="hover:bg-slate-955/30 transition-colors">
                       <td className="py-3.5 px-2">
                         <div className="font-semibold text-slate-200">{item.display_name}</div>
                         <div className="text-[10px] text-slate-500 font-mono mt-0.5 select-all">{item.item_key}</div>
@@ -396,7 +424,16 @@ export default function CatalogManager() {
                       <td className="py-3.5 px-2 font-mono text-slate-200">
                         ₱{parseFloat(item.standard_unit_cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </td>
-                      <td className="py-3.5 px-2 text-slate-400">
+                      <td className="py-3.5 px-2 text-slate-400 space-y-1">
+                        {/* Displaying expiration dates in the grid */}
+                        {item.canvas_expiration_date ? (
+                          <div className="font-mono text-[9px] text-amber-400 flex items-center gap-1 font-bold">
+                            <Calendar className="w-3 h-3 shrink-0" />
+                            <span>Expires: {new Date(item.canvas_expiration_date).toLocaleDateString()}</span>
+                          </div>
+                        ) : (
+                          <div className="text-[9px] text-slate-500 italic">No Expiration Configured</div>
+                        )}
                         {item.allowed_offices && item.allowed_offices.length > 0 ? (
                           <div className="flex flex-wrap gap-1 max-w-[150px]">
                             {item.allowed_offices.map((office, oIdx) => (
@@ -406,7 +443,7 @@ export default function CatalogManager() {
                             ))}
                           </div>
                         ) : (
-                          <span className="text-slate-500 italic text-[10px]">Global Access</span>
+                          <span className="text-slate-500 italic text-[10px] block">Global Access</span>
                         )}
                       </td>
                       <td className="py-3.5 px-2 text-right">

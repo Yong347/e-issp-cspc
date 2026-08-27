@@ -69,7 +69,7 @@ import argparse
 from decimal import Decimal
 from datetime import datetime, timedelta
 import bcrypt
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 # Import Base and ALL models to ensure SQLAlchemy registers the entire schema metadata
@@ -111,6 +111,39 @@ from app.config import settings
 
 logging.basicConfig(level=logging.INFO, format="[SYSTEM] %(asctime)s - %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def align_database_schemas(engine):
+    """
+    Defensively inspects target tables at runtime and appends any columns
+    defined in SQLAlchemy models that are missing physically from the database.
+    """
+    logger.info("Running defensive schema alignment checks...")
+    inspector = inspect(engine)
+    
+    # 1. Align 'master_narratives' table
+    if "master_narratives" in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('master_narratives')]
+        
+        columns_to_sync = {
+            "authoring_cycle_duration": "INTEGER",
+            "site_development_plan_url": "VARCHAR(500)",
+            "fiber_backbone_url": "VARCHAR(500)",
+            "system_architecture_url": "VARCHAR(500)",
+            "process_flow_diagram_url": "VARCHAR(500)"
+        }
+        
+        for col_name, col_type in columns_to_sync.items():
+            if col_name not in columns:
+                logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'master_narratives' table.")
+                try:
+                    with engine.begin() as conn:
+                        if "sqlite" in settings.DATABASE_URL.lower():
+                            conn.execute(text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_type}"))
+                        else:
+                            conn.execute(text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_type} NULL"))
+                except Exception as ex:
+                    logger.warning(f"Failed to append column '{col_name}' defensively: {str(ex)}")
 
 
 def seed_document_hierarchy(db):
@@ -1476,6 +1509,9 @@ def main():
             except Exception:
                 pass
             cursor.close()
+
+    # Align schemas before doing any actions or transactions (Gaps 4, 11, 12, 18, 19, 21, 22, 26)
+    align_database_schemas(engine)
 
     logger.info("Compiling and verifying database schema metadata...")
     Base.metadata.create_all(bind=engine)
@@ -10100,6 +10136,7 @@ class MasterNarrative(Base):
     manpower_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
     annual_ict_budget: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    authoring_cycle_duration: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     major_final_outputs: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     core_offices_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
@@ -10930,6 +10967,8 @@ def get_departmental_proposals(
     Retrieves active proposals submitted by the calling department within the active or selected cycle. 
     Provides explicit server-side logging for precise list diagnosis.
     """
+    from sqlalchemy import case, or_
+
     logger.info("=" * 60)
     logger.info("[DIAGNOSTIC] GET /proposals request received")
     logger.info(f"[DIAGNOSTIC] User Dept ID: {user['department_id']}")
@@ -10943,15 +10982,32 @@ def get_departmental_proposals(
     total_dept_items_count = db.query(Proposal).filter(Proposal.department_id == user["department_id"]).count()
     logger.info(f"[DIAGNOSTIC] Total raw items in DB for this department: {total_dept_items_count}")
 
+    # Build the base query, filtering out archived items defensively
     base_query = db.query(Proposal).filter(
-        Proposal.department_id == user["department_id"]
+        Proposal.department_id == user["department_id"],
+        or_(Proposal.is_archived == False, Proposal.is_archived == None)
     )
     if status_filter:
         logger.info(f"[DIAGNOSTIC] Filtering by status: {status_filter}")
         base_query = base_query.filter(Proposal.status == status_filter)
 
-    # Query with strict issp_period filter
-    results = base_query.filter(Proposal.issp_period == target_period).offset(skip).limit(limit).all()
+    # Define custom sorting order: Draft (1) -> Returned (2) -> Submitted (3) -> Approved (4)
+    status_order = case(
+        (Proposal.status == ProposalStatus.DRAFT, 1),
+        (Proposal.status == ProposalStatus.RETURNED, 2),
+        (Proposal.status == ProposalStatus.SUBMITTED, 3),
+        (Proposal.status == ProposalStatus.APPROVED, 4),
+        else_=5
+    )
+
+    # Query with strict issp_period filter, sorted by status order then alphabetically by name
+    results = (
+        base_query.filter(Proposal.issp_period == target_period)
+        .order_by(status_order.asc(), Proposal.item_name.asc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     logger.info(f"[DIAGNOSTIC] Strict period filter query found {len(results)} items.")
     
     # Print details of strict query results
@@ -10961,7 +11017,12 @@ def get_departmental_proposals(
     # Safety Fallback
     if not results:
         logger.warning("[DIAGNOSTIC] Strict filter returned 0 results. Triggering safety fallback query...")
-        results = base_query.offset(skip).limit(limit).all()
+        results = (
+            base_query.order_by(status_order.asc(), Proposal.item_name.asc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
         logger.info(f"[DIAGNOSTIC] Fallback query returned {len(results)} items.")
         for idx, r in enumerate(results):
              logger.info(f"  -> Fallback Item {idx+1}: ID={r.id}, Name={r.item_name}, Cycle={r.issp_period}, Archived={r.is_archived}, Status={r.status.value}")
@@ -23628,7 +23689,7 @@ CORE SYSTEM FILE: .\frontend\src\views\admin\Catalog\CatalogManager.jsx
 // frontend/src/views/admin/Catalog/CatalogManager.jsx
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../../context/AuthContext";
-import { Plus, Settings2, RefreshCw, AlertCircle, CheckCircle, Package, ToggleLeft, ToggleRight, FileSearch } from "lucide-react";
+import { Plus, Settings2, RefreshCw, AlertCircle, CheckCircle, Package, ToggleLeft, ToggleRight, FileSearch, Calendar } from "lucide-react";
 
 export default function CatalogManager() {
   const { user } = useAuth();
@@ -23639,7 +23700,7 @@ export default function CatalogManager() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Form states matching CatalogItem schemas
+  // Form states matching CatalogItem schemas (Extended to support expiration dates)
   const [form, setForm] = useState({
     item_key: "",
     display_name: "",
@@ -23647,7 +23708,8 @@ export default function CatalogManager() {
     category: "computing_devices",
     allowed_offices: "",
     supplier_name: "",
-    canvas_evidence_url: ""
+    canvas_evidence_url: "",
+    canvas_expiration_date: "" // Added
   });
 
   const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -23709,7 +23771,8 @@ export default function CatalogManager() {
         standard_unit_cost: String(selected.unit_cost),
         category: selected.type === "CapEx" ? "computing_devices" : "software",
         supplier_name: selected.supplier_name,
-        canvas_evidence_url: selected.canvas_evidence_url
+        canvas_evidence_url: selected.canvas_evidence_url,
+        canvas_expiration_date: selected.canvas_expiration_date ? selected.canvas_expiration_date.split("T")[0] : "" // Auto-map existing date if available
       });
       setSuccess(`Referenced approved request fields compiled dynamically.`);
     }
@@ -23731,6 +23794,11 @@ export default function CatalogManager() {
       : [];
 
     try {
+      // Format expiration date into an ISO String or null before sending to the backend API
+      const expirationPayload = form.canvas_expiration_date 
+        ? new Date(form.canvas_expiration_date).toISOString() 
+        : null;
+
       const res = await fetch(`${apiUrl}/api/admin/catalog`, {
         method: "POST",
         headers: {
@@ -23745,6 +23813,7 @@ export default function CatalogManager() {
           allowed_offices: parsedOffices,
           supplier_name: form.supplier_name.trim() || null,
           canvas_evidence_url: form.canvas_evidence_url.trim() || null,
+          canvas_expiration_date: expirationPayload, // Bind mapped expiration payload
           is_active: true
         })
       });
@@ -23762,7 +23831,8 @@ export default function CatalogManager() {
         category: "computing_devices",
         allowed_offices: "",
         supplier_name: "",
-        canvas_evidence_url: ""
+        canvas_evidence_url: "",
+        canvas_expiration_date: "" // Reset field
       });
       fetchCatalog();
     } catch (err) {
@@ -23821,15 +23891,16 @@ export default function CatalogManager() {
         </button>
       </div>
 
+      {/* Status Notifications */}
       {error && (
-        <div className="p-4 bg-red-950/40 border border-red-900/50 text-red-300 rounded-lg flex items-start gap-2.5">
+        <div className="p-4 bg-red-955/40 border border-red-900/30 text-red-300 rounded-lg flex items-start gap-2.5">
           <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-950/40 border border-emerald-900/50 text-emerald-300 rounded-lg flex items-start gap-2.5">
+        <div className="p-4 bg-emerald-950/40 border border-emerald-900/30 text-emerald-300 rounded-lg flex items-start gap-2.5">
           <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <span>{success}</span>
         </div>
@@ -23872,7 +23943,7 @@ export default function CatalogManager() {
                 required
                 value={form.item_key}
                 onChange={(e) => setForm({ ...form, item_key: e.target.value })}
-                placeholder="e.g. tablet_standard_v2"
+                placeholder="e.g. projector_classroom_v2"
                 className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white text-xs outline-none font-mono"
               />
             </div>
@@ -23969,12 +24040,30 @@ export default function CatalogManager() {
                   className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 text-xs outline-none font-mono cursor-not-allowed"
                 />
               </div>
+
+              {/* NEW EXPIRATION DATE INPUT FIELD */}
+              <div className="space-y-1.5 pt-1.5">
+                <label className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider flex justify-between items-center">
+                  <span className="flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Canvas Validity Expiration Date</span>
+                  </span>
+                  <span className="text-[9px] text-blue-400">Required</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={form.canvas_expiration_date}
+                  onChange={(e) => setForm({ ...form, canvas_expiration_date: e.target.value })}
+                  className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white text-xs outline-none font-mono focus:border-blue-500"
+                />
+              </div>
             </div>
 
             <button
               type="submit"
               disabled={submitting}
-              className="w-full p-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 mt-4"
+              className="w-full p-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 mt-4 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
               <span>{submitting ? "Processing..." : "Add Catalog Item"}</span>
@@ -24006,13 +24095,13 @@ export default function CatalogManager() {
                     <th className="py-3 px-2">Key / Label</th>
                     <th className="py-3 px-2">Category</th>
                     <th className="py-3 px-2">Standard Unit Cost</th>
-                    <th className="py-3 px-2">Scope Permissions</th>
+                    <th className="py-3 px-2">Scope / Validity</th>
                     <th className="py-3 px-2 text-right">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
                   {items.map((item) => (
-                    <tr key={item.id} className="hover:bg-slate-950/30 transition-colors">
+                    <tr key={item.id} className="hover:bg-slate-955/30 transition-colors">
                       <td className="py-3.5 px-2">
                         <div className="font-semibold text-slate-200">{item.display_name}</div>
                         <div className="text-[10px] text-slate-500 font-mono mt-0.5 select-all">{item.item_key}</div>
@@ -24023,7 +24112,16 @@ export default function CatalogManager() {
                       <td className="py-3.5 px-2 font-mono text-slate-200">
                         ₱{parseFloat(item.standard_unit_cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </td>
-                      <td className="py-3.5 px-2 text-slate-400">
+                      <td className="py-3.5 px-2 text-slate-400 space-y-1">
+                        {/* Displaying expiration dates in the grid */}
+                        {item.canvas_expiration_date ? (
+                          <div className="font-mono text-[9px] text-amber-400 flex items-center gap-1 font-bold">
+                            <Calendar className="w-3 h-3 shrink-0" />
+                            <span>Expires: {new Date(item.canvas_expiration_date).toLocaleDateString()}</span>
+                          </div>
+                        ) : (
+                          <div className="text-[9px] text-slate-500 italic">No Expiration Configured</div>
+                        )}
                         {item.allowed_offices && item.allowed_offices.length > 0 ? (
                           <div className="flex flex-wrap gap-1 max-w-[150px]">
                             {item.allowed_offices.map((office, oIdx) => (
@@ -24033,7 +24131,7 @@ export default function CatalogManager() {
                             ))}
                           </div>
                         ) : (
-                          <span className="text-slate-500 italic text-[10px]">Global Access</span>
+                          <span className="text-slate-500 italic text-[10px] block">Global Access</span>
                         )}
                       </td>
                       <td className="py-3.5 px-2 text-right">
@@ -34978,7 +35076,8 @@ import {
   Building2,
   Edit2, 
   X,
-  Save
+  Save,
+  Calendar
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -35012,6 +35111,7 @@ export default function CapExProposals() {
   const [supplierName, setSupplierName] = useState("");
   const [canvasFile, setCanvasFile] = useState(null);
   const [creatingProposal, setCreatingProposal] = useState(false);
+  const [canvasExpirationDate, setCanvasExpirationDate] = useState("");
   
   // Secondary post-creation upload state (standard replacement uploads)
   const [uploadProposalId, setUploadProposalId] = useState(null);
@@ -35039,6 +35139,7 @@ export default function CapExProposals() {
   const [editYearlyQuantities, setEditYearlyQuantities] = useState({});
   const [editTargetOffices, setEditTargetOffices] = useState("");
   const [editIsExpansion, setEditIsExpansion] = useState(false);
+  const [editCanvasExpirationDate, setEditCanvasExpirationDate] = useState("");
   const [updatingProposal, setUpdatingProposal] = useState(false);
 
   useEffect(() => {
@@ -35085,12 +35186,13 @@ export default function CapExProposals() {
     }
   }, [user]);
 
-  const fetchData = async () => {
+ const fetchData = async () => {
     setLoading(true);
     setError(null);
     try {
       const [proposalsData, catalogData] = await Promise.all([
-        getProposals(activeCycle),
+        // Pass "", 0, 500 to expand the list limit parameter on the server
+        getProposals(activeCycle, "", 0, 500),
         getDeptCatalog()
       ]);
       setProposals(proposalsData);
@@ -35215,14 +35317,15 @@ export default function CapExProposals() {
     setSuccess(null);
 
     if (itemSelect === "other") {
-      if (!canvasFile || !supplierName.trim()) {
-        setError("Compliance Violation: Posing a custom unlisted item requires a supplier name and a canvas quotation document.");
+      if (!canvasFile || !supplierName.trim() || !canvasExpirationDate) {
+        setError("Compliance Violation: Posing a custom unlisted item requires a supplier name, a canvas quotation document, and a validity expiration date.");
         return;
       }
     }
     
     setCreatingProposal(true);
     const parsedOffices = targetOffices ? [targetOffices] : [];
+    const expirationPayload = canvasExpirationDate ? new Date(canvasExpirationDate).toISOString() : null;
       
     const payload = {
       item_select: itemSelect,
@@ -35231,7 +35334,8 @@ export default function CapExProposals() {
       unit_cost: parseFloat(unitCost) || 0.0,
       target_offices_json: parsedOffices,
       is_expansion: isExpansion,
-      canvas_evidence_url: null
+      canvas_evidence_url: null,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -35248,6 +35352,7 @@ export default function CapExProposals() {
       setIsExpansion(false);
       setSupplierName("");
       setCanvasFile(null);
+      setCanvasExpirationDate("");
       
       const fileInput = document.getElementById("inline-canvas-input");
       if (fileInput) fileInput.value = "";
@@ -35390,6 +35495,7 @@ export default function CapExProposals() {
     setEditUnitCost(String(p.unit_cost));
     setEditIsExpansion(p.is_expansion || false);
     setEditTargetOffices(p.target_offices_json && p.target_offices_json.length > 0 ? p.target_offices_json[0] : "");
+    setEditCanvasExpirationDate(p.canvas_expiration_date ? p.canvas_expiration_date.split("T")[0] : "");
     
     const prefill = {};
     planningYears.forEach(year => {
@@ -35415,6 +35521,7 @@ export default function CapExProposals() {
     setUpdatingProposal(true);
 
     const parsedOffices = editTargetOffices ? [editTargetOffices] : [];
+    const expirationPayload = editCanvasExpirationDate ? new Date(editCanvasExpirationDate).toISOString() : null;
 
     const payload = {
       item_select: editItemSelect,
@@ -35422,7 +35529,8 @@ export default function CapExProposals() {
       yearly_quantities: editYearlyQuantities,
       unit_cost: parseFloat(editUnitCost) || 0.0,
       target_offices_json: parsedOffices,
-      is_expansion: editIsExpansion
+      is_expansion: editIsExpansion,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -35525,7 +35633,7 @@ export default function CapExProposals() {
             </div>
 
             {itemSelect === "other" && (
-              <div className="space-y-4 p-3.5 bg-slate-950 border border-slate-855 rounded-lg animate-fadeIn">
+              <div className="space-y-4 p-3.5 bg-slate-955 border border-slate-850 rounded-lg animate-fadeIn">
                 <span className="block text-[9px] uppercase font-extrabold text-blue-400 tracking-wider">
                   Mandatory Market Canvas Verification
                 </span>
@@ -35566,6 +35674,20 @@ export default function CapExProposals() {
                     accept="application/pdf"
                     onChange={(e) => setCanvasFile(e.target.files[0])}
                     className="w-full text-slate-300 text-xs"
+                  />
+                </div>
+                {/* NEW CAPEX EXPIRATION DATE INPUT */}
+                <div>
+                  <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Canvas Expiration Date</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={canvasExpirationDate}
+                    onChange={(e) => setCanvasExpirationDate(e.target.value)}
+                    className="w-full p-2 bg-slate-900 border border-slate-800 rounded text-white font-mono"
                   />
                 </div>
               </div>
@@ -35766,7 +35888,7 @@ export default function CapExProposals() {
                             <td className="py-3.5 px-2">
                               <div className="font-semibold text-slate-300">Total: {p.total_qty} units</div>
                               <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
-                                {planningYears.map(y => `${y}: ${p.yearly_quantities?.[String(y)] || 0}`).join(" | ")}
+                                {planningYears.map(y => y + ": " + (p.yearly_quantities?.[String(y)] || 0)).join(" | ")}
                               </div>
                             </td>
                             <td className="py-3.5 px-2 font-mono text-slate-200">
@@ -35783,6 +35905,14 @@ export default function CapExProposals() {
                                   >
                                     {filename}
                                   </a>
+                                  {p.canvas_expiration_date ? (
+                                    <span className="text-[9px] text-amber-500 font-mono font-semibold flex items-center gap-1">
+                                      <Calendar className="w-3 h-3" />
+                                      <span>Expires: {new Date(p.canvas_expiration_date).toLocaleDateString()}</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-[9px] text-slate-500 italic">No Expiry Set</span>
+                                  )}
                                   {p.s3_storage_class === "GLACIER" ? (
                                     p.is_restoring ? (
                                       <div className="space-y-1 w-full max-w-[120px] pt-1">
@@ -35819,7 +35949,7 @@ export default function CapExProposals() {
                               ) : (
                                 <button 
                                   onClick={() => setUploadProposalId(p.id)}
-                                  className="text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-1 cursor-pointer"
+                                  className="text-blue-400 underline font-semibold flex items-center gap-1 cursor-pointer"
                                 >
                                   <Upload className="w-3 h-3" />
                                   <span>Upload Canvas</span>
@@ -35855,6 +35985,7 @@ export default function CapExProposals() {
                                       className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
                                       title="Edit Draft Parameters"
                                     >
+                                      
                                       <Edit2 className="w-4 h-4" />
                                     </button>
                                     <button
@@ -36003,6 +36134,21 @@ export default function CapExProposals() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* NEW EDIT-MODAL HARDWARE CANVAS EXPIRATION FIELD */}
+              <div className="space-y-1.5 pt-1.5">
+                <label className="block text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Canvas Validity Expiration Date</span>
+                </label>
+                <input
+                  type="date"
+                  required={editItemSelect === "other"}
+                  value={editCanvasExpirationDate}
+                  onChange={(e) => setEditCanvasExpirationDate(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono text-xs outline-none"
+                />
               </div>
 
               <button
@@ -36726,7 +36872,7 @@ import { useCycle } from "../../../context/CycleContext";
 import { 
   getSubscriptions, 
   createSubscription, 
-  updateSubscription, // Ensure updateSubscription is imported
+  updateSubscription, 
   deleteSubscription, 
   submitSubscription, 
   uploadCanvas,
@@ -36751,9 +36897,10 @@ import {
   RefreshCcw,
   Clock,
   HardDrive,
-  Edit2, // Added edit icon
+  Edit2, 
   X,
-  Save
+  Save,
+  Calendar
 } from "lucide-react";
 
 const rawRoot = import.meta.env?.VITE_API_URL || "http://localhost:8000";
@@ -36781,6 +36928,7 @@ export default function MooeSubscriptions() {
   const [supplierName, setSupplierName] = useState("");
   const [canvasFile, setCanvasFile] = useState(null);
   const [creatingSubscription, setCreatingSubscription] = useState(false);
+  const [canvasExpirationDate, setCanvasExpirationDate] = useState("");
   
   // Secondary post-creation upload state (standard replacement uploads)
   const [uploadSubscriptionId, setUploadSubscriptionId] = useState(null);
@@ -36805,6 +36953,7 @@ export default function MooeSubscriptions() {
   const [editAnnualCostPerUser, setEditAnnualCostPerUser] = useState("");
   const [editYearlyUsers, setEditYearlyUsers] = useState({});
   const [editTargetOffices, setEditTargetOffices] = useState("");
+  const [editCanvasExpirationDate, setEditCanvasExpirationDate] = useState("");
   const [updatingSubscription, setUpdatingSubscription] = useState(false);
 
   useEffect(() => {
@@ -36900,8 +37049,8 @@ export default function MooeSubscriptions() {
     setSuccess(null);
 
     // Strict validation check requiring quotation attachments on create
-    if (!canvasFile || !supplierName.trim()) {
-      setError("Compliance Violation: Setting up a subscription request requires an attached canvas quotation.");
+    if (!canvasFile || !supplierName.trim() || !canvasExpirationDate) {
+      setError("Compliance Violation: Setting up a subscription request requires a supplier name, canvas PDF, and validity expiration date.");
       return;
     }
     
@@ -36909,6 +37058,8 @@ export default function MooeSubscriptions() {
     const parsedOffices = targetOffices
       ? targetOffices.split(",").map(o => o.trim()).filter(o => o.length > 0)
       : [];
+
+    const expirationPayload = canvasExpirationDate ? new Date(canvasExpirationDate).toISOString() : null;
       
     const payload = {
       subscription_type: subscriptionType,
@@ -36917,7 +37068,8 @@ export default function MooeSubscriptions() {
       yearly_users: yearlyUsers,
       annual_cost_per_user: parseFloat(annualCostPerUser) || 0.0,
       target_offices_json: parsedOffices,
-      canvas_evidence_url: null
+      canvas_evidence_url: null,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -36937,6 +37089,7 @@ export default function MooeSubscriptions() {
       setTargetOffices("");
       setSupplierName("");
       setCanvasFile(null);
+      setCanvasExpirationDate("");
       
       const fileInput = document.getElementById("inline-canvas-mooe-input");
       if (fileInput) fileInput.value = "";
@@ -37079,6 +37232,7 @@ export default function MooeSubscriptions() {
     setEditJustification(s.justification);
     setEditAnnualCostPerUser(String(s.annual_cost_per_user));
     setEditTargetOffices(s.target_offices_json ? s.target_offices_json.join(", ") : "");
+    setEditCanvasExpirationDate(s.canvas_expiration_date ? s.canvas_expiration_date.split("T")[0] : "");
     
     const prefill = {};
     planningYears.forEach(year => {
@@ -37097,13 +37251,16 @@ export default function MooeSubscriptions() {
       ? editTargetOffices.split(",").map(o => o.trim()).filter(o => o.length > 0)
       : [];
 
+    const expirationPayload = editCanvasExpirationDate ? new Date(editCanvasExpirationDate).toISOString() : null;
+
     const payload = {
       subscription_type: editSubscriptionType,
       software_name: editSoftwareName.trim(),
       justification: editJustification.trim(),
       yearly_users: editYearlyUsers,
       annual_cost_per_user: parseFloat(editAnnualCostPerUser) || 0.0,
-      target_offices_json: parsedOffices
+      target_offices_json: parsedOffices,
+      canvas_expiration_date: expirationPayload
     };
 
     try {
@@ -37190,11 +37347,11 @@ export default function MooeSubscriptions() {
                 value={softwareName}
                 onChange={(e) => setSoftwareName(e.target.value)}
                 placeholder="e.g. Adobe Creative Cloud, JetBrains Rider"
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
               />
             </div>
 
-            <div className="space-y-4 p-3.5 bg-slate-950 border border-slate-850 rounded-lg animate-fadeIn">
+            <div className="space-y-4 p-3.5 bg-slate-955 border border-slate-850 rounded-lg animate-fadeIn">
               <span className="block text-[9px] uppercase font-extrabold text-blue-400 tracking-wider">
                 Mandatory Market Canvas Verification
               </span>
@@ -37222,6 +37379,20 @@ export default function MooeSubscriptions() {
                   accept="application/pdf"
                   onChange={(e) => setCanvasFile(e.target.files[0])}
                   className="w-full text-slate-300 text-xs"
+                />
+              </div>
+              {/* NEW MOOE EXPIRATION DATE INPUT */}
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Canvas Expiration Date</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={canvasExpirationDate}
+                  onChange={(e) => setCanvasExpirationDate(e.target.value)}
+                  className="w-full p-2 bg-slate-900 border border-slate-800 rounded text-white font-mono"
                 />
               </div>
             </div>
@@ -37288,7 +37459,7 @@ export default function MooeSubscriptions() {
                 value={targetOffices}
                 onChange={(e) => setTargetOffices(e.target.value)}
                 placeholder="e.g. Design Faculty, CS Lab 1"
-                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
+                className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white outline-none focus:ring-1 focus:ring-blue-600 transition-all"
               />
             </div>
 
@@ -37360,157 +37531,154 @@ export default function MooeSubscriptions() {
             </h3>
 
             <div className="overflow-x-auto">
-              {loading ? (
-                <div className="flex flex-col items-center justify-center py-16 gap-2 text-slate-500">
-                  <RefreshCw className="w-6 h-6 animate-spin text-blue-500" />
-                  <span className="text-xs">Loading active queue...</span>
-                </div>
-              ) : subscriptions.length > 0 ? (
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800 text-slate-500 text-[10px] uppercase tracking-wider font-bold">
-                      <th className="py-3 px-2">Software Package</th>
-                      <th className="py-3 px-2">User License Seats</th>
-                      <th className="py-3 px-2">Annual Unit Rate</th>
-                      <th className="py-3 px-2">Quotation</th>
-                      <th className="py-3 px-2">Status</th>
-                      <th className="py-3 px-2 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-850">
-                    {subscriptions.map(sub => {
-                      const filename = sub.canvas_evidence_url ? sub.canvas_evidence_url.split("/").pop() : null;
-                      const totalSeats = Object.values(sub.yearly_users || {}).reduce((a, b) => a + b, 0);
-                      
-                      const isHighlighted = sub.id === highlightedId;
-                      const rowClass = `transition-all duration-700 ${
-                        isHighlighted 
-                          ? "bg-blue-955/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
-                          : "hover:bg-slate-950/20"
-                      }`;
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-500 text-[10px] uppercase tracking-wider font-bold">
+                    <th className="py-3 px-2">Software Package</th>
+                    <th className="py-3 px-2">User License Seats</th>
+                    <th className="py-3 px-2">Annual Unit Rate</th>
+                    <th className="py-3 px-2">Quotation</th>
+                    <th className="py-3 px-2">Status</th>
+                    <th className="py-3 px-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-855">
+                  {subscriptions.map(sub => {
+                    const filename = sub.canvas_evidence_url ? sub.canvas_evidence_url.split("/").pop() : null;
+                    const totalSeats = Object.values(sub.yearly_users || {}).reduce((a, b) => a + b, 0);
+                    
+                    const isHighlighted = sub.id === highlightedId;
+                    const rowClass = `transition-all duration-700 ${
+                      isHighlighted 
+                        ? "bg-blue-955/45 border-l-4 border-l-blue-500 ring-2 ring-blue-500/30 animate-pulse" 
+                        : "hover:bg-slate-950/20"
+                    }`;
 
-                      return (
-                        <tr key={sub.id} id={`subscription-${sub.id}`} className={rowClass}>
-                          <td className="py-3.5 px-2">
-                            <div className="font-semibold text-slate-200">{sub.software_name}</div>
-                            <div className="text-[10px] text-slate-500 mt-0.5">{sub.subscription_type}</div>
-                          </td>
-                          <td className="py-3.5 px-2">
-                            <div className="font-semibold text-slate-300 font-sans">Total: {totalSeats} seats</div>
-                            <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
-                              {planningYears.map(y => `${y}: ${sub.yearly_users?.[String(y)] || 0}`).join(" | ")}
-                            </div>
-                          </td>
-                          <td className="py-3.5 px-2 font-mono text-slate-200">
-                            ₱{parseFloat(sub.annual_cost_per_user).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          </td>
-                          <td className="py-3.5 px-2">
-                            {sub.canvas_evidence_url ? (
-                              <div className="flex flex-col gap-1 items-start">
-                                <a 
-                                  href={sub.canvas_evidence_url} 
-                                  target="_blank" 
-                                  rel="noreferrer" 
-                                  className="text-blue-400 underline font-semibold truncate max-w-[120px]"
-                                >
-                                  {filename}
-                                </a>
-                                {sub.s3_storage_class === "GLACIER" ? (
-                                  sub.is_restoring ? (
-                                    /* Active Time-Based S3 Glacier Progress Bar Indicator */
-                                    <div className="space-y-1 w-full max-w-[120px] pt-1">
-                                      <div className="flex justify-between text-[8px] font-mono text-amber-400 font-semibold">
-                                        <span>RESTORING</span>
-                                        <span>{sub.restore_progress || 50}%</span>
-                                      </div>
-                                      <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden border border-slate-855">
-                                        <div 
-                                          className="h-full bg-amber-500 rounded-full transition-all duration-500 animate-pulse" 
-                                          style={{ width: `${sub.restore_progress || 50}%` }} 
-                                        />
-                                      </div>
+                    return (
+                      <tr key={sub.id} id={`subscription-${sub.id}`} className={rowClass}>
+                        <td className="py-3.5 px-2">
+                          <div className="font-semibold text-slate-200">{sub.software_name}</div>
+                          <div className="text-[10px] text-slate-500 mt-0.5">{sub.subscription_type}</div>
+                        </td>
+                        <td className="py-3.5 px-2">
+                          <div className="font-semibold text-slate-300 font-sans">Total: {totalSeats} seats</div>
+                          <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                            {planningYears.map(y => y + ": " + (sub.yearly_users?.[String(y)] || 0)).join(" | ")}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-2 font-mono text-slate-200">
+                          ₱{parseFloat(sub.annual_cost_per_user).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="py-3.5 px-2">
+                          {sub.canvas_evidence_url ? (
+                            <div className="flex flex-col gap-1 items-start">
+                              <a 
+                                href={sub.canvas_evidence_url} 
+                                target="_blank" 
+                                rel="noreferrer" 
+                                className="text-blue-400 underline font-semibold truncate max-w-[120px]"
+                              >
+                                {filename}
+                              </a>
+                              {sub.canvas_expiration_date ? (
+                                <span className="text-[9px] text-amber-500 font-mono font-semibold flex items-center gap-1">
+                                  <Calendar className="w-3 h-3" />
+                                  <span>Expires: {new Date(sub.canvas_expiration_date).toLocaleDateString()}</span>
+                                </span>
+                              ) : (
+                                <span className="text-[9px] text-slate-500 italic">No Expiry Set</span>
+                              )}
+                              {sub.s3_storage_class === "GLACIER" ? (
+                                sub.is_restoring ? (
+                                  /* Active Time-Based S3 Glacier Progress Bar Indicator */
+                                  <div className="space-y-1 w-full max-w-[120px] pt-1">
+                                    <div className="flex justify-between text-[8px] font-mono text-amber-400 font-semibold">
+                                      <span>RESTORING</span>
+                                      <span>{sub.restore_progress || 50}%</span>
                                     </div>
-                                  ) : (
-                                    <button 
-                                      onClick={() => handleGlacierRestore(sub.id)}
-                                      className="text-[9px] text-amber-400 hover:text-amber-300 underline font-semibold cursor-pointer"
-                                    >
-                                      S3 Glacier Restore
-                                    </button>
-                                  )
+                                    <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden border border-slate-855">
+                                      <div 
+                                        className="h-full bg-amber-500 rounded-full transition-all duration-500 animate-pulse" 
+                                        style={{ width: `${sub.restore_progress || 50}%` }} 
+                                      />
+                                    </div>
+                                  </div>
                                 ) : (
                                   <button 
-                                    onClick={() => handleMetadataSync(sub.id)}
-                                    title="Sync metadata class"
-                                    className="text-[9px] text-slate-500 hover:text-slate-400 flex items-center gap-0.5 cursor-pointer font-sans"
+                                    onClick={() => handleGlacierRestore(sub.id)}
+                                    className="text-[9px] text-amber-400 underline font-semibold"
                                   >
-                                    <RefreshCcw className="w-2.5 h-2.5" />
-                                    <span>Sync</span>
+                                    S3 Glacier Restore
                                   </button>
-                                )}
-                              </div>
-                            ) : (
-                              <button 
-                                onClick={() => setUploadSubscriptionId(sub.id)}
-                                className="text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-1 cursor-pointer"
-                              >
-                                <Upload className="w-3 h-3" />
-                                <span>Upload Canvas</span>
-                              </button>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-2">
-                            <StatusPill status={sub.status} />
-                          </td>
-                          <td className="py-3.5 px-2 text-right">
-                            <div className="flex justify-end gap-1.5">
-                              <button
-                                onClick={() => openComments(sub)}
-                                className="p-1 text-slate-400 hover:text-blue-400 transition-colors cursor-pointer"
-                                title="Comments thread"
-                              >
-                                <MessageCircle className="w-4 h-4" />
-                              </button>
-                              
-                              {sub.status === "Draft" || sub.status === "Returned" ? (
-                                <>
-                                  <button
-                                    onClick={() => openEditModal(sub)}
-                                    className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
-                                    title="Edit Subscription Parameters"
-                                  >
-                                    <Edit2 className="w-4 h-4" />
-                                  </button>
-                                  <button
-                                    onClick={() => handleSubmit(sub.id)}
-                                    className="p-1 text-slate-400 hover:text-emerald-400 transition-colors cursor-pointer"
-                                    title="Submit Proposal"
-                                  >
-                                    <Send className="w-4 h-4" />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDelete(sub.id)}
-                                    className="p-1 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
-                                    title="Delete Draft"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </>
+                                )
                               ) : (
-                                <span className="text-[10px] text-slate-500 italic">Locked</span>
+                                <button 
+                                  onClick={() => handleMetadataSync(sub.id)}
+                                  title="Sync metadata class"
+                                  className="text-[9px] text-slate-500 flex items-center gap-0.5 font-sans"
+                                >
+                                  <RefreshCcw className="w-2.5 h-2.5" />
+                                  <span>Sync</span>
+                                </button>
                               )}
                             </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="text-center py-16 text-slate-500">
-                  No active software licensing proposals logged. Create a draft using the panel on the left.
-                </div>
-              )}
+                          ) : (
+                            <button 
+                              onClick={() => setUploadSubscriptionId(sub.id)}
+                              className="text-blue-400 underline font-semibold flex items-center gap-1"
+                            >
+                              <Upload className="w-3.5 h-3.5" />
+                              <span>Upload Canvas</span>
+                            </button>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-2">
+                          <StatusPill status={sub.status} />
+                        </td>
+                        <td className="py-3.5 px-2 text-right">
+                          <div className="flex justify-end gap-1.5">
+                            <button
+                              onClick={() => openComments(sub)}
+                              className="p-1 text-slate-400 hover:text-blue-400 transition-colors cursor-pointer"
+                              title="Comments thread"
+                            >
+                              <MessageCircle className="w-4 h-4" />
+                            </button>
+                            
+                            {sub.status === "Draft" || sub.status === "Returned" ? (
+                              <>
+                                <button
+                                  onClick={() => openEditModal(sub)}
+                                  className="p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+                                  title="Edit Subscription Parameters"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleSubmit(sub.id)}
+                                  className="p-1 text-slate-400 hover:text-emerald-400 transition-colors cursor-pointer"
+                                  title="Submit Proposal"
+                                >
+                                  <Send className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(sub.id)}
+                                  className="p-1 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
+                                  title="Delete Draft"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            ) : (
+                              <span className="text-[10px] text-slate-500 italic">Locked</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -37577,7 +37745,7 @@ export default function MooeSubscriptions() {
                 value={newCommentText}
                 onChange={(e) => setNewCommentText(e.target.value)}
                 placeholder="Type your message..."
-                className="flex-1 p-2 bg-slate-950 border border-slate-800 rounded text-xs text-white outline-none"
+                className="flex-1 p-2 bg-slate-955 border border-slate-800 rounded text-xs text-white outline-none"
               />
               <button 
                 type="submit"
@@ -37634,7 +37802,7 @@ export default function MooeSubscriptions() {
                 <input
                   type="number" step="0.01" required value={editAnnualCostPerUser}
                   onChange={(e) => setEditAnnualCostPerUser(e.target.value)}
-                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono"
+                  className="w-full p-2.5 bg-slate-955 border border-slate-850 rounded-lg text-white font-mono"
                 />
               </div>
 
@@ -37661,7 +37829,7 @@ export default function MooeSubscriptions() {
                 <textarea
                   required rows={3} value={editJustification}
                   onChange={(e) => setEditJustification(e.target.value)}
-                  className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white resize-none"
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white resize-none"
                 />
               </div>
 
@@ -37671,6 +37839,21 @@ export default function MooeSubscriptions() {
                   type="text" required value={editTargetOffices}
                   onChange={(e) => setEditTargetOffices(e.target.value)}
                   className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              {/* NEW EDIT-MODAL SOFTWARE CANVAS EXPIRATION FIELD */}
+              <div className="space-y-1.5 pt-1.5">
+                <label className="block text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Canvas Validity Expiration Date</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={editCanvasExpirationDate}
+                  onChange={(e) => setEditCanvasExpirationDate(e.target.value)}
+                  className="w-full p-2.5 bg-slate-955 border border-slate-800 rounded-lg text-white font-mono text-xs outline-none"
                 />
               </div>
 
