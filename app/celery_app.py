@@ -13,7 +13,7 @@ celery_app = Celery(
     backend=redis_url
 )
 
-# Apply global task execution, reliability, and security parameters
+# Apply global task execution, reliability, scalability, and security parameters
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -36,9 +36,9 @@ celery_app.conf.update(
     # Fix (Anomaly 22): Reject and requeue tasks if a worker process terminates abruptly mid-task
     task_reject_on_worker_lost=getattr(settings, "CELERY_TASK_REJECT_ON_WORKER_LOST", True),
     
-    # Lifecycle settings: Ample padding between soft and hard timeouts to capture SoftTimeLimitExceeded
-    task_soft_time_limit=300,  # 5 minutes soft limit
-    task_time_limit=600,       # 10 minutes hard limit watchdog
+    # Lifecycle settings: Extended timeouts to accommodate 300+ page dual-pass compilation
+    task_soft_time_limit=getattr(settings, "CELERY_TASK_SOFT_TIME_LIMIT", 1500),  # 25 minutes soft limit
+    task_time_limit=getattr(settings, "CELERY_TASK_TIME_LIMIT", 1800),            # 30 minutes hard limit watchdog
     
     # Track the started state to let the frontend identify ongoing background tasks
     task_track_started=True,
@@ -46,8 +46,19 @@ celery_app.conf.update(
     # Storage: Automatically expire and prune task results from Redis cache after 24 hours
     result_expires=86400,
 
+    # Periodic Celery Beat Schedule: Automated evaluation of active cycle expiration and archival
+    beat_schedule={
+        "evaluate-cycle-rollover-daily": {
+            "task": "app.tasks.maintenance_tasks.check_cycle_expiration_job",
+            "schedule": 86400.0,  # Executes every 24 hours
+        },
+    },
+
     # Force registration of tasks on worker startup to prevent KeyError anomalies
-    imports=["app.tasks.pdf_tasks"]
+    imports=[
+        "app.tasks.pdf_tasks",
+        "app.tasks.maintenance_tasks"
+    ]
 )
 
 # Enable automatic task discovery within the tasks package to register modules dynamically

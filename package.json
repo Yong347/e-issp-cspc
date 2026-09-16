@@ -1,4 +1,11 @@
 {
+  "name": "e-issp-compliance-engine",
+  "private": true,
+  "version": "5.0.0",
+  "description": "DICT ISSP v.2026 Compliance and Governance Engine",
+  "scripts": {
+    "kill-ports": "kill-port 8000 5173"
+  },
   "devDependencies": {
     "kill-port": "^2.0.1"
   }

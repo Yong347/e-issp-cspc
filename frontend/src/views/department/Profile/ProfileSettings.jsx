@@ -1,20 +1,34 @@
+// frontend/src/views/department/Profile/ProfileSettings.jsx
 import React, { useState } from "react";
 import { useAuth } from "../../../context/AuthContext";
-import { Key, RefreshCw, AlertCircle, CheckCircle, Shield, User } from "lucide-react";
+import { 
+  Key, 
+  RefreshCw, 
+  AlertCircle, 
+  CheckCircle, 
+  Shield, 
+  User, 
+  Eye, 
+  EyeOff 
+} from "lucide-react";
 
 export default function ProfileSettings() {
   const { user } = useAuth();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
   const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token;
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
 
   const handleUpdatePassword = async (e) => {
     e.preventDefault();
@@ -22,7 +36,7 @@ export default function ProfileSettings() {
     setSuccess(null);
 
     if (newPassword !== confirmPassword) {
-      setError("Validation Error: New password fields do not match.");
+      setError("Validation Error: New password and confirmation do not match.");
       return;
     }
 
@@ -62,94 +76,132 @@ export default function ProfileSettings() {
   };
 
   return (
-    <div className="space-y-6 max-w-lg mx-auto text-xs text-slate-100 select-none">
+    <div className="space-y-6 max-w-lg mx-auto text-xs text-slate-800 dark:text-slate-100 select-none transition-colors duration-200 font-sans">
       {/* Account Info Card */}
-      <div className="bg-slate-900 p-6 rounded-xl border border-slate-800 space-y-4">
-        <h3 className="text-white font-bold text-sm uppercase tracking-wide flex items-center gap-1.5 border-b border-slate-850 pb-2">
-          <User className="w-4 h-4 text-blue-400" />
+      <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-sm">
+        <h3 className="text-slate-900 dark:text-white font-bold text-sm uppercase tracking-wide flex items-center gap-1.5 border-b border-slate-200 dark:border-slate-850 pb-2">
+          <User className="w-4 h-4 text-blue-600 dark:text-blue-400" />
           <span>User Profile Information</span>
         </h3>
         
         <div className="space-y-3 font-mono">
-          <div className="flex justify-between border-b border-slate-850/60 pb-2">
+          <div className="flex justify-between border-b border-slate-100 dark:border-slate-850/60 pb-2">
             <span className="text-slate-500">Authorized Email:</span>
-            <span className="text-slate-300 font-bold">{user?.email || "Unknown User"}</span>
+            <span className="text-slate-800 dark:text-slate-300 font-bold">{user?.email || "Unknown User"}</span>
           </div>
-          <div className="flex justify-between border-b border-slate-850/60 pb-2">
+          <div className="flex justify-between border-b border-slate-100 dark:border-slate-850/60 pb-2">
             <span className="text-slate-500">System Role Scope:</span>
-            <span className="text-blue-400 font-bold uppercase tracking-wider text-[10px]">
-              {user?.role === "ROLE_MIS_ADMIN" ? "MIS Administrator" : "Department Planner"}
+            <span className="text-blue-600 dark:text-blue-400 font-bold uppercase tracking-wider text-[10px]">
+              {user?.role === "ROLE_MIS_ADMIN" 
+                ? "MIS Administrator" 
+                : user?.role === "ROLE_SUPPLY_USER" 
+                ? "Supply Officer" 
+                : "Department Planner"}
             </span>
           </div>
           <div className="flex justify-between">
-            <span className="text-slate-500">Department Identifier:</span>
-            <span className="text-slate-300 font-bold">
-              {user?.department_id ? `ID Code: ${user.department_id}` : "Unassociated Profile"}
+            <span className="text-slate-500">Department Assignment:</span>
+            <span className="text-slate-800 dark:text-slate-300 font-bold">
+              {user?.department_name 
+                ? `${user.department_name} (ID: ${user.department_id})` 
+                : user?.department_id 
+                ? `ID Code: ${user.department_id}` 
+                : "Global Administration / Unassociated"}
             </span>
           </div>
         </div>
       </div>
 
       {/* Security Credentials Card */}
-      <div className="bg-slate-900 p-6 rounded-xl border border-slate-800 space-y-4">
-        <h3 className="text-white font-bold text-sm uppercase tracking-wide flex items-center gap-1.5 border-b border-slate-850 pb-2">
+      <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-sm">
+        <h3 className="text-slate-900 dark:text-white font-bold text-sm uppercase tracking-wide flex items-center gap-1.5 border-b border-slate-200 dark:border-slate-850 pb-2">
           <Key className="w-4 h-4 text-amber-500" />
           <span>Rotate Account Password</span>
         </h3>
 
         {error && (
-          <div className="p-3 bg-red-955/40 border border-red-900/50 text-red-300 rounded-lg flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
+          <div className="p-3 bg-rose-50 dark:bg-red-955/40 border border-rose-200 dark:border-red-900/50 text-rose-700 dark:text-red-300 rounded-lg flex items-center gap-2 shadow-xs animate-fadeIn">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-red-400" />
             <span>{error}</span>
           </div>
         )}
 
         {success && (
-          <div className="p-3 bg-emerald-950/40 border border-emerald-900/50 text-emerald-300 rounded-lg flex items-center gap-2">
-            <CheckCircle className="w-4 h-4 shrink-0" />
+          <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50 text-emerald-700 dark:text-emerald-300 rounded-lg flex items-center gap-2 shadow-xs animate-fadeIn">
+            <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
           </div>
         )}
 
         <form onSubmit={handleUpdatePassword} className="space-y-4">
           <div className="space-y-1.5">
-            <label className="block text-[10px] uppercase font-bold text-slate-400">Current Password</label>
-            <input
-              type="password"
-              required
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              className="w-full p-2.5 bg-slate-950 border border-slate-850 rounded-lg text-white font-mono tracking-widest outline-none focus:border-amber-500"
-            />
+            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">Current Password</label>
+            <div className="relative">
+              <input
+                type={showCurrentPassword ? "text" : "password"}
+                required
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-850 rounded-lg text-slate-900 dark:text-white font-mono tracking-widest outline-none focus:border-amber-500"
+              />
+              <button
+                type="button"
+                onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                title={showCurrentPassword ? "Hide password" : "Show password"}
+              >
+                {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-[10px] uppercase font-bold text-slate-400">New Password</label>
-            <input
-              type="password"
-              required
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="Minimum 8 characters"
-              className="w-full p-2.5 bg-slate-950 border border-slate-850 rounded-lg text-white font-mono tracking-widest outline-none focus:border-amber-500 placeholder:text-slate-700"
-            />
+            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">New Password</label>
+            <div className="relative">
+              <input
+                type={showNewPassword ? "text" : "password"}
+                required
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="Minimum 8 characters"
+                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-850 rounded-lg text-slate-900 dark:text-white font-mono tracking-widest outline-none focus:border-amber-500 placeholder:text-slate-400"
+              />
+              <button
+                type="button"
+                onClick={() => setShowNewPassword(!showNewPassword)}
+                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                title={showNewPassword ? "Hide password" : "Show password"}
+              >
+                {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-[10px] uppercase font-bold text-slate-400">Confirm New Password</label>
-            <input
-              type="password"
-              required
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full p-2.5 bg-slate-950 border border-slate-850 rounded-lg text-white font-mono tracking-widest outline-none focus:border-amber-500"
-            />
+            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">Confirm New Password</label>
+            <div className="relative">
+              <input
+                type={showConfirmPassword ? "text" : "password"}
+                required
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-850 rounded-lg text-slate-900 dark:text-white font-mono tracking-widest outline-none focus:border-amber-500"
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                title={showConfirmPassword ? "Hide password" : "Show password"}
+              >
+                {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
 
           <button
             type="submit"
             disabled={submitting}
-            className="w-full p-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-slate-950 rounded-lg font-extrabold tracking-wide transition-all cursor-pointer flex items-center justify-center gap-1.5"
+            className="w-full p-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-lg font-bold tracking-wide transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
           >
             {submitting ? (
               <>

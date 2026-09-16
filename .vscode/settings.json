@@ -1,5 +1,4 @@
 {
-    "python.analysis.diagnosticSeverityOverrides": {
-        
-    }
+    "python.analysis.diagnosticSeverityOverrides": {},
+    "css.lint.unknownAtRules": "ignore"
 }

@@ -166,22 +166,22 @@ export default function GlacierConsole() {
   const totalArchived = archivedProposals.length + archivedSubscriptions.length;
 
   return (
-    <div className="space-y-6 text-xs max-w-5xl mx-auto select-none">
+    <div className="space-y-6 text-xs text-slate-800 dark:text-slate-100 max-w-5xl mx-auto select-none transition-colors duration-200">
       {/* Header Banner */}
-      <div className="flex justify-between items-center bg-slate-900 p-6 rounded-xl border border-slate-800">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm gap-4">
         <div>
-          <h2 className="text-white font-bold text-base flex items-center gap-2">
-            <Snowflake className="w-5 h-5 text-cyan-400" />
-            <span>AWS S3 Glacier Retrieval & Lifecycles Console</span>
+          <h2 className="text-slate-900 dark:text-white font-bold text-base flex items-center gap-2">
+            <Snowflake className="w-5 h-5 text-cyan-600 dark:text-cyan-400" />
+            <span>AWS S3 Glacier Retrieval &amp; Lifecycles Console</span>
           </h2>
-          <p className="text-slate-400 text-xs mt-1">
+          <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
             Cold storage archival control panel. Initiate retrievals for canvas quotations transitioned to Glacier.
           </p>
         </div>
         <button
           onClick={fetchArchivedItems}
           disabled={loading}
-          className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-1.5 cursor-pointer transition-colors"
+          className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 cursor-pointer transition-colors shadow-xs font-bold"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           <span>Sync Vault Tiers</span>
@@ -189,24 +189,24 @@ export default function GlacierConsole() {
       </div>
 
       {error && (
-        <div className="p-4 bg-red-955/40 border border-red-900/50 text-red-300 rounded-lg flex items-start gap-2.5">
-          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+        <div className="p-4 bg-rose-50 dark:bg-red-955/40 border border-rose-200 dark:border-red-900/50 text-rose-700 dark:text-red-300 rounded-lg flex items-start gap-2.5 shadow-xs">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-rose-600 dark:text-red-400" />
           <span>{error}</span>
         </div>
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-950/40 border border-emerald-900/50 text-emerald-300 rounded-lg flex items-start gap-2.5">
-          <CheckCircle className="w-4 h-4 mt-0.5 shrink-0" />
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50 text-emerald-700 dark:text-emerald-300 rounded-lg flex items-start gap-2.5 shadow-xs">
+          <CheckCircle className="w-4 h-4 mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
           <span>{success}</span>
         </div>
       )}
 
       {/* Main Archival Register Table */}
-      <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden shadow-xl">
-        <div className="p-4 border-b border-slate-800 bg-slate-955 font-bold uppercase tracking-wider text-slate-400 flex justify-between items-center">
+      <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+        <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 flex justify-between items-center text-[10px]">
           <span>Document Archival Register (S3 Storage)</span>
-          <span className="text-[10px] px-2 py-0.5 bg-slate-900 border border-slate-800 rounded font-mono text-cyan-400">
+          <span className="text-[10px] px-2 py-0.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded font-mono text-cyan-600 dark:text-cyan-400">
             Cold Records: {totalArchived}
           </span>
         </div>
@@ -218,9 +218,9 @@ export default function GlacierConsole() {
               <span>Querying storage properties...</span>
             </div>
           ) : totalArchived > 0 ? (
-            <table className="w-full text-left border-collapse">
+            <table className="w-full text-left border-collapse text-xs">
               <thead>
-                <tr className="border-b border-slate-850 bg-slate-950 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                <tr className="border-b border-slate-200 dark:border-slate-850 bg-slate-50/50 dark:bg-slate-950 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[10px]">
                   <th className="p-3">Proposal Item</th>
                   <th className="p-3">Type</th>
                   <th className="p-3">Storage Class</th>
@@ -228,37 +228,37 @@ export default function GlacierConsole() {
                   <th className="p-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-850 text-slate-300">
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-850 text-slate-700 dark:text-slate-300">
                 {/* CapEx Hardware Entries */}
                 {archivedProposals.map(item => (
-                  <tr key={item.id} className="hover:bg-slate-955/20 transition-colors">
+                  <tr key={item.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-955/20 transition-colors">
                     <td className="p-3">
-                      <div className="font-semibold text-slate-200">{item.item_name}</div>
+                      <div className="font-semibold text-slate-900 dark:text-slate-200">{item.item_name}</div>
                       <div className="text-[10px] text-slate-500 mt-0.5 font-mono select-all">{item.id}</div>
                     </td>
-                    <td className="p-3 text-slate-400">CapEx</td>
-                    <td className="p-3 font-mono font-bold text-slate-400">
+                    <td className="p-3 text-slate-500 dark:text-slate-400">CapEx</td>
+                    <td className="p-3 font-mono font-bold text-slate-600 dark:text-slate-400">
                       <span className="flex items-center gap-1">
-                        <HardDrive className="w-3.5 h-3.5 text-slate-600" />
+                        <HardDrive className="w-3.5 h-3.5 text-slate-400" />
                         <span>{item.s3_storage_class}</span>
                       </span>
                     </td>
                     <td className="p-3 font-semibold text-xs">
                       {item.is_restoring ? (
                         <div className="space-y-2 max-w-[150px]">
-                          <span className="text-cyan-400 animate-pulse flex items-center gap-1 font-mono text-[10px]">
+                          <span className="text-cyan-600 dark:text-cyan-400 animate-pulse flex items-center gap-1 font-mono text-[10px]">
                             <Clock className="w-3 h-3 animate-spin" />
                             <span>RESTORING ({item.restore_progress || 50}%)</span>
                           </span>
-                          <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
+                          <div className="w-full bg-slate-100 dark:bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-200 dark:border-slate-800">
                             <div 
-                              className="h-full bg-cyan-400 rounded-full transition-all duration-500 animate-pulse" 
+                              className="h-full bg-cyan-500 rounded-full transition-all duration-500 animate-pulse" 
                               style={{ width: `${item.restore_progress || 50}%` }} 
                             />
                           </div>
                         </div>
                       ) : (
-                        <span className="text-red-400 italic">Archived (Offline)</span>
+                        <span className="text-rose-600 dark:text-red-400 italic">Archived (Offline)</span>
                       )}
                     </td>
                     <td className="p-3 text-right">
@@ -266,7 +266,7 @@ export default function GlacierConsole() {
                         <button
                           onClick={() => handleSyncMetadata(item.id, false)}
                           disabled={syncingId === item.id}
-                          className="p-1.5 bg-slate-950 hover:bg-slate-800 text-slate-400 border border-slate-850 rounded cursor-pointer transition-colors"
+                          className="p-1.5 bg-slate-100 dark:bg-slate-950 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-850 rounded cursor-pointer transition-colors shadow-2xs"
                           title="Sync active storage class"
                         >
                           <RefreshCw className={`w-3.5 h-3.5 ${syncingId === item.id ? "animate-spin" : ""}`} />
@@ -275,7 +275,7 @@ export default function GlacierConsole() {
                           <button
                             onClick={() => handleRestore(item.id, false)}
                             disabled={restoringId === item.id}
-                            className="p-1.5 bg-slate-950 hover:bg-amber-950/40 border border-slate-850 text-amber-400 rounded cursor-pointer flex items-center gap-1 transition-colors"
+                            className="p-1.5 bg-amber-50 dark:bg-slate-955 hover:bg-amber-100 dark:hover:bg-amber-955/40 border border-amber-200 dark:border-slate-850 text-amber-700 dark:text-amber-400 rounded cursor-pointer flex items-center gap-1 transition-colors shadow-2xs font-bold"
                             title="Initiate Glacier Cold Retrieval"
                           >
                             <DownloadCloud className="w-3.5 h-3.5" />
@@ -288,34 +288,34 @@ export default function GlacierConsole() {
                 ))}
                 {/* MOOE Subscription Entries */}
                 {archivedSubscriptions.map(item => (
-                  <tr key={item.id} className="hover:bg-slate-955/20 transition-colors">
+                  <tr key={item.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-955/20 transition-colors">
                     <td className="p-3">
-                      <div className="font-semibold text-slate-200">{item.software_name}</div>
+                      <div className="font-semibold text-slate-900 dark:text-slate-200">{item.software_name}</div>
                       <div className="text-[10px] text-slate-500 mt-0.5 font-mono select-all">{item.id}</div>
                     </td>
-                    <td className="p-3 text-slate-400">MOOE</td>
-                    <td className="p-3 font-mono font-bold text-slate-400">
+                    <td className="p-3 text-slate-500 dark:text-slate-400">MOOE</td>
+                    <td className="p-3 font-mono font-bold text-slate-600 dark:text-slate-400">
                       <span className="flex items-center gap-1">
-                        <HardDrive className="w-3.5 h-3.5 text-slate-600" />
+                        <HardDrive className="w-3.5 h-3.5 text-slate-400" />
                         <span>{item.s3_storage_class}</span>
                       </span>
                     </td>
                     <td className="p-3 font-semibold text-xs">
                       {item.is_restoring ? (
                         <div className="space-y-2 max-w-[150px]">
-                          <span className="text-cyan-400 animate-pulse flex items-center gap-1 font-mono text-[10px]">
+                          <span className="text-cyan-600 dark:text-cyan-400 animate-pulse flex items-center gap-1 font-mono text-[10px]">
                             <Clock className="w-3 h-3 animate-spin" />
                             <span>RESTORING ({item.restore_progress || 50}%)</span>
                           </span>
-                          <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
+                          <div className="w-full bg-slate-100 dark:bg-slate-955 h-1.5 rounded-full overflow-hidden border border-slate-200 dark:border-slate-800">
                             <div 
-                              className="h-full bg-cyan-400 rounded-full transition-all duration-500 animate-pulse" 
+                              className="h-full bg-cyan-500 rounded-full transition-all duration-500 animate-pulse" 
                               style={{ width: `${item.restore_progress || 50}%` }} 
                             />
                           </div>
                         </div>
                       ) : (
-                        <span className="text-red-400 italic">Archived (Offline)</span>
+                        <span className="text-rose-600 dark:text-red-400 italic">Archived (Offline)</span>
                       )}
                     </td>
                     <td className="p-3 text-right">
@@ -323,7 +323,7 @@ export default function GlacierConsole() {
                         <button
                           onClick={() => handleSyncMetadata(item.id, true)}
                           disabled={syncingId === item.id}
-                          className="p-1.5 bg-slate-950 hover:bg-slate-800 text-slate-400 border border-slate-850 rounded cursor-pointer transition-colors"
+                          className="p-1.5 bg-slate-100 dark:bg-slate-955 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-850 rounded cursor-pointer transition-colors shadow-2xs"
                           title="Sync active storage class"
                         >
                           <RefreshCw className={`w-3.5 h-3.5 ${syncingId === item.id ? "animate-spin" : ""}`} />
@@ -332,7 +332,7 @@ export default function GlacierConsole() {
                           <button
                             onClick={() => handleRestore(item.id, true)}
                             disabled={restoringId === item.id}
-                            className="p-1.5 bg-slate-950 hover:bg-amber-950/40 border border-slate-850 text-amber-400 rounded cursor-pointer flex items-center gap-1 transition-colors"
+                            className="p-1.5 bg-amber-50 dark:bg-slate-955 hover:bg-amber-100 dark:hover:bg-amber-955/40 border border-amber-200 dark:border-slate-850 text-amber-700 dark:text-amber-400 rounded cursor-pointer flex items-center gap-1 transition-colors shadow-2xs font-bold"
                             title="Initiate Glacier Cold Retrieval"
                           >
                             <DownloadCloud className="w-3.5 h-3.5" />
@@ -346,7 +346,7 @@ export default function GlacierConsole() {
               </tbody>
             </table>
           ) : (
-            <div className="text-center py-20 text-slate-500 italic">No offline archived canvas files logged.</div>
+            <div className="text-center py-20 text-slate-400 italic">No offline archived canvas files logged.</div>
           )}
         </div>
       </div>

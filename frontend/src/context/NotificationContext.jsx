@@ -8,54 +8,89 @@ export function NotificationProvider({ children }) {
   const { user } = useAuth();
   const [actionCount, setActionCount] = useState(0);
   const [returnedCount, setReturnedCount] = useState(0);
+  const [recentNotifications, setRecentNotifications] = useState([]);
+  const [recentRemarks, setRecentRemarks] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
 
   const fetchNotifications = useCallback(async () => {
-    // Only poll the backend if the active user is a Department User with a valid token
-    if (user?.role === 'ROLE_DEPT_USER' && user?.token) {
-      try {
-        const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
-        const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-        const token = user.token;
-
-        const response = await fetch(`${apiUrl}/api/dept/action-items/summary`, {
-          headers: { Authorization: `Bearer ${token}` }
+    if (!user?.token) return;
+    
+    setLoading(true);
+    try {
+      if (user.role === 'ROLE_DEPT_USER') {
+        const summaryRes = await fetch(`${apiUrl}/api/dept/action-items/summary`, {
+          headers: { Authorization: `Bearer ${user.token}` }
         });
-
-        if (!response.ok) {
-          throw new Error("Failed to fetch notification summary");
+        if (summaryRes.ok) {
+          const sData = await summaryRes.json();
+          setActionCount(sData.unread_actions || 0);
+          setReturnedCount(sData.returned_proposals || 0);
         }
 
-        const data = await response.json();
-        setActionCount(data.unread_actions || 0);
-        setReturnedCount(data.returned_proposals || 0);
-      } catch (error) {
-        console.error("Failed to fetch notification summary:", error);
+        const notifRes = await fetch(`${apiUrl}/api/dept/notifications?days=14`, {
+          headers: { Authorization: `Bearer ${user.token}` }
+        });
+        if (notifRes.ok) {
+          const nData = await notifRes.json();
+          const items = Array.isArray(nData) ? nData : [];
+          setRecentNotifications(items.filter(i => i.type !== 'comment'));
+          setRecentRemarks(items.filter(i => i.type === 'comment'));
+        }
+      } else if (user.role === 'ROLE_MIS_ADMIN') {
+        const auditRes = await fetch(`${apiUrl}/api/admin/audit-logs`, {
+          headers: { Authorization: `Bearer ${user.token}` }
+        });
+        if (auditRes.ok) {
+          const aData = await auditRes.json();
+          const logs = Array.isArray(aData) ? aData.slice(0, 10) : [];
+          
+          setRecentNotifications(logs.map(l => ({
+            id: String(l.id),
+            title: l.action.replace(/_/g, ' '),
+            description: l.new_value ? Object.entries(l.new_value).slice(0, 2).map(([k, v]) => `${k}: ${v}`).join(' | ') : 'System Audit Log',
+            type: l.module === 'AUTHENTICATION' ? 'security' : l.module === 'PROPOSALS' ? 'status_change' : 'budget',
+            timestamp: l.timestamp,
+            ref_id: l.proposal_id || '',
+            url_path: l.proposal_id ? '/admin/queue' : '/admin/audit'
+          })));
+
+          const propRes = await fetch(`${apiUrl}/api/admin/proposals?status_filter=Submitted`, {
+            headers: { Authorization: `Bearer ${user.token}` }
+          });
+          if (propRes.ok) {
+            const pData = await propRes.json();
+            const count = pData.total !== undefined ? pData.total : (Array.isArray(pData) ? pData.length : 0);
+            setActionCount(count);
+          }
+        }
       }
+    } catch (error) {
+      console.warn("Failed to update notification feeds:", error);
+    } finally {
+      setLoading(false);
     }
-  }, [user]);
+  }, [user, apiUrl]);
 
   useEffect(() => {
-    // If the user logs out or does not have the department role, clear counts and skip polling
-    if (user?.role !== 'ROLE_DEPT_USER') {
-      setActionCount(0);
-      setReturnedCount(0);
-      return;
-    }
-
-    // Fetch immediately upon mount or when the user context changes
     fetchNotifications();
-
-    // Set up polling interval to check every 30 seconds
-    const intervalId = setInterval(() => {
-      fetchNotifications();
-    }, 30000);
-
-    // Cleanup the interval when the component unmounts or dependencies change
-    return () => clearInterval(intervalId);
-  }, [user, fetchNotifications]);
+    const interval = setInterval(fetchNotifications, 30000);
+    return () => clearInterval(interval);
+  }, [fetchNotifications]);
 
   return (
-    <NotificationContext.Provider value={{ actionCount, returnedCount, fetchNotifications }}>
+    <NotificationContext.Provider
+      value={{
+        actionCount,
+        returnedCount,
+        recentNotifications,
+        recentRemarks,
+        loading,
+        fetchNotifications
+      }}
+    >
       {children}
     </NotificationContext.Provider>
   );
@@ -64,8 +99,14 @@ export function NotificationProvider({ children }) {
 export const useNotifications = () => {
   const context = useContext(NotificationContext);
   if (!context) {
-    // Fallback safe defaults to prevent runtime errors if used outside of Provider
-    return { actionCount: 0, returnedCount: 0, fetchNotifications: async () => {} };
+    return { 
+      actionCount: 0, 
+      returnedCount: 0, 
+      recentNotifications: [], 
+      recentRemarks: [], 
+      loading: false, 
+      fetchNotifications: async () => {} 
+    };
   }
   return context;
 };

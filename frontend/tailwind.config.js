@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  darkMode: 'class', // Enables manual class-based light/dark mode toggling
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -8,7 +9,7 @@ export default {
     extend: {
       colors: {
         slate: {
-          // Defining the custom deep dark color to match your system theme
+          // Custom deep dark color matching your system's design requirements
           955: '#0b1329', 
         }
       }

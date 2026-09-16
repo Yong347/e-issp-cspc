@@ -100,10 +100,10 @@ class ISSPStorageClient:
             return clean_url.split("static/uploads/")[-1].strip("/")
             
         # Compile allowed buckets list from config
-        allowed_buckets = [self.bucket_name]
+        allowed_buckets = [b for b in [self.bucket_name] if b]
         fallback_buckets = getattr(settings, "AWS_FALLBACK_BUCKETS", [])
         if fallback_buckets:
-            allowed_buckets.extend(fallback_buckets)
+            allowed_buckets.extend([b for b in fallback_buckets if b])
 
         # Check if any configured bucket name is in the path
         for b in allowed_buckets:
@@ -149,9 +149,11 @@ class ISSPStorageClient:
         # External HTTP/HTTPS asset fetch
         if clean_url.startswith(("http://", "https://")) and self.bucket_name not in clean_url:
             try:
+                # Dynamic User-Agent pulled from configured institutional parameters
+                agency_slug = re.sub(r'[^a-zA-Z0-9]', '', getattr(settings, 'DEFAULT_AGENCY_NAME', 'ISSP'))
                 req = urllib.request.Request(
                     object_url, 
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) CSPC-Compiler/4.3'}
+                    headers={'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) {agency_slug}-Compiler/5.0'}
                 )
                 with urllib.request.urlopen(req, timeout=10) as response:
                     binary_data = response.read()
@@ -202,7 +204,7 @@ class ISSPStorageClient:
             
         normalized_key = key.replace("\\", "/").strip("/")
         first_segment = normalized_key.split("/")[0] if normalized_key else ""
-        protected_directories = {"catalog", "shared", "pc_standard"}
+        protected_directories = {"catalog", "shared"}
         
         if first_segment in protected_directories:
             logger.info(f"Deletion bypassed: Key '{key}' belongs to protected shared directories.")
@@ -283,7 +285,6 @@ class ISSPStorageClient:
                 logger.error(f"Failed generating download link for key {object_key}: {e}")
                 return None
         else:
-            # FIX: Prepend the Backend API URL to resolve local frontend port routing issues
             base_url = settings.API_BASE_URL.rstrip('/')
             return f"{base_url}/static/uploads/{object_key}"
 
@@ -334,7 +335,6 @@ class ISSPStorageClient:
                 with open(local_path, "wb") as f:
                     f.write(file_data)
                     
-                # FIX: Prepend the Backend API URL to resolve local frontend port routing issues
                 base_url = settings.API_BASE_URL.rstrip('/')
                 return f"{base_url}/static/uploads/{key}"
             except IOError as e:

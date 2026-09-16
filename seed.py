@@ -1,15 +1,18 @@
 # seed.py
 import os
-import logging
 import sys
+import logging
 import argparse
+import uuid
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import bcrypt
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, event, inspect, text, String, or_
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import sessionmaker
 
-# Import Base and ALL models to ensure SQLAlchemy registers the entire schema metadata
+# Import Base and ALL canonical models
+import app.database.models as models_module
 from app.database.models import (
     Base, 
     User, 
@@ -18,523 +21,680 @@ from app.database.models import (
     RoleTag,
     MasterNarrative,
     CatalogItem,
-    DegreeOffering,
-    GaaPerformance,
     ScopeChoice,
     Campus,
-    CoreOfficeFunction,
+    OrganizationalOutcome,
     StrategicConcern,
+    InformationSystem,
+    IctProject,
+    CrossAgencyProject,
     PerformanceMetric,
+    NetworkInfrastructure,
+    CybersecurityControl,
     GlossaryTerm,
     GeneralInstruction,
     ClientOsCensus,
     OfficeSoftwareCensus,
     ServerCapacityTrack,
     IctStaffPosition,
+    HumanCapital,
+    StakeholderAnalysis,
+    EGovernmentChecklist,
+    DisasterRecoveryTeam,
+    BusinessImpactAnalysis,
+    DRBCPMetric,
+    ExistingInventory,
+    Proposal,
+    NeedsAssessment,
     IsspNode,
     IsspVocabulary,
     IsspContent,
     IsspAsset,
+    SystemSetting,
     NodeType,
     PageOrientation,
     ContentType,
     AssetRole,
-    Proposal,
-    SubscriptionProposal,
     ProposalStatus,
-    AnnualCostBreakdown
+    ProposalCategory,
+    ProjectCategory,
+    ExpenditureClass,
+    FundSource,
+    OfficeLocation,
+    UacsObjectCode,
+    SystemClassification,
+    SystemHostingType,
+    DevelopmentStrategy,
+    SystemStatus,
+    SystemDevelopmentStatus,
+    TransactionComplexity,
+    ResultHierarchy,
+    AssetStatus,
+    AnnualCostBreakdown,
+    AuditTrail,
+    SafeEnumStr,
+    SafeEnumType
 )
 from app.config import settings
+from app.services.issp_engine import ISSPSingularityEngine
+from app.utils.helpers import calculate_financial_summaries
 
-logging.basicConfig(level=logging.INFO, format="[SYSTEM] %(asctime)s - %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="[ISSP SEEDER] %(asctime)s - %(levelname)s: %(message)s", force=True)
 logger = logging.getLogger(__name__)
+
+
+class FlexibleEnum(TypeDecorator):
+    """
+    Bi-directional Enum TypeDecorator.
+    - Resolves both member names ('FUNCTIONAL', 'CROSS_AGENCY_ICT_PROJECT') and string values ('Cross-Agency ICT Projects').
+    - When binding:
+      If send_name=True, binds member.name (for native PostgreSQL enums like assetstatus).
+      If send_name=False, binds member.value (for VARCHAR columns like strategic_category).
+    """
+    impl = String(200)
+    cache_ok = True
+
+    def __init__(self, enum_cls, send_name=False, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enum_cls = enum_cls
+        self.send_name = send_name
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, self.enum_cls):
+            return value.name if self.send_name else value.value
+        val_str = str(value).strip()
+        for member in self.enum_cls:
+            if (
+                member.name == val_str or 
+                member.value == val_str or 
+                member.name.lower() == val_str.lower() or 
+                member.value.lower() == val_str.lower() or
+                member.name.lower().replace("_", " ") == val_str.lower().replace("-", " ")
+            ):
+                return member.name if self.send_name else member.value
+        return val_str
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, self.enum_cls):
+            return value
+        val_str = str(value).strip()
+        for member in self.enum_cls:
+            if (
+                member.value == val_str or 
+                member.name == val_str or 
+                member.value.lower() == val_str.lower() or 
+                member.name.lower() == val_str.lower() or
+                member.name.lower().replace("_", " ") == val_str.lower().replace("-", " ")
+            ):
+                return member
+        return SafeEnumStr(value)
+
+
+def patch_runtime_enum_columns():
+    """
+    Patches column type processors dynamically so that:
+    1. VARCHAR columns storing Enum values seamlessly deserialize strings without LookupError.
+    2. Native PostgreSQL Enum columns bind uppercase names so PostgreSQL never raises InvalidTextRepresentation.
+    """
+    if hasattr(models_module, 'enforce_issp_singularity_and_accounting'):
+        models_module.enforce_issp_singularity_and_accounting.__globals__['item_lower'] = ''
+
+    native_enum_columns = {
+        ("existing_inventory", "status"): (AssetStatus, True),
+        ("issp_core", "status"): (ProposalStatus, True),
+        ("issp_core", "category"): (ProposalCategory, True),
+        ("issp_nodes", "node_type"): (NodeType, True),
+        ("issp_nodes", "page_orientation"): (PageOrientation, True),
+        ("issp_contents", "content_type"): (ContentType, True),
+        ("issp_assets", "asset_role"): (AssetRole, True),
+    }
+
+    varchar_enum_columns = {
+        ("users", "role_tag"): (RoleTag, False),
+        ("issp_core", "strategic_category"): (ProjectCategory, False),
+        ("issp_core", "office_location"): (OfficeLocation, False),
+        ("issp_core", "fund_source"): (FundSource, False),
+        ("issp_core", "uacs_object_code"): (UacsObjectCode, False),
+        ("issp_core", "expenditure_class"): (ExpenditureClass, False),
+        ("issp_core", "system_development_status"): (SystemDevelopmentStatus, False),
+        ("existing_inventory", "office_location"): (OfficeLocation, False),
+        ("information_systems", "status"): (SystemStatus, False),
+        ("information_systems", "classification"): (SystemClassification, False),
+        ("information_systems", "hosting_type"): (SystemHostingType, False),
+        ("information_systems", "development_strategy"): (DevelopmentStrategy, False),
+        ("ict_projects", "project_category"): (ProjectCategory, False),
+        ("ict_projects", "funding_source"): (FundSource, False),
+        ("master_narratives", "scope_choice"): (ScopeChoice, False),
+    }
+
+    if hasattr(models_module, 'DictAssetCategory'):
+        varchar_enum_columns[("existing_inventory", "dict_category")] = (getattr(models_module, 'DictAssetCategory'), False)
+
+    configs = {**native_enum_columns, **varchar_enum_columns}
+
+    # Patch Table columns
+    for table in Base.metadata.tables.values():
+        for column in table.columns:
+            key = (table.name, column.name)
+            if key in configs:
+                enum_cls, send_name = configs[key]
+                column.type = FlexibleEnum(enum_cls, send_name=send_name)
+
+    # Patch ORM class mappers
+    for mapper in Base.registry.mappers:
+        t_name = mapper.local_table.name
+        for prop in mapper.column_attrs:
+            for col in prop.columns:
+                key = (t_name, col.name)
+                if key in configs:
+                    enum_cls, send_name = configs[key]
+                    col.type = FlexibleEnum(enum_cls, send_name=send_name)
+
+
+def is_domain_allowed(email: str) -> bool:
+    allowed_domains = getattr(settings, "ALLOWED_EMAIL_DOMAINS", ["*"])
+    if not allowed_domains or "*" in allowed_domains:
+        return True
+    if not email or "@" not in email:
+        return False
+    parts = email.split("@")
+    if len(parts) != 2:
+        return False
+    domain = parts[1].strip().lower()
+    return domain in [d.strip().lower() for d in allowed_domains if d.strip()]
 
 
 def align_database_schemas(engine):
     """
-    Defensively inspects target tables at runtime and appends any columns
-    defined in SQLAlchemy models that are missing physically from the database.
+    Defensively inspects target database tables at runtime and appends any 
+    columns defined in canonical models that are physically missing.
+    Converts legacy PostgreSQL enum columns to VARCHAR where canonical models expect strings.
+    Actively sanitizes residual SUC/CSPC artifacts from the database.
+    Expands master_narratives with DICT/Bagong Pilipinas seals and audit_trails with module tracking.
     """
-    logger.info("Running defensive schema alignment checks...")
-    inspector = inspect(engine)
-    
-    # 1. Align 'master_narratives' table
-    if "master_narratives" in inspector.get_table_names():
-        columns = [c['name'] for c in inspector.get_columns('master_narratives')]
-        
-        columns_to_sync = {
-            "authoring_cycle_duration": "INTEGER",
-            "site_development_plan_url": "VARCHAR(500)",
-            "fiber_backbone_url": "VARCHAR(500)",
-            "system_architecture_url": "VARCHAR(500)",
-            "process_flow_diagram_url": "VARCHAR(500)"
-        }
-        
-        for col_name, col_type in columns_to_sync.items():
-            if col_name not in columns:
-                logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'master_narratives' table.")
-                try:
-                    with engine.begin() as conn:
-                        if "sqlite" in settings.DATABASE_URL.lower():
-                            conn.execute(text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_type}"))
-                        else:
-                            conn.execute(text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_type} NULL"))
-                except Exception as ex:
-                    logger.warning(f"Failed to append column '{col_name}' defensively: {str(ex)}")
+    logger.info("Running defensive schema alignment and data sanitization...")
+    is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
+    bool_false = "0" if is_sqlite else "false"
+    bool_true = "1" if is_sqlite else "true"
+    uuid_type = "VARCHAR(36)"
+
+    def safe_exec(connection, sql_statement, params=None):
+        try:
+            with connection.begin_nested():
+                connection.execute(sql_statement, params or {})
+        except Exception as e:
+            logger.debug(f"Defensive statement note: {e}")
+
+    with engine.begin() as conn:
+        if not is_sqlite:
+            try:
+                conn.execute(text("""
+                    SELECT pg_terminate_backend(pid) 
+                    FROM pg_stat_activity 
+                    WHERE datname = current_database() 
+                      AND pid <> pg_backend_pid() 
+                      AND state IN ('idle in transaction', 'idle in transaction (aborted)');
+                """))
+                conn.execute(text("SET lock_timeout = '5s';"))
+            except Exception as lock_err:
+                logger.debug(f"Lock configuration note: {lock_err}")
+
+            # Clean legacy custom operators
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    DROP OPERATOR IF EXISTS public.=(character varying, uuid) CASCADE;
+                    DROP OPERATOR IF EXISTS public.=(uuid, character varying) CASCADE;
+                    DROP OPERATOR IF EXISTS public.=(character, uuid) CASCADE;
+                    DROP OPERATOR IF EXISTS public.=(uuid, character) CASCADE;
+                    DROP FUNCTION IF EXISTS public.varchar_eq_uuid(character varying, uuid) CASCADE;
+                    DROP FUNCTION IF EXISTS public.uuid_eq_varchar(uuid, character varying) CASCADE;
+                    DROP FUNCTION IF EXISTS public.bpchar_eq_uuid(character, uuid) CASCADE;
+                    DROP FUNCTION IF EXISTS public.uuid_eq_bpchar(uuid, character) CASCADE;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Convert users.role_tag from ENUM to VARCHAR(100)
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'users' 
+                          AND column_name = 'role_tag' 
+                          AND (data_type = 'USER-DEFINED' OR udt_name = 'roletag')
+                    ) THEN
+                        ALTER TABLE users ALTER COLUMN role_tag DROP DEFAULT;
+                        ALTER TABLE users ALTER COLUMN role_tag TYPE VARCHAR(100) USING role_tag::text;
+                        ALTER TABLE users ALTER COLUMN role_tag SET DEFAULT 'ROLE_DEPT_USER';
+                        DROP TYPE IF EXISTS roletag CASCADE;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Convert issp_core.system_development_status to VARCHAR(100)
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'issp_core' 
+                          AND column_name = 'system_development_status' 
+                          AND (data_type = 'USER-DEFINED' OR udt_name = 'systemdevelopmentstatus')
+                    ) THEN
+                        ALTER TABLE issp_core ALTER COLUMN system_development_status DROP DEFAULT;
+                        ALTER TABLE issp_core ALTER COLUMN system_development_status TYPE VARCHAR(100) USING system_development_status::text;
+                        ALTER TABLE issp_core ALTER COLUMN system_development_status SET DEFAULT 'N/A';
+                        UPDATE issp_core SET system_development_status = 'For Development' WHERE system_development_status ILIKE '%development%';
+                        UPDATE issp_core SET system_development_status = 'For Enhancement' WHERE system_development_status ILIKE '%enhancement%';
+                        UPDATE issp_core SET system_development_status = 'N/A' WHERE system_development_status IS NULL OR system_development_status NOT IN ('For Development', 'For Enhancement');
+                        DROP TYPE IF EXISTS systemdevelopmentstatus CASCADE;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Convert master_narratives.scope_choice to VARCHAR(100)
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'master_narratives' 
+                          AND column_name = 'scope_choice' 
+                          AND (data_type = 'USER-DEFINED' OR udt_name = 'scopechoice')
+                    ) THEN
+                        ALTER TABLE master_narratives ALTER COLUMN scope_choice DROP DEFAULT;
+                        ALTER TABLE master_narratives ALTER COLUMN scope_choice TYPE VARCHAR(100) USING scope_choice::text;
+                        ALTER TABLE master_narratives ALTER COLUMN scope_choice SET DEFAULT 'Department-Wide';
+                        DROP TYPE IF EXISTS scopechoice CASCADE;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+        # ACTIVE DATA SANITIZATION: Overwrite stale SUC/CSPC values in DB tables
+        safe_exec(conn, text(f"""
+            UPDATE master_narratives 
+            SET agency_head_position = '{settings.DEFAULT_AGENCY_HEAD_TITLE}' 
+            WHERE agency_head_position ILIKE '%president%' OR agency_head_position ILIKE '%suc%' OR agency_head_position IS NULL;
+        """))
+        safe_exec(conn, text(f"""
+            UPDATE master_narratives 
+            SET agency_website_url = '{settings.DEFAULT_AGENCY_WEBSITE}' 
+            WHERE agency_website_url ILIKE '%cspc.edu.ph%' OR agency_website_url IS NULL;
+        """))
+        safe_exec(conn, text(f"""
+            UPDATE master_narratives 
+            SET agency_name = '{settings.DEFAULT_AGENCY_NAME}' 
+            WHERE agency_name ILIKE '%cspc%' OR agency_name ILIKE '%polytechnic%' OR agency_name IS NULL;
+        """))
+        safe_exec(conn, text("""
+            UPDATE egovernment_checklists 
+            SET equivalent_system_details = 'Not applicable (National Government Agency)' 
+            WHERE equivalent_system_details ILIKE '%suc%' OR equivalent_system_details ILIKE '%college%';
+        """))
+        safe_exec(conn, text("""
+            UPDATE network_infrastructures 
+            SET office_location = 'Central Office' 
+            WHERE office_location ILIKE '%nabua%' OR office_location ILIKE '%buhi%';
+        """))
+        safe_exec(conn, text("""
+            UPDATE network_infrastructures 
+            SET topology_description = 'Core fiber optic distribution backbone connecting administrative, operational, and public assistance divisions.' 
+            WHERE topology_description ILIKE '%academic%' OR topology_description ILIKE '%laboratories%';
+        """))
+
+        inspector = inspect(conn)
+        table_names = inspector.get_table_names()
+
+        # 1. Patch 'master_narratives' table
+        if "master_narratives" in table_names:
+            narrative_cols = [c['name'] for c in inspector.get_columns('master_narratives')]
+            columns_to_sync_narrative = {
+                "agency_name": "VARCHAR(255)",
+                "agency_website_url": "VARCHAR(255)",
+                "agency_logo_url": "VARCHAR(500)",
+                "dict_logo_url": "VARCHAR(500)",
+                "bagong_pilipinas_logo_url": "VARCHAR(500)",
+                "cert_logo_url": "VARCHAR(500)",
+                "is_amendment": f"BOOLEAN DEFAULT {bool_false}",
+                "amendment_number": "VARCHAR(50)",
+                "scope_choice": "VARCHAR(100) DEFAULT 'Department-Wide'",
+                "scope_json": "JSON DEFAULT '{}'",
+                "cio_organizational_unit": "VARCHAR(200)",
+                "agency_head_position": f"VARCHAR(200) DEFAULT '{settings.DEFAULT_AGENCY_HEAD_TITLE}'",
+                "drbcp_approval_date": "VARCHAR(100)",
+                "functions": "TEXT",
+                "focal_name": "VARCHAR(200)",
+                "focal_position": "VARCHAR(200)",
+                "focal_organizational_unit": "VARCHAR(200)",
+                "focal_email": "VARCHAR(255)",
+                "focal_contact_no": "VARCHAR(100)",
+                "authoring_cycle_duration": "INTEGER DEFAULT 3",
+                "org_chart_url": "VARCHAR(500)",
+                "fiber_backbone_url": "VARCHAR(500)",
+                "system_architecture_url": "VARCHAR(500)",
+                "network_diagram_url": "VARCHAR(500)",
+                "proposed_ict_org_url": "VARCHAR(500)",
+                "subsystem_network_layouts_json": "JSON DEFAULT '[]'",
+                "planners_json": "JSON DEFAULT '[]'",
+                "manpower_json": "JSON DEFAULT '{}'",
+                "major_final_outputs": "JSON DEFAULT '[]'",
+                "strategic_concerns_json": "JSON DEFAULT '[]'",
+                "systems_json": "JSON DEFAULT '[]'",
+                "databases_json": "JSON DEFAULT '[]'",
+                "internal_projects_json": "JSON DEFAULT '[]'",
+                "cross_projects_json": "JSON DEFAULT '[]'",
+                "pmf_matrix_json": "JSON DEFAULT '[]'",
+                "mithi_special_solutions": "JSON DEFAULT '[]'",
+                "mithi_hardware_inventory": "JSON DEFAULT '[]'",
+                "implementation_schedules": "JSON DEFAULT '[]'",
+                "annual_ict_budget": "NUMERIC(15, 2) DEFAULT 0.00",
+                "enterprise_architecture_narrative": "TEXT",
+                "drbcp_affected_assets_json": "JSON DEFAULT '[]'",
+                "drbcp_recovery_strategy_html": "TEXT",
+                "drbcp_sop_phases_html": "TEXT",
+                "drbcp_compliance_narrative_html": "TEXT",
+                "is_archived": f"BOOLEAN DEFAULT {bool_false}",
+                "final_pdf_vault_url": "VARCHAR(500)"
+            }
+            for col_name, col_def in columns_to_sync_narrative.items():
+                if col_name not in narrative_cols:
+                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'master_narratives'.")
+                    safe_exec(conn, text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_def}"))
+
+        # 2. Patch 'organizational_outcomes' table
+        if "organizational_outcomes" in table_names:
+            oo_cols = [c['name'] for c in inspector.get_columns('organizational_outcomes')]
+            columns_to_sync_oo = {
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "type_label": "VARCHAR(50) DEFAULT 'Organizational Outcome'",
+                "outcome_name": "VARCHAR(255)",
+                "program_name": "VARCHAR(255)",
+                "description": "TEXT"
+            }
+            for col_name, col_def in columns_to_sync_oo.items():
+                if col_name not in oo_cols:
+                    safe_exec(conn, text(f"ALTER TABLE organizational_outcomes ADD COLUMN {col_name} {col_def}"))
+            
+            safe_exec(conn, text("UPDATE organizational_outcomes SET outcome_name = program_name WHERE outcome_name IS NULL AND program_name IS NOT NULL"))
+            safe_exec(conn, text("UPDATE organizational_outcomes SET program_name = outcome_name WHERE program_name IS NULL AND outcome_name IS NOT NULL"))
+
+        # 3. Patch 'strategic_concerns' table
+        if "strategic_concerns" in table_names:
+            sc_cols = [c['name'] for c in inspector.get_columns('strategic_concerns')]
+            columns_to_sync_sc = {
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "outcome_id": "INTEGER",
+                "mfo": "VARCHAR(255)",
+                "critical_system": "VARCHAR(255)",
+                "problems": "TEXT",
+                "intended_use": "TEXT",
+                "order_index": "INTEGER DEFAULT 0"
+            }
+            for col_name, col_def in columns_to_sync_sc.items():
+                if col_name not in sc_cols:
+                    safe_exec(conn, text(f"ALTER TABLE strategic_concerns ADD COLUMN {col_name} {col_def}"))
+
+        # 4. Patch 'ict_projects' table
+        if "ict_projects" in table_names:
+            proj_cols = [c['name'] for c in inspector.get_columns('ict_projects')]
+            columns_to_sync_proj = {
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "system_id": f"{uuid_type}",
+                "project_title": "VARCHAR(255) DEFAULT ''",
+                "project_category": "VARCHAR(100) DEFAULT 'Internal ICT Projects'",
+                "description": "TEXT DEFAULT ''",
+                "objectives": "TEXT DEFAULT ''",
+                "aligns_pip": f"BOOLEAN DEFAULT {bool_false}",
+                "aligns_ncsp": f"BOOLEAN DEFAULT {bool_false}",
+                "aligns_egmp": f"BOOLEAN DEFAULT {bool_false}",
+                "aligns_pcb": f"BOOLEAN DEFAULT {bool_false}",
+                "aligns_others": f"BOOLEAN DEFAULT {bool_false}",
+                "aligns_others_specify": "VARCHAR(255)",
+                "harmonizes_national_priority": f"BOOLEAN DEFAULT {bool_false}",
+                "harmonizes_resource_optimization": f"BOOLEAN DEFAULT {bool_false}",
+                "harmonizes_pegif": f"BOOLEAN DEFAULT {bool_false}",
+                "harmonizes_cross_collaboration": f"BOOLEAN DEFAULT {bool_false}",
+                "harmonizes_scalability": f"BOOLEAN DEFAULT {bool_false}",
+                "duration_start_year": "INTEGER DEFAULT 2026",
+                "duration_end_year": "INTEGER DEFAULT 2028",
+                "annual_deliverables": "JSON DEFAULT '{}'",
+                "year_1_deliverables": "TEXT DEFAULT ''",
+                "year_2_deliverables": "TEXT DEFAULT ''",
+                "year_3_deliverables": "TEXT DEFAULT ''",
+                "implementing_unit": "VARCHAR(200)",
+                "funding_source": "VARCHAR(100) DEFAULT 'General Appropriations Act (GAA)'",
+                "lead_agency": "VARCHAR(200)",
+                "partner_agencies": "TEXT"
+            }
+            for col_name, col_def in columns_to_sync_proj.items():
+                if col_name not in proj_cols:
+                    safe_exec(conn, text(f"ALTER TABLE ict_projects ADD COLUMN {col_name} {col_def}"))
+
+        # 5. Patch 'issp_core' table
+        if "issp_core" in table_names:
+            core_cols_map = {c['name']: str(c['type']).upper() for c in inspector.get_columns('issp_core')}
+            columns_to_sync_core = {
+                "project_id": f"{uuid_type}",
+                "item_key": "VARCHAR(100)",
+                "strategic_category": "VARCHAR(100) DEFAULT 'Office Productivity'",
+                "office_location": "VARCHAR(100) DEFAULT 'Central Office'",
+                "fund_source": "VARCHAR(100) DEFAULT 'General Appropriations Act (GAA)'",
+                "uacs_object_code": "VARCHAR(150) DEFAULT '50604050 03 - ICT Equipment (CO)'",
+                "expenditure_class": "VARCHAR(100) DEFAULT 'Capital Outlay'",
+                "year_1_qty": "INTEGER DEFAULT 0",
+                "year_2_qty": "INTEGER DEFAULT 0",
+                "year_3_qty": "INTEGER DEFAULT 0",
+                "is_archived": f"BOOLEAN DEFAULT {bool_false}",
+                "category": "VARCHAR(50) DEFAULT 'Hardware'",
+                "created_by_students": f"BOOLEAN DEFAULT {bool_false}",
+                "target_office_automated": "VARCHAR(200)",
+                "system_development_status": "VARCHAR(100) DEFAULT 'N/A'",
+                "total_cost": "NUMERIC(15, 2) DEFAULT 0.00",
+                "outcome_id": "INTEGER",
+                "canvas_expiration_date": "TIMESTAMP NULL",
+                "is_expansion": f"BOOLEAN DEFAULT {bool_false}",
+                "needs_assessment_id": f"{uuid_type}"
+            }
+            for col_name, col_def in columns_to_sync_core.items():
+                if col_name not in core_cols_map:
+                    safe_exec(conn, text(f"ALTER TABLE issp_core ADD COLUMN {col_name} {col_def}"))
+
+        # 6. Patch 'existing_inventory' table
+        if "existing_inventory" in table_names:
+            inv_cols = [c['name'] for c in inspector.get_columns('existing_inventory')]
+            columns_to_sync_inv = {
+                "exact_model": "VARCHAR(200)",
+                "specs": "TEXT",
+                "date_acquired": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                "acquired_price": "NUMERIC(15, 2) DEFAULT 0.00",
+                "office_location": "VARCHAR(100) DEFAULT 'Central Office'",
+                "is_central_office": f"BOOLEAN DEFAULT {bool_true}",
+                "is_end_of_life": f"BOOLEAN DEFAULT {bool_false}",
+                "is_backup": f"BOOLEAN DEFAULT {bool_false}",
+                "is_software": f"BOOLEAN DEFAULT {bool_false}",
+                "is_perpetual": f"BOOLEAN DEFAULT {bool_true}",
+                "unserviceable_report_url": "VARCHAR(500)",
+                "dict_category": "VARCHAR(100)",
+                "other_category_name": "VARCHAR(200)"
+            }
+            for col_name, col_def in columns_to_sync_inv.items():
+                if col_name not in inv_cols:
+                    safe_exec(conn, text(f"ALTER TABLE existing_inventory ADD COLUMN {col_name} {col_def}"))
+
+        # 7. Patch 'information_systems' table
+        if "information_systems" in table_names:
+            sys_cols = [c['name'] for c in inspector.get_columns('information_systems')]
+            columns_to_sync_sys = {
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "strategic_concern_id": f"{uuid_type}",
+                "name": "VARCHAR(255) DEFAULT ''",
+                "status": "VARCHAR(50) DEFAULT 'Operational'",
+                "classification": "VARCHAR(100) DEFAULT 'Operations - Frontline Service'",
+                "hosting_type": "VARCHAR(50) DEFAULT 'Hybrid'",
+                "online_url": "VARCHAR(255)",
+                "description_and_purpose": "TEXT DEFAULT ''",
+                "enhancement_details": "TEXT",
+                "development_strategy": "VARCHAR(100) DEFAULT 'Outsourced'",
+                "development_platform": "VARCHAR(200) DEFAULT ''",
+                "database_name": "VARCHAR(200) DEFAULT ''",
+                "data_storage_type": "VARCHAR(200) DEFAULT ''",
+                "internal_users": "TEXT DEFAULT ''",
+                "external_users": "TEXT DEFAULT ''",
+                "system_owner_office": "VARCHAR(200) DEFAULT ''",
+                "is_integrated_with_others": f"BOOLEAN DEFAULT {bool_false}",
+                "internal_integrated_systems": "TEXT",
+                "external_integrated_systems": "TEXT",
+                "generates_data_for_others": f"BOOLEAN DEFAULT {bool_false}",
+                "processes_data_from_others": f"BOOLEAN DEFAULT {bool_false}",
+                "is_deployed_on_shared_platform": f"BOOLEAN DEFAULT {bool_false}",
+                "processes_personal_information": f"BOOLEAN DEFAULT {bool_false}",
+                "has_undergone_pia": f"BOOLEAN DEFAULT {bool_false}"
+            }
+            for col_name, col_def in columns_to_sync_sys.items():
+                if col_name not in sys_cols:
+                    safe_exec(conn, text(f"ALTER TABLE information_systems ADD COLUMN {col_name} {col_def}"))
+
+        # 8. Patch 'needs_assessments' table (Section 8.0 Aggregation & Provenance)
+        if "needs_assessments" in table_names:
+            na_cols = [c['name'] for c in inspector.get_columns('needs_assessments')]
+            columns_to_sync_na = {
+                "is_aggregated": f"BOOLEAN DEFAULT {bool_false}",
+                "strategic_concern_id": f"{uuid_type}"
+            }
+            for col_name, col_def in columns_to_sync_na.items():
+                if col_name not in na_cols:
+                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'needs_assessments'.")
+                    safe_exec(conn, text(f"ALTER TABLE needs_assessments ADD COLUMN {col_name} {col_def}"))
+
+        # 9. Patch 'audit_trails' table
+        if "audit_trails" in table_names:
+            audit_cols = [c['name'] for c in inspector.get_columns('audit_trails')]
+            columns_to_sync_audit = {
+                "module": "VARCHAR(100) DEFAULT 'GOVERNANCE'",
+                "ip_address": "VARCHAR(50)",
+                "department_id": "INTEGER"
+            }
+            for col_name, col_def in columns_to_sync_audit.items():
+                if col_name not in audit_cols:
+                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'audit_trails'.")
+                    safe_exec(conn, text(f"ALTER TABLE audit_trails ADD COLUMN {col_name} {col_def}"))
 
 
 def seed_document_hierarchy(db):
     """
-    Seeds a self-referencing ordered hierarchical tree containing nodes for all
-    chapters of the CSPC ISSP document matching the standard DICT format.
+    Seeds the self-referencing document tree matching DICT ISSP v.2026 Table of Contents (Pages 2-4).
     """
     logger.info("Initializing DICT compliance document tree seeding...")
-    
-    # 1. Root Node
-    root_node = db.query(IsspNode).filter(IsspNode.system_key == "root_document").first()
-    if not root_node:
-        root_node = IsspNode(
-            node_type=NodeType.ROOT,
-            system_key="root_document",
-            sequence_order=Decimal("1.000"),
-            page_orientation=PageOrientation.PORTRAIT,
-            force_page_break=False
-        )
-        db.add(root_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=root_node.id,
-            display_title="Camarines Sur Polytechnic Colleges ISSP",
-            toc_label="ISSP Document Root"
-        ))
+
+    agency_title = f"{settings.DEFAULT_AGENCY_NAME} ISSP"
+
+    tree_structure = [
+        {"key": "root_document", "type": NodeType.ROOT, "parent": None, "seq": "1.000", "title": agency_title, "toc": "ISSP Document Root", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "glossary", "type": NodeType.LEAF, "parent": "root_document", "seq": "1.100", "title": "Definition of Terms", "toc": "Definition of Terms", "break": True, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_1", "type": NodeType.PART, "parent": "root_document", "seq": "2.000", "title": "PART I. AGENCY PROFILE & STRATEGIC CONTEXT", "toc": "PART I. AGENCY PROFILE & STRATEGIC CONTEXT", "break": True, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_1_a", "type": NodeType.SECTION, "parent": "part_1", "seq": "2.100", "title": "A. Mandate, Vision, Mission, and Organizational Outcome", "toc": "A. Mandate, Vision, Mission, and Organizational Outcome", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_1_b", "type": NodeType.SECTION, "parent": "part_1", "seq": "2.200", "title": "B. Organizational Structure", "toc": "B. Organizational Structure", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_1_c", "type": NodeType.SECTION, "parent": "part_1", "seq": "2.300", "title": "C. Stakeholder Analysis", "toc": "C. Stakeholder Analysis", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_2", "type": NodeType.PART, "parent": "root_document", "seq": "3.000", "title": "PART II. CURRENT ICT ASSESSMENT", "toc": "PART II. CURRENT ICT ASSESSMENT", "break": True, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_2_a", "type": NodeType.SECTION, "parent": "part_2", "seq": "3.100", "title": "A. Strategic Concerns for ICT Use", "toc": "A. Strategic Concerns for ICT Use", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_2_b", "type": NodeType.SECTION, "parent": "part_2", "seq": "3.200", "title": "B. Existing Network Infrastructure & Cybersecurity Controls", "toc": "B. Existing Network Infrastructure", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_2_c", "type": NodeType.SECTION, "parent": "part_2", "seq": "3.300", "title": "C. Existing/Operational Information Systems (IS) Inventory", "toc": "C. Existing/Operational Information Systems Inventory", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_2_d", "type": NodeType.SECTION, "parent": "part_2", "seq": "3.400", "title": "D. E-Government Programs (EGP) Checklist", "toc": "D. E-Government Programs Checklist", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3", "type": NodeType.PART, "parent": "root_document", "seq": "4.000", "title": "PART III. PROPOSED ICT STRATEGY", "toc": "PART III. PROPOSED ICT STRATEGY", "break": True, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_a", "type": NodeType.SECTION, "parent": "part_3", "seq": "4.100", "title": "A. Proposed Network Infrastructure & Cybersecurity Controls", "toc": "A. Proposed Network Infrastructure", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_b", "type": NodeType.SECTION, "parent": "part_3", "seq": "4.200", "title": "B. Enterprise Architecture", "toc": "B. Enterprise Architecture", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_c", "type": NodeType.SECTION, "parent": "part_3", "seq": "4.300", "title": "C. Proposed ICT Human Capital", "toc": "C. Proposed ICT Human Capital", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_d", "type": NodeType.SECTION, "parent": "part_3", "seq": "4.400", "title": "D. Proposed Information Systems", "toc": "D. Proposed Information Systems", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_e", "type": NodeType.SECTION, "parent": "part_3", "seq": "4.500", "title": "E. ICT Projects", "toc": "E. ICT Projects", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_e1", "type": NodeType.SUBSECTION, "parent": "part_3_e", "seq": "4.510", "title": "E.1. Internal ICT Projects", "toc": "E.1. Internal ICT Projects", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_e2", "type": NodeType.SUBSECTION, "parent": "part_3_e", "seq": "4.520", "title": "E.2. Cross-Agency ICT Projects", "toc": "E.2. Cross-Agency ICT Projects", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_f", "type": NodeType.SECTION, "parent": "part_3", "seq": "4.600", "title": "F. Performance Measurement Framework", "toc": "F. Performance Measurement Framework", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_f1", "type": NodeType.SUBSECTION, "parent": "part_3_f", "seq": "4.610", "title": "F.1. Internal ICT Projects", "toc": "F.1. Internal ICT Projects", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_3_f2", "type": NodeType.SUBSECTION, "parent": "part_3_f", "seq": "4.620", "title": "F.2. Cross-Agency ICT Projects", "toc": "F.2. Cross-Agency ICT Projects", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_4", "type": NodeType.PART, "parent": "root_document", "seq": "5.000", "title": "PART IV. RESOURCE REQUIREMENTS", "toc": "PART IV. RESOURCE REQUIREMENTS", "break": True, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_4_a", "type": NodeType.SECTION, "parent": "part_4", "seq": "5.100", "title": "A. Detailed Resource Deployment and Cost Breakdown", "toc": "A. Detailed Resource Deployment", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "part_4_b", "type": NodeType.SECTION, "parent": "part_4", "seq": "5.200", "title": "B. Summary of Investments (Four-Way Parity)", "toc": "B. Summary of Investments", "break": False, "orient": PageOrientation.LANDSCAPE},
+        {"key": "annex_1", "type": NodeType.PART, "parent": "root_document", "seq": "6.000", "title": "ANNEX 1: EXISTING INFORMATION & COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY", "toc": "ANNEX 1: EXISTING ICT ASSET INVENTORY", "break": True, "orient": PageOrientation.LANDSCAPE},
+        {"key": "annex_2", "type": NodeType.PART, "parent": "root_document", "seq": "7.000", "title": "ANNEX 2: DISASTER RECOVERY AND BUSINESS CONTINUITY PLAN (DRBCP)", "toc": "ANNEX 2: DISASTER RECOVERY AND BUSINESS CONTINUITY PLAN", "break": True, "orient": PageOrientation.LANDSCAPE}
+    ]
+
+    node_instances = {}
+    for item in tree_structure:
+        node = db.query(IsspNode).filter(IsspNode.system_key == item["key"]).first()
+        parent_id = node_instances.get(item["parent"]).id if item["parent"] and item["parent"] in node_instances else None
         
-    # 2. Transmittal Letter
-    trans_node = db.query(IsspNode).filter(IsspNode.system_key == "transmittal").first()
-    if not trans_node:
-        trans_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.LEAF,
-            system_key="transmittal",
-            sequence_order=Decimal("1.100"),
-            page_orientation=PageOrientation.PORTRAIT,
-            force_page_break=True
-        )
-        db.add(trans_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=trans_node.id,
-            display_title="Transmittal Letter",
-            toc_label="Transmittal Letter"
-        ))
-
-    # 3. Cover Page
-    cover_node = db.query(IsspNode).filter(IsspNode.system_key == "cover").first()
-    if not cover_node:
-        cover_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.LEAF,
-            system_key="cover",
-            sequence_order=Decimal("1.200"),
-            page_orientation=PageOrientation.PORTRAIT,
-            force_page_break=True
-        )
-        db.add(cover_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=cover_node.id,
-            display_title="ISSP Cover Page",
-            toc_label="ISSP Cover Page"
-        ))
-
-    # 4. Signatories Page
-    sig_node = db.query(IsspNode).filter(IsspNode.system_key == "signatories").first()
-    if not sig_node:
-        sig_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.LEAF,
-            system_key="signatories",
-            sequence_order=Decimal("1.300"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(sig_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=sig_node.id,
-            display_title="ISSP Signatories & Scope Choices",
-            toc_label="ISSP Signatories & Scope"
-        ))
-
-    # 5. TOC Page
-    toc_node = db.query(IsspNode).filter(IsspNode.system_key == "toc_page").first()
-    if not toc_node:
-        toc_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.LEAF,
-            system_key="toc_page",
-            sequence_order=Decimal("1.400"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(toc_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=toc_node.id,
-            display_title="TABLE OF CONTENTS",
-            toc_label="Table of Contents"
-        ))
-
-    # 6. Glossary Page
-    defs_node = db.query(IsspNode).filter(IsspNode.system_key == "glossary").first()
-    if not defs_node:
-        defs_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.LEAF,
-            system_key="glossary",
-            sequence_order=Decimal("1.500"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(defs_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=defs_node.id,
-            display_title="Definition of Terms",
-            toc_label="Definition of Terms"
-        ))
-
-    # 7. General Instructions
-    inst_node = db.query(IsspNode).filter(IsspNode.system_key == "instructions").first()
-    if not inst_node:
-        inst_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.LEAF,
-            system_key="instructions",
-            sequence_order=Decimal("1.600"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(inst_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=inst_node.id,
-            display_title="General Submission Guidelines",
-            toc_label="General Instructions"
-        ))
-
-    # 8. Part I: Organizational Profile
-    part1_node = db.query(IsspNode).filter(IsspNode.system_key == "part_i_org_profile").first()
-    if not part1_node:
-        part1_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.PART,
-            system_key="part_i_org_profile",
-            sequence_order=Decimal("2.000"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(part1_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=part1_node.id,
-            display_title="PART I: ORGANIZATIONAL PROFILE",
-            toc_label="PART I. ORGANIZATIONAL PROFILE"
-        ))
-
-    # Part I Section A (Mandates & Vision/Mission)
-    section_a = db.query(IsspNode).filter(IsspNode.system_key == "part_i_section_a").first()
-    if not section_a:
-        section_a = IsspNode(
-            parent_id=part1_node.id,
-            node_type=NodeType.SECTION,
-            system_key="part_i_section_a",
-            sequence_order=Decimal("2.100"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=False
-        )
-        db.add(section_a)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=section_a.id,
-            display_title="A. Department/Agency Vision/Mission Statement",
-            toc_label="A. Vision, Mission and Mandate"
-        ))
-
-    # Part I Subsection A.1 (Mandate)
-    sub_a1 = db.query(IsspNode).filter(IsspNode.system_key == "part_i_sub_a1_mandate").first()
-    if not sub_a1:
-        sub_a1 = IsspNode(
-            parent_id=section_a.id,
-            node_type=NodeType.SUBSECTION,
-            system_key="part_i_sub_a1_mandate",
-            sequence_order=Decimal("2.110"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=False
-        )
-        db.add(sub_a1)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=sub_a1.id,
-            display_title="A.1. Mandate (Legal Basis)",
-            toc_label="A.1. Mandate"
-        ))
-        db.add(IsspContent(
-            node_id=sub_a1.id,
-            content_type=ContentType.RICH_TEXT,
-            json_data={"text_html": "<p>The College mandate is defined under Section 2 of Batas Pambansa Bilang 512, the law which created the Camarines Sur Polytechnic Colleges (CSPC). BP 512 provides: \"The Camarines Sur Polytechnic Colleges shall primarily provide higher technological, professional and vocational instruction and training in fisheries, trade and technology, arts and sciences, and as well as promote research, history, extension services, and progressive leadership in these fields.\"</p>"}
-        ))
-
-    # Part I Subsection A.2 (Vision)
-    sub_a2 = db.query(IsspNode).filter(IsspNode.system_key == "part_i_sub_a2_vision").first()
-    if not sub_a2:
-        sub_a2 = IsspNode(
-            parent_id=section_a.id,
-            node_type=NodeType.SUBSECTION,
-            system_key="part_i_sub_a2_vision",
-            sequence_order=Decimal("2.120"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=False
-        )
-        db.add(sub_a2)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=sub_a2.id,
-            display_title="A.2. Vision Statement",
-            toc_label="A.2. Vision Statement"
-        ))
-        db.add(IsspContent(
-            node_id=sub_a2.id,
-            content_type=ContentType.RICH_TEXT,
-            json_data={"text_html": "<p>Polytechnic education at its best for the Bicolanos</p>"}
-        ))
-
-    # Part I Subsection A.3 (Mission)
-    sub_a3 = db.query(IsspNode).filter(IsspNode.system_key == "part_i_sub_a3_mission").first()
-    if not sub_a3:
-        sub_a3 = IsspNode(
-            parent_id=section_a.id,
-            node_type=NodeType.SUBSECTION,
-            system_key="part_i_sub_a3_mission",
-            sequence_order=Decimal("2.130"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=False
-        )
-        db.add(sub_a3)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=sub_a3.id,
-            display_title="A.3. Mission Statement",
-            toc_label="A.3. Mission Statement"
-        ))
-        db.add(IsspContent(
-            node_id=sub_a3.id,
-            content_type=ContentType.RICH_TEXT,
-            json_data={"text_html": "<p>Transforming lives to be free of poverty by creating a better future through world class polytechnic education and technological innovation.</p>"}
-        ))
-
-    # Part I Section B (Planners)
-    section_b = db.query(IsspNode).filter(IsspNode.system_key == "part_i_section_b").first()
-    if not section_b:
-        section_b = IsspNode(
-            parent_id=part1_node.id,
-            node_type=NodeType.SECTION,
-            system_key="part_i_section_b",
-            sequence_order=Decimal("2.200"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=False
-        )
-        db.add(section_b)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=section_b.id,
-            display_title="B. SUC Designated Planners Profile Matrix (Table B-1)",
-            toc_label="B. Department/Agency Profile"
-        ))
-
-    # Part I Section E (Strategic Concerns)
-    section_e = db.query(IsspNode).filter(IsspNode.system_key == "part_i_section_e").first()
-    if not section_e:
-        section_e = IsspNode(
-            parent_id=part1_node.id,
-            node_type=NodeType.SECTION,
-            system_key="part_i_section_e",
-            sequence_order=Decimal("2.300"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=False
-        )
-        db.add(section_e)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=section_e.id,
-            display_title="E. Strategic Concerns for ICT Use (Table I.E)",
-            toc_label="E. Strategic Concerns for ICT Use"
-        ))
-
-    # 9. Part II: Information Systems Strategy
-    part2_node = db.query(IsspNode).filter(IsspNode.system_key == "part_ii_is_strategy").first()
-    if not part2_node:
-        part2_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.PART,
-            system_key="part_ii_is_strategy",
-            sequence_order=Decimal("3.000"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(part2_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=part2_node.id,
-            display_title="PART II: INFORMATION SYSTEMS STRATEGY",
-            toc_label="PART II. INFORMATION SYSTEMS STRATEGY"
-        ))
-
-    # Part II Section B_C (Proposed Systems and Databases)
-    section_b_c = db.query(IsspNode).filter(IsspNode.system_key == "part_ii_section_b_c").first()
-    if not section_b_c:
-        section_b_c = IsspNode(
-            parent_id=part2_node.id,
-            node_type=NodeType.SECTION,
-            system_key="part_ii_section_b_c",
-            sequence_order=Decimal("3.100"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=False
-        )
-        db.add(section_b_c)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=section_b_c.id,
-            display_title="B. Detailed Proposed Systems and Databases profile cards",
-            toc_label="B. Proposed Systems & Databases"
-        ))
-
-    # 10. Part III: Detailed Description of ICT Projects
-    part3_node = db.query(IsspNode).filter(IsspNode.system_key == "part_iii_ict_projects").first()
-    if not part3_node:
-        part3_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.PART,
-            system_key="part_iii_ict_projects",
-            sequence_order=Decimal("4.000"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(part3_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=part3_node.id,
-            display_title="PART III: DETAILED DESCRIPTION OF ICT PROJECTS",
-            toc_label="PART III. DETAILED DESCRIPTION OF ICT PROJECTS"
-        ))
-
-    # 11. Part IV: Resource Requirements
-    part4_node = db.query(IsspNode).filter(IsspNode.system_key == "part_iv_resource_req").first()
-    if not part4_node:
-        part4_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.PART,
-            system_key="part_iv_resource_req",
-            sequence_order=Decimal("5.000"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(part4_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=part4_node.id,
-            display_title="PART IV: RESOURCE REQUIREMENTS (ICT Organizational Charts)",
-            toc_label="PART IV. RESOURCE REQUIREMENTS"
-        ))
-
-    # 12. Part V: Schedules & Investments
-    part5_node = db.query(IsspNode).filter(IsspNode.system_key == "part_v_schedules").first()
-    if not part5_node:
-        part5_node = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.PART,
-            system_key="part_v_schedules",
-            sequence_order=Decimal("6.000"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(part5_node)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=part5_node.id,
-            display_title="PART V: PROJECTS IMPLEMENTATION SCHEDULES & SUMMARIES",
-            toc_label="PART V. SUMMARY OF INVESTMENTS & SCHEDULES"
-        ))
-
-    # 13. Annex Master Details
-    annex_master = db.query(IsspNode).filter(IsspNode.system_key == "annex_master").first()
-    if not annex_master:
-        annex_master = IsspNode(
-            parent_id=root_node.id,
-            node_type=NodeType.PART,
-            system_key="annex_master",
-            sequence_order=Decimal("7.000"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(annex_master)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=annex_master.id,
-            display_title="ANNEX REPOSITORIES (MITHI Surveys)",
-            toc_label="ANNEX REPOSITORIES"
-        ))
-
-    # Annex A-3 Core Functions
-    annex_a3 = db.query(IsspNode).filter(IsspNode.system_key == "annex_a3_functions").first()
-    if not annex_a3:
-        annex_a3 = IsspNode(
-            parent_id=annex_master.id,
-            node_type=NodeType.SECTION,
-            system_key="annex_a3_functions",
-            sequence_order=Decimal("7.100"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(annex_a3)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=annex_a3.id,
-            display_title="Annex A-3: Core SUC Offices Functions Directory",
-            toc_label="Annex A-3: Core SUC Offices Functions"
-        ))
-
-    # Annex A-4 Programs
-    annex_a4 = db.query(IsspNode).filter(IsspNode.system_key == "annex_a4_programs").first()
-    if not annex_a4:
-        annex_a4 = IsspNode(
-            parent_id=annex_master.id,
-            node_type=NodeType.SECTION,
-            system_key="annex_a4_programs",
-            sequence_order=Decimal("7.200"),
-            page_orientation=PageOrientation.LANDSCAPE,
-            force_page_break=True
-        )
-        db.add(annex_a4)
-        db.flush()
-        db.add(IsspVocabulary(
-            node_id=annex_a4.id,
-            display_title="Annex A-4: SUC Degree Programs & GAA Target Indicators",
-            toc_label="Annex A-4: SUC Degree Offerings & GAA Targets"
-        ))
+        if not node:
+            node = IsspNode(
+                parent_id=parent_id,
+                node_type=item["type"],
+                system_key=item["key"],
+                sequence_order=Decimal(item["seq"]),
+                page_orientation=item["orient"],
+                force_page_break=item["break"]
+            )
+            db.add(node)
+            db.flush()
+            db.add(IsspVocabulary(
+                node_id=node.id,
+                display_title=item["title"],
+                toc_label=item["toc"]
+            ))
+            db.flush()
+        node_instances[item["key"]] = node
 
     db.flush()
-    logger.info("Structured document tree nodes seeded successfully.")
 
 
 def bootstrap_metadata(db):
     """
-    Seeds detailed institutional metadata including academic/support departments,
-    baseline standardized DICT catalog items, and the master planning narrative.
+    Seeds the complete singular relational graph across Parts I, II, III, IV, and Annexes.
+    Guarantees strict four-way financial parity and dynamic provenance without SUC hardcoding.
+    Includes DICT logo and Bagong Pilipinas seal configuration hooks.
     """
-    logger.info("Seeding physical SUC campuses...")
+    baseline_period = getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
+    agency_name = getattr(settings, "DEFAULT_AGENCY_NAME", "Department of Information and Communications Technology")
+    agency_website = getattr(settings, "DEFAULT_AGENCY_WEBSITE", "https://dict.gov.ph")
+    head_title = getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Secretary")
+
+    allowed_domains = getattr(settings, "ALLOWED_EMAIL_DOMAINS", ["*"])
+    seed_domain = "agency.gov.ph"
+    for d in allowed_domains:
+        if d and d != "*":
+            seed_domain = d.strip().lower()
+            break
+
+    logger.info(f"Purging any legacy university campus artifacts...")
+    legacy_campuses = db.query(Campus).filter(
+        or_(
+            Campus.name.ilike('%nabua%'),
+            Campus.name.ilike('%buhi%'),
+            Campus.code.ilike('%cspc%')
+        )
+    ).all()
+    for lc in legacy_campuses:
+        db.delete(lc)
+    db.flush()
+
+    logger.info(f"Seeding organizational operational facilities for {agency_name}...")
     campuses_to_seed = [
-        {"name": "Nabua Main Campus", "location": "Nabua, Camarines Sur", "code": "MAIN"},
-        {"name": "Buhi Satellite Campus", "location": "Buhi, Camarines Sur", "code": "BUHI"}
+        {"name": "Central Office / National Headquarters", "location": "National Capital Region (NCR), Philippines", "code": "CO-NCR"},
+        {"name": "Regional Operations Center / Field Office", "location": "Regional Administrative Center, Philippines", "code": "RO-FIELD"}
     ]
     campus_instances = {}
     for camp_data in campuses_to_seed:
@@ -543,868 +703,1429 @@ def bootstrap_metadata(db):
             campus = Campus(**camp_data)
             db.add(campus)
             db.flush()
-            logger.info(f"Campus registered: '{camp_data['name']}'")
         campus_instances[camp_data["code"]] = campus
 
-    logger.info("Seeding CSPC academic and support departments...")
-    departments_to_seed = [
-        "College of Engineering",
-        "College of Computer Studies",
-        "College of Health Sciences",
-        "College of Business Administration",
-        "College of Education, Arts and Sciences",
-        "College of Tourism, Hospitality, and Business Management",
-        "College of Technological and Developmental Education",
-        "Human Resources Management",
-        "Graduate School",
-        "Records Office",
-        "Supply Office",
-        "Accounting System",
-        "MICT Office",
-        "Budget Office",
-        "Procurement Office",
-        "Library Services",
-        "Physical Plant and Facilities"
-    ]
+    for c in db.query(Campus).all():
+        campus_instances[c.code] = c
 
+    logger.info("Seeding institutional administrative and operational divisions...")
+    departments_to_seed = [
+        "Information and Communications Technology Division (ICTD)",
+        "Administrative and Financial Management Service",
+        "Planning, Policy, and Monitoring Division",
+        "Public Frontline Services and Operations Division",
+        "Human Resource Development Division",
+        "Accounting and Financial Management Office",
+        "Procurement and Property Management Office",
+        "Legal and Regulatory Affairs Service",
+        "Internal Audit and Compliance Division"
+    ]
     dept_instances = {}
-    main_campus = campus_instances["MAIN"]
+    main_campus = campus_instances["CO-NCR"]
     for name in departments_to_seed:
         dept = db.query(Department).filter(Department.name == name).first()
         if not dept:
             dept = Department(name=name, campus_id=main_campus.id)
             db.add(dept)
             db.flush()
-            logger.info(f"Department created: '{name}'")
         dept_instances[name] = dept
 
-    # ==========================================================
-    # ANNEX A-4 STRUCTURAL SEEDS
-    # ==========================================================
-    logger.info("Seeding Annex A-4 Graduate and Undergraduate Degree offerings...")
-    academic_programs = [
-        # Graduate
-        {"department_name": "College of Health Sciences", "degree_name": "Master of Arts in Nursing (MAN)", "level": "Graduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Engineering", "degree_name": "Master of Engineering (ME)", "level": "Graduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Business Administration", "degree_name": "Master in Business Management (MBM)", "level": "Graduate", "accreditation_status": "Level II Re-Accredited"},
-        {"department_name": "College of Tourism, Hospitality, and Business Management", "degree_name": "Master in Hospitality Management", "level": "Graduate", "accreditation_status": "Candidate Status"},
-        {"department_name": "College of Computer Studies", "degree_name": "Master in Information Technology (MIT)", "level": "Graduate", "accreditation_status": "Candidate Status"},
-        {"department_name": "College of Business Administration", "degree_name": "Doctor of Philosophy in Business Management", "level": "Graduate", "accreditation_status": "Candidate Status"},
-        
-        # Undergraduate - Engineering
-        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Civil Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Electrical Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Mechanical Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Electronics Engineering", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"},
-        {"department_name": "College of Engineering", "degree_name": "Bachelor of Science in Architecture", "level": "Undergraduate", "accreditation_status": "Candidate Status"},
-        
-        # Undergraduate - Computer Studies
-        {"department_name": "College of Computer Studies", "degree_name": "Bachelor of Science in Information Technology", "level": "Undergraduate", "accreditation_status": "Level IV Re-Accredited"},
-        {"department_name": "College of Computer Studies", "degree_name": "Bachelor of Science in Computer Science", "level": "Undergraduate", "accreditation_status": "Level II Re-Accredited"},
-        {"department_name": "College of Computer Studies", "degree_name": "Bachelor of Science in Information Systems", "level": "Undergraduate", "accreditation_status": "Candidate Status"},
-        
-        # Undergraduate - Other Colleges
-        {"department_name": "College of Health Sciences", "degree_name": "Bachelor of Science in Nursing", "level": "Undergraduate", "accreditation_status": "Level IV Re-Accredited"},
-        {"department_name": "College of Tourism, Hospitality, and Business Management", "degree_name": "Bachelor of Science in Tourism Management", "level": "Undergraduate", "accreditation_status": "Level II Re-Accredited"},
-        {"department_name": "College of Business Administration", "degree_name": "Bachelor of Science in Office Administration", "level": "Undergraduate", "accreditation_status": "Level III Re-Accredited"}
-    ]
-    for prog in academic_programs:
-        existing = db.query(DegreeOffering).filter(DegreeOffering.degree_name == prog["degree_name"]).first()
-        if not existing:
-            db.add(DegreeOffering(**prog))
-            logger.info(f"Annex A-4: Degree Offer seeded: '{prog['degree_name']}'")
+    ict_dept = dept_instances["Information and Communications Technology Division (ICTD)"]
+    operations_dept = dept_instances["Public Frontline Services and Operations Division"]
+    admin_dept = dept_instances["Administrative and Financial Management Service"]
+    hr_dept = dept_instances["Human Resource Development Division"]
 
-    logger.info("Seeding GAA Institutional target Performance indicators...")
-    gaa_metrics = [
-        {"indicator_name": "Percentage of first-time licensure exam passers that pass the licensure exams", "target_value": "50%"},
-        {"indicator_name": "Percentage of graduates (2 years prior) that are employed", "target_value": "67%"},
-        {"indicator_name": "Percentage of undergraduate student population enrolled in CHED-identified priority courses", "target_value": "70%"},
-        {"indicator_name": "Percentage of undergraduate programs with COPC or accreditation status", "target_value": "100%"},
-        {"indicator_name": "Percentage of graduate school faculty engaged in research work", "target_value": "53%"},
-        {"indicator_name": "Number of research outputs completed within the year", "target_value": "32"},
-        {"indicator_name": "Number of active partnerships with LGUs, industries, NGOs, NGAs, and SMEs", "target_value": "46"}
-    ]
-    for metric in gaa_metrics:
-        existing = db.query(GaaPerformance).filter(GaaPerformance.indicator_name == metric["indicator_name"]).first()
-        if not existing:
-            db.add(GaaPerformance(**metric))
-            logger.info(f"GAA Target metric seeded: '{metric['indicator_name']}'")
-
-    logger.info("Seeding baseline Catalog Items with standard DICT Categories...")
-    
-    # Establish a default canvas expiration window (e.g. 365 days in the future)
-    default_expiry = datetime.utcnow() + timedelta(days=365)
-    
+    # -------------------------------------------------------------
+    # 0. REFERENCE CATALOG ITEMS (Pre-Approved Procurement)
+    # -------------------------------------------------------------
+    logger.info("Seeding standard reference pricing catalog...")
     catalog_items = [
         {
             "item_key": "pc_standard",
-            "display_name": "Standard Office PC (Clerical)",
-            "standard_unit_cost": Decimal("50000.00"),
+            "display_name": "Standard Administrative Desktop Workstation",
+            "standard_unit_cost": Decimal("35000.00"),
             "category": "computing_devices",
-            "allowed_offices": ["College of Engineering", "College of Computer Studies", "College of Education, Arts and Sciences", "College of Health Sciences", "College of Tourism, Hospitality, and Business Management", "Human Resources Management"],
-            "canvas_evidence_url": "/static/uploads/catalog/standard_pc_canvas.pdf",
-            "supplier_name": "CSPC Central IT Distributor"
+            "is_active": True,
+            "allowed_offices": ["Information and Communications Technology Division (ICTD)", "Public Frontline Services and Operations Division", "Accounting and Financial Management Office"]
         },
         {
-            "item_key": "laptop_faculty",
-            "display_name": "Faculty Workstation Laptop",
-            "standard_unit_cost": Decimal("50000.00"),
+            "item_key": "laptop_enterprise",
+            "display_name": "High-Performance Mobile Workstation Laptop",
+            "standard_unit_cost": Decimal("70000.00"),
             "category": "computing_devices",
-            "allowed_offices": ["College of Engineering", "College of Computer Studies", "College of Education, Arts and Sciences"],
-            "canvas_evidence_url": "/static/uploads/catalog/laptop_canvas.pdf",
-            "supplier_name": "CSPC Laptop Supplier"
+            "is_active": True,
+            "allowed_offices": ["Information and Communications Technology Division (ICTD)", "Planning, Policy, and Monitoring Division", "Public Frontline Services and Operations Division"]
         },
         {
-            "item_key": "switch_24",
-            "display_name": "24-Port Managed Switch",
-            "standard_unit_cost": Decimal("15000.00"),
+            "item_key": "switch_core",
+            "display_name": "24-Port Managed Core Gigabit PoE+ Switch",
+            "standard_unit_cost": Decimal("75000.00"),
             "category": "networking",
-            "allowed_offices": ["College of Engineering", "College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/switch_24_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
+            "is_active": True,
+            "allowed_offices": ["Information and Communications Technology Division (ICTD)"]
         },
         {
-            "item_key": "ap_wifi6",
-            "display_name": "Enterprise Wi-Fi 6 Access Point",
-            "standard_unit_cost": Decimal("10000.00"),
-            "category": "networking",
-            "allowed_offices": ["College of Engineering", "College of Computer Studies", "College of Education, Arts and Sciences"],
-            "canvas_evidence_url": "/static/uploads/catalog/ap_wifi6_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
-        },
-        {
-            "item_key": "heavy_duty_printer",
-            "display_name": "Heavy Duty Network Workgroup Printer",
-            "standard_unit_cost": Decimal("25000.00"),
+            "item_key": "printer_laser",
+            "display_name": "Heavy-Duty Multifunction Network Laser Printer",
+            "standard_unit_cost": Decimal("45000.00"),
             "category": "printers_imaging",
-            "allowed_offices": ["College of Engineering", "College of Computer Studies", "College of Education, Arts and Sciences", "College of Tourism, Hospitality, and Business Management", "Human Resources Management"],
-            "canvas_evidence_url": "/static/uploads/catalog/printer_heavy_canvas.pdf",
-            "supplier_name": "CSPC Copier-Printer Hub"
+            "is_active": True,
+            "allowed_offices": ["Public Frontline Services and Operations Division", "Procurement and Property Management Office", "Accounting and Financial Management Office"]
         },
         {
-            "item_key": "projector_standard",
-            "display_name": "Standard Classroom Projector",
-            "standard_unit_cost": Decimal("30000.00"),
-            "category": "computing_devices",
-            "allowed_offices": ["College of Engineering", "College of Computer Studies", "College of Education, Arts and Sciences"],
-            "canvas_evidence_url": "/static/uploads/catalog/projector_canvas.pdf",
-            "supplier_name": "CSPC Multimedia Partner"
-        },
-        {
-            "item_key": "scanner_standard",
-            "display_name": "Standard Office Scanner",
-            "standard_unit_cost": Decimal("25000.00"),
-            "category": "printers_imaging",
-            "allowed_offices": ["College of Engineering", "College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/scanner_canvas.pdf",
-            "supplier_name": "CSPC Copier-Printer Hub"
-        },
-        {
-            "item_key": "bay_rack",
-            "display_name": "Server Bay Rack Unit",
-            "standard_unit_cost": Decimal("20000.00"),
-            "category": "networking",
-            "allowed_offices": ["College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/rack_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
-        },
-        {
-            "item_key": "router_cisco",
-            "display_name": "CISCO Core Edge Router",
-            "standard_unit_cost": Decimal("50000.00"),
-            "category": "networking",
-            "allowed_offices": ["College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/router_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
-        },
-        {
-            "item_key": "patch_panel",
-            "display_name": "24-Port Cat6 Patch Panel",
-            "standard_unit_cost": Decimal("3500.00"),
-            "category": "networking",
-            "allowed_offices": ["College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/panel_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
-        },
-        {
-            "item_key": "router_internet",
-            "display_name": "Enterprise Internet Router",
-            "standard_unit_cost": Decimal("7000.00"),
-            "category": "networking",
-            "allowed_offices": ["College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/internet_router_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
-        },
-        {
-            "item_key": "connectors_utp",
-            "display_name": "RJ45 UTP Connectors Pack",
-            "standard_unit_cost": Decimal("15.00"),
-            "category": "networking",
-            "allowed_offices": ["College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/rj45_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
-        },
-        {
-            "item_key": "led_tv_classroom",
-            "display_name": "Classroom Smart LED TV",
-            "standard_unit_cost": Decimal("40000.00"),
-            "category": "computing_devices",
-            "allowed_offices": ["College of Education, Arts and Sciences"],
-            "canvas_evidence_url": "/static/uploads/catalog/led_tv_canvas.pdf",
-            "supplier_name": "CSPC Multimedia Partner"
-        },
-        {
-            "item_key": "cable_utp_set",
-            "display_name": "UTP Cat6 Cabling Box (305m)",
-            "standard_unit_cost": Decimal("6000.00"),
-            "category": "networking",
-            "allowed_offices": ["College of Computer Studies"],
-            "canvas_evidence_url": "/static/uploads/catalog/utp_box_canvas.pdf",
-            "supplier_name": "CSPC Cisco Network Partner"
+            "item_key": "office_suite_cloud",
+            "display_name": "Office Productivity Suite Cloud Subscription",
+            "standard_unit_cost": Decimal("8500.00"),
+            "category": "software",
+            "is_active": True,
+            "allowed_offices": []
         }
     ]
-    
-    for item in catalog_items:
-        db_item = db.query(CatalogItem).filter(CatalogItem.item_key == item["item_key"]).first()
-        if not db_item:
-            db_item = CatalogItem(
-                item_key=item["item_key"],
-                display_name=item["display_name"],
-                standard_unit_cost=item["standard_unit_cost"],
-                category=item["category"],
-                is_active=True,
-                allowed_offices=item["allowed_offices"],
-                canvas_evidence_url=item["canvas_evidence_url"],
-                supplier_name=item["supplier_name"],
-                canvas_expiration_date=default_expiry  # Add expiration date
-            )
-            db.add(db_item)
-            logger.info(f"Catalog Item seeded: '{item['display_name']}'")
+    for ci in catalog_items:
+        if not db.query(CatalogItem).filter(CatalogItem.item_key == ci["item_key"]).first():
+            db.add(CatalogItem(**ci))
+    db.flush()
 
-    # ==========================================================
-    # ANNEX A-3 STRUCTURAL SEEDS
-    # ==========================================================
-    logger.info("Seeding Annex A-3 Complete Core Offices functions registry...")
-    core_offices_registry = [
-        {"id": 1, "office_name": "Board of Trustees", "description": "The governing body of the College vested with general powers of administration and exercise of corporate powers.", "division": "Administration"},
-        {"id": 2, "office_name": "Office of the President", "description": "Responsible for executive supervision, executing SUC policies, and overseeing institutional academic operations.", "division": "Administration"},
-        {"id": 3, "office_name": "Office of the Vice President for Academic Affairs", "description": "Directs academic portfolios, curricula reviews, faculty development, and program accreditation standards.", "division": "Academic"},
-        {"id": 4, "office_name": "Office of the Vice President for Administration and Finance", "description": "Manages finance, budgeting, human resources, facilities maintenance, and physical plant operations.", "division": "Administration"},
-        {"id": 5, "office_name": "Office of the Vice President for Research, Extension and Linkages", "description": "Oversees university research publications, community extension projects, and dynamic inter-agency partnerships.", "division": "Research"},
-        {"id": 6, "office_name": "MICT Office", "description": "Manages networks, baseline price catalogs, student databases, and university systems compliance.", "division": "Technical Operations"},
-        {"id": 7, "office_name": "Budget Office", "description": "Manages annual SUC funding allocations, monitors ceiling limits, and executes financial reporting.", "division": "Finance"},
-        {"id": 8, "office_name": "Procurement Office", "description": "Coordinates purchasing pipelines, standard bidding processes, and supplier canvas verification.", "division": "Administration"},
-        {"id": 9, "office_name": "Supply and Property Unit", "description": "Maintains physical inventories, receives equipment, and executes IIRUP reports.", "division": "Administration"},
-        {"id": 10, "office_name": "Accounting Unit", "description": "Orchestrates balance ledgers, processes payment vouchers, and executes COA financial reconciliations.", "division": "Finance"},
-        {"id": 11, "office_name": "Cashier Unit", "description": "Manages cash disbursements, processes collections, and secures SUC cash deposits.", "division": "Finance"},
-        {"id": 12, "office_name": "Human Resource Management Office", "description": "Manages employment records, handles biometrics data integration, and coordinates payroll.", "division": "Administration"},
-        {"id": 13, "office_name": "Registrar's Office", "description": "Manages student enrollment files, grades logging, transcripts, and official registrations.", "division": "Academic"},
-        {"id": 14, "office_name": "Medical and Dental Clinic", "description": "Provides clinical services and dental checkups to students, faculty, and administrative staff.", "division": "Support"},
-        {"id": 15, "office_name": "Library Services", "description": "Manages book catalogs, book circulations, and OPAC digital reference assets.", "division": "Academic Support"},
-        {"id": 16, "office_name": "Physical Plant and Facilities", "description": "Manages physical construction, network cabling routes, electrical setups, and grounds maintenance.", "division": "Support"}
-    ]
-
-    baseline_period = "2026-2028"
-    logger.info(f"Seeding full DICT-compliant Master Narrative for cycle '{baseline_period}'...")
+    # -------------------------------------------------------------
+    # 1. MASTER NARRATIVE & SIGNATORIES (Part I.A & I.B & Annex 2)
+    # -------------------------------------------------------------
+    logger.info("Seeding Master Narrative coversheet with DICT co-branding...")
     narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == baseline_period).first()
     
-    # Complete, authentic strategic concerns from 2024-2026 Guide (Adapted to 2026-2028)
-    strategic_concerns_data = [
-        {
-            "mfo": "Enrollment Services", 
-            "critical_system": "Student Information and Accounting System (SIAS)", 
-            "problems": "Delayed student enrollment processing and grading sync latency during semesters. Customization reports are limited, causing bottlenecks.", 
-            "intended_use": "SIAS Cloud deployment, online enrollment module, online payment gateway, grading system, class attendance, text blasting, faculty evaluation, and LMS integration."
-        },
-        {
-            "mfo": "Library Management", 
-            "critical_system": "Online Library Information System", 
-            "problems": "Difficulty in providing online real-time information about books available in the library to the users; system does not support online transactions; librarian faces difficulties searching for unreturned books and fine calculations.", 
-            "intended_use": "Online Library Management Information System, OPAC, classic catalog, e-books/e-journals databases, user log-in/log-out system, library inventory system, and billing system."
-        },
-        {
-            "mfo": "Monitoring & Security", 
-            "critical_system": "Security Management System", 
-            "problems": "Difficulty in providing evidence of security breaches; difficulty in monitoring school premises; manual logging of personnel and visitors causing queues at entrances and parking spaces.", 
-            "intended_use": "School Monitoring and Security System using CCTV cameras, RFIDs, smart card reader gates, automated vehicle logging, and central security database."
-        },
-        {
-            "mfo": "Human Resources", 
-            "critical_system": "HRMS / Payroll System", 
-            "problems": "Biometrics mismatch requiring manual DTR corrections; unable to generate attendance reports on time; slow records archival/retrieval.", 
-            "intended_use": "Integrated Human Resource and Payroll System, central biometrics verification, online employee records access, and digital payslip distribution."
-        },
-        {
-            "mfo": "Supply Management", 
-            "critical_system": "Supplies Management System", 
-            "problems": "Archival and retrieval of records are slow, stock room is small, and lost items are not reported. Dilapidated property stickers cause tracking errors.", 
-            "intended_use": "Supplies Management System, database tracking of inventory requisitions, supplies monitoring, and barcode scanning systems."
-        },
-        {
-            "mfo": "Budget Management", 
-            "critical_system": "Budget Management Information System", 
-            "problems": "Difficulty segregating expenditures by responsibility centers (departments/colleges); difficulty monitoring actual disbursements versus obligations; difficulty tracking excess cash advances.", 
-            "intended_use": "Budget Management Information System, online facility for monitoring expenditures and budget utilization, and obligation requests tracker."
-        },
-        {
-            "mfo": "Extension Services", 
-            "critical_system": "CSPC Extension Automated Services", 
-            "problems": "Difficulty in tracking and monitoring previous trainees; storing and retrieving participant registries; slow process of generating reports on accomplishments.", 
-            "intended_use": "CSPC Extension Automated Services, online enrolment for external clients, extension program advisory, and database trackers."
-        },
-        {
-            "mfo": "Research Services", 
-            "critical_system": "E-Research", 
-            "problems": "Difficulty tracking research abstract details and monitoring project milestone defenses.", 
-            "intended_use": "E-Research, online database of researchers, abstracts, schedules, and digital archiving."
-        }
+    ea_default_text = (
+        f"The proposed Enterprise Architecture of {agency_name} rationalizes disparate legacy platforms and siloed databases "
+        "into microservices containerized on GovCloud, utilizing PeGIF-compliant API gateways to establish automated "
+        "interoperability with national oversight agencies, citizen service portals, and online payment gateways."
+    )
+    drbcp_affected_assets_default = [
+        {"asset_group": "Primary Data Center (Central Office)", "details": "10 Physical Enterprise Servers, 2 SAN Storage Units, Core Gigabit Distribution Switches."},
+        {"asset_group": "Connectivity", "details": "200Mbps Dedicated Leased Line Fiber; Redundant GovNet Optical Fiber Link."},
+        {"asset_group": "Data Assets", "details": "National Citizen Service Databases, Transactional Registries, 5TB of digitized institutional archives."},
+        {"asset_group": "Power Utilities", "details": "100kVA Automatic Standby Generator Set; 3 x 10kVA Online Double-Conversion Rackmount UPS Units."}
     ]
-
-    pmf_matrix_data = [
-        {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Intermediate outcome", "indicator": "Percentage of students who accesses LMS learning resources", "baseline": "10% of students", "target": "100% of students", "collection_method": "Mandatory reporting/feedbacking", "responsibility": "MICT Office"},
-        {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of students that utilizes learning technologies", "baseline": "5% of students", "target": "100% of the students", "collection_method": "Mandatory reporting/feedbacking", "responsibility": "MICT Office"},
-        {"project_title": "Deployment of Moodle LMS", "result_hierarchy": "Outputs", "indicator": "Percentage of courses adopting the LMS", "baseline": "10%", "target": "100% adoption", "collection_method": "Mandatory reporting/feedbacking", "responsibility": "MICT Office, Deans Offices"},
-        
-        {"project_title": "Upgrade Leased Line Bandwidth", "result_hierarchy": "Intermediate outcome", "indicator": "Percentage of clients transacting online with the College", "baseline": "70% of clients", "target": "30% increase", "collection_method": "Mandatory reporting", "responsibility": "MICT Office, President Office, IPO Office"},
-        {"project_title": "Upgrade Leased Line Bandwidth", "result_hierarchy": "Immediate outcome", "indicator": "Percentage of offices that needs online submission and receipt of reports", "baseline": "60% of offices", "target": "100% of offices", "collection_method": "Mandatory reporting", "responsibility": "VPA Office, IPO office"},
-        {"project_title": "Upgrade Leased Line Bandwidth", "result_hierarchy": "Outputs", "indicator": "Percentage of online transactions completed successfully", "baseline": "60%", "target": "100% successful transactions", "collection_method": "Mandatory reporting", "responsibility": "MICT Office, IPO Office"},
-
-        {"project_title": "WiFi Campus Network Installation", "result_hierarchy": "Intermediate outcome", "indicator": "Percentage of learners that avail WiFi Connection for learning purposes", "baseline": "30%", "target": "100% of learners", "collection_method": "Mandatory reporting", "responsibility": "Deans Office, MICT Office"},
-        {"project_title": "WiFi Campus Network Installation", "result_hierarchy": "Immediate outcome", "indicator": "No. of hour allotted for WIFI access", "baseline": "1 hour", "target": "8 hours", "collection_method": "Mandatory reporting", "responsibility": "MICT Office"},
-        {"project_title": "WiFi Campus Network Installation", "result_hierarchy": "Outputs", "indicator": "Percentage of using WIFI for in-campus teaching-learning process", "baseline": "30%", "target": "100% of learners", "collection_method": "Mandatory reporting", "responsibility": "MICT Office"}
-    ]
-
-    systems_data = [
-        {"name": "Student Information and Accounting System (SIAS)", "description": "Handles online student registration, grading, online admission, online payment, class attendance, and accounting ledger management.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Students, Faculty, Registrar, Registrars' Staff, Accountant, Accounting Staff, Clerks", "users_external": "CHED, DBM, Parents, Stakeholders", "owners": "MICT Office"},
-        {"name": "Online Library Information Systems", "description": "System to manage books library collections, records tracking, online OPAC search access, classic catalog, e-books/e-journals databases, and user log-in/log-out system.", "status": "For Enhancement", "dev_strategy": "In-house Development", "computing_scheme": "Web Server", "users_internal": "Librarian, Library Staff", "users_external": "Students, Faculty, Outside Researches", "owners": "CSPC Library"},
-        {"name": "School Monitoring and Security System", "description": "System using CCTV cameras, RFIDs, and smart cards to secure facilities, monitor vehicles, and manage automated barricades.", "status": "For Development", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "Guards, MIS Staff, College President, VPs and other Administrators", "users_external": "None", "owners": "Office of the Vice President for Administration"},
-        {"name": "Human Resource Management System", "description": "Directly links biometric attendance data, automatically calculates time cards, and interfaces with the payroll system.", "status": "For Enhancement", "dev_strategy": "Outsourced / Service Provider", "computing_scheme": "Cloud Computing", "users_internal": "PERSONNEL, FACULTY, HRMO, HRMO STAFF, ACCOUNTANT, ACCOUNTING STAFF", "users_external": "CHED", "owners": "Human Resource Management System"},
-        {"name": "Document Management System", "description": "Manages working and archived documents, features advanced record retention and disposition policies, and provides security roles.", "status": "For Enhancement", "dev_strategy": "In-house", "computing_scheme": "Cloud Computing", "users_internal": "DOCUMENT CONTROLLER, CLERK, OFFICE HEADS, ADMINISTRATOR", "users_external": "STAKEHOLDERS, CHED", "owners": "Records Office"},
-        {"name": "Supply Management System", "description": "Tracks supplies requisition, facilitates inventory monitoring, procurement tracking, and supplies release.", "status": "On-Going Development", "dev_strategy": "In-house", "computing_scheme": "Cloud Computing", "users_internal": "SUPPLY OFFICER, PROCUREMENT OFFICER, SUPPLIES PERSONNEL, FACULTY", "users_external": "STAKEHOLDERS", "owners": "Supply Office"},
-        {"name": "CSPC Extension Automated Services", "description": "Provides online enrolment for external clients and data bank for accomplishments of extension coordinators/faculty.", "status": "For Development", "dev_strategy": "In-house", "computing_scheme": "Cloud Computing", "users_internal": "EXTENSION COORDINATOR, EXTENSION OFFICE STAFF, FACULTY, STUDENTS, ADMINISTRATOR", "users_external": "CHED, DBM, STAKEHOLDERS, RESEARCHERS", "owners": "VPREP Office"},
-        {"name": "E-Research", "description": "Provides online databank of researchers undertaken, abstracts, and monitors phases of particular research study.", "status": "For Development", "dev_strategy": "In-house", "computing_scheme": "Cloud Computing", "users_internal": "RESEARCH DIRECTOR, RESEARCH OFFICE STAFF, STUDENTS, FACULTY", "users_external": "CHED, RESEARCHERS, STAKEHOLDERS", "owners": "VPREP Office"},
-        {"name": "Financial Management System", "description": "Automates general ledgers, voucher creation, and standard financial reporting.", "status": "On-Going Development", "dev_strategy": "Outsourced", "computing_scheme": "Web Server/Host", "users_internal": "RESEARCH DIRECTOR, RESEARCH OFFICE STAFF, STUDENTS, FACULTY", "users_external": "CHED, RESEARCHERS, STAKEHOLDERS", "owners": "Accounting System"}
-    ]
-
-    databases_data = [
-        {"name": "Student Information and Accounting System (SIAS) Database", "description": "Stores student profile, subjects, accounts, and other pertinent data needed in processing and generating reports.", "status": "For Migration", "is_served": "Online Student Enrollment and Accounting System", "storage_media": "High-End Data Storage Server", "owners": "Office of the Vice President for Academic Affairs"},
-        {"name": "Online Library Information Systems Database", "description": "Stores books available, journals, e-books, users, researchers, and other data needed in processing library reports.", "status": "For Migration", "is_served": "Online Library Management Information Systems", "storage_media": "High-End Data Storage Server", "owners": "College Library"},
-        {"name": "School Monitoring and Security Database", "description": "Stores employees' profile, schedule, visitors' profile, and other data, including data for vehicles entering the college.", "status": "For Development", "is_served": "School Monitoring and Security Management System", "storage_media": "High-End Data Storage Server", "owners": "Vice President for Administration"},
-        {"name": "Human Resource Management Database", "description": "Stores employees' profile, salary, loans, tax, and other pertinent data needed in processing of data and generating reports.", "status": "For Development", "is_served": "Human Resource and Payroll System", "storage_media": "High-End Data Storage Server", "owners": "Human Resource Management Office"},
-        {"name": "Supply Management Database", "description": "Directory of supplies, end-user, suppliers, and contains data for the procurement, expenditure, and transaction processing.", "status": "For Development", "is_served": "Supplies Management System", "storage_media": "High-End Data Storage Server", "owners": "Supply Office"},
-        {"name": "Document Management System Database", "description": "Directory of documents that enters into the Records office. It includes documents fields, indexes, and relationship. It contains control number, present status.", "status": "For Development", "is_served": "Documents Management and Payroll Systems", "storage_media": "High-End Data Storage Server", "owners": "Records Office"},
-        {"name": "CSPC Extension Automated Services Database", "description": "Includes directory of faculty, client activities, updates, and implemented programs. It also includes data needed in the system's process.", "status": "For Development", "is_served": "CSPC Extension Automated Services", "storage_media": "High-End Data Storage Server", "owners": "Office of the VP in Research and Extension Program"},
-        {"name": "E-Research Database", "description": "Includes data of faculty-researchers, researches conducted, abstract, schedules, time frame, and status.", "status": "For Development", "is_served": "E-Research", "storage_media": "High-End Data Storage Server", "owners": "Office of the VP in Research and Extension Program"}
-    ]
-
-    internal_projects_data = [
-        {"name": "Deployment of Moodle-Based Learning Management System", "objectives": "To allow online distance teaching and learning\\nTo lessen the time spent in classroom instruction\\nTo automate grading system/class record computation", "duration": "2026 - 2028", "deliverables": "Learning Online Space (LeOnS)"},
-        {"name": "Upgrade Leased Line Bandwidth", "objectives": "To provide a more efficient online transaction of the College\\nTo support the operation of the College\\nTo support online distance learning\\nTo provide an alternative line in case of infrastructure damage due to natural calamities such as typhoons, earthquake, etc.", "duration": "2026 - 2028", "deliverables": "LEASED LINE INTERNET"},
-        {"name": "WiFi Campus Network Installation", "objectives": "To ensure the availability of wireless connection in the campus\\nTo help in easy transmission of information\\nTo help students and teachers in a fast access of learning resources", "duration": "2026 - 2028", "deliverables": "WIFI CAMPUS NETWORK"},
-        {"name": "Technology for Education Installation", "objectives": "To support the learning of students through an easily accessible learning resource\\nTo aid teachers in teaching their respective subjects", "duration": "2026 - 2028", "deliverables": "TECHNOLOGY FOR EDUCATION"},
-        {"name": "Enhancement of Buhi Campus Network", "objectives": "To provide a more effective online transaction in the Campus\\nTo provide a more effective online learning for the campus instruction", "duration": "2026 - 2028", "deliverables": "BUHI CAMPUS NETWORK"},
-        {"name": "PBAX Enhancement to Digital VOIP", "objectives": "To provide a more effective internal and external communication system in the College", "duration": "2026 - 2028", "deliverables": "PBAX"},
-        {"name": "CATV Upgrade to Smart TV", "objectives": "To provide a SMART TV connected to the network in the College", "duration": "2026 - 2028", "deliverables": "SMART TV SYSTEMS"},
-        {"name": "Main Campus LAN Enhancement", "objectives": "To provide a fiber optic backbone connection in the campus\\nTo provide a layer 3 networking in the existing layer 2 campus network\\nTo provide a structured network cabling in the campus", "duration": "2026 - 2028", "deliverables": "CAMPUS NETWORK"},
-        {"name": "Computer Laboratories Enhancement", "objectives": "To provide a well-equipped laboratory for instructions and practical works", "duration": "2026 - 2028", "deliverables": "COMPUTER LABORATORIES"},
-        {"name": "Data Center Enhancement", "objectives": "To provide a well-equipped and efficient Data that houses servers, security devices, and Internet connection", "duration": "2026 - 2028", "deliverables": "DATA CENTER"},
-        {"name": "CCTV Systems Integrate to Command Center", "objectives": "To provide a command center of CCTV systems in the College", "duration": "2026 - 2028", "deliverables": "CCTV COMMAND CENTER"},
-        {"name": "Multimedia Center Enhancement", "objectives": "To provide a well-equipped and efficient use of multimedia devices during meetings, occasions, conferences, accreditations, and other events which needs multimedia equipment", "duration": "2026 - 2028", "deliverables": "Multimedia Center"}
-    ]
+    drbcp_recovery_strategy_default = (
+        "<ol>"
+        "<li><strong>Off-site Backup Management:</strong> Daily encrypted database snapshots are transferred to a secure secondary facility located >30km away.</li>"
+        "<li><strong>Cloud Failover (GovCloud):</strong> Mission-critical public service, registry, and e-payment microservices are replicated in real time to DICT GovCloud.</li>"
+        "<li><strong>Redundancy:</strong> Dual-ISP providers configured in active-passive load distribution preventing single points of failure.</li>"
+        "<li><strong>Data Synchronization:</strong> Asynchronous database replication ensures an RPO limit of 1 hour during operational disruptions.</li>"
+        "</ol>"
+    )
+    drbcp_sop_phases_default = (
+        "<p><strong>Phase I: Detection and Declaration:</strong> Automated monitoring alerts evaluate disaster scale; Incident Commander activates DRBCP within 1 hour if localized RTO cannot be maintained.</p>"
+        "<p><strong>Phase II: Activation and Execution:</strong> DRT redirected to GovCloud DR standby instance; DNS records updated; clean database backups verified and mounted.</p>"
+        "<p><strong>Phase III: Failback (Normal Operations):</strong> Primary data center infrastructure restored; synchronize transactional state delta from DR site during off-peak maintenance window.</p>"
+    )
+    drbcp_compliance_narrative_default = (
+        "<ul style=\"font-size: 8.5pt; line-height: 1.6; margin-bottom: 10px;\">"
+        "<li><strong>Cybersecurity Integration:</strong> The DRBCP incorporates cyber-recovery procedures to isolate corrupted environments and restore clean backups following ransomware or data-tampering events.</li>"
+        "<li><strong>Testing and Maintenance:</strong> Mandates at least one (1) comprehensive full-scale DR simulation exercise per year and semi-annual tabletop walkthroughs.</li>"
+        "<li><strong>Audit and Review:</strong> The DRBCP is formally reviewed annually or whenever a major infrastructure migration occurs.</li>"
+        "<li><strong>UACS and Budgeting:</strong> Funding for off-site storage, GovCloud mirror subscriptions, and standby infrastructure is categorized under Continuing Costs in Part IV of the ISSP.</li>"
+        "</ul>"
+    )
 
     if not narrative:
         narrative = MasterNarrative(
             issp_period=baseline_period,
-            agency_name="Camarines Sur Polytechnic Colleges",
+            agency_name=agency_name,
             issp_period_from=2026,
             issp_period_to=2028,
+            agency_website_url=agency_website,
+            agency_logo_url=None,
+            dict_logo_url=None,
+            bagong_pilipinas_logo_url=None,
+            cert_logo_url=None,
             is_active=True,
-            signatory_prepared_by="DR. IAN P. BENITEZ",
-            preparer_position="Director, MICT",
-            preparer_tel="09190840018",
-            preparer_fax="(054) 288-4425",
-            preparer_email="ianbenitez@cspc.edu.ph",
-            signatory_approved_by="CHARLITO P. CADAG, PhD",
-            transmittal_recipient="ATTY. IVAN JOHN E. UY",
-            transmittal_recipient_title="Secretary",
-            transmittal_recipient_agency="Department of Information and Communications Technology",
-            transmittal_recipient_address="DICT Bldg., C.P. Garcia Avenue, Diliman, Quezon City",
-            transmittal_date="22 February 2023",
+            is_amendment=False,
+            amendment_number=None,
             scope_choice=ScopeChoice.DEPARTMENT_WIDE,
-            scope_json={"department_wide": True},
-            
-            mandate_html="""<p>The College mandate is defined under Section 2 of Batas Pambansa Bilang 512, the law which created the Camarines Sur Polytechnic Colleges (CSPC). BP 512 provides: \"The Camarines Sur Polytechnic Colleges shall primarily provide higher technological, professional and vocational instruction and training in fisheries, trade and technology, arts and sciences, and as well as promote research, history, extension services, and progressive leadership in these fields.\"</p>""",
-            vision_html="Polytechnic education at its best for the Bicolanos",
-            mission_html="Transforming lives to be free of poverty by creating a better future through world class polytechnic education and technological innovation.",
-            
-            present_situation_html="""<p><strong>Online Student Information and Accounting System (SIAS):</strong> High load bottlenecks during registration. The system handles enrollment, grades, and accounting, but requires cloud deployment and optimization to reduce grading latency. <strong>Human Resource Information System (HRIS):</strong> Requires dynamic biometric integration. The college website is functional, but lacks advanced search structures. Computer-to-employee ratio is 1:1, with a 99% computer literacy rate.</p>""",
-            
-            planners_json=[
-                {"name": "DR. IAN P. BENITEZ", "position": "Associate Professor V / Director, MICTC", "email": "ianbenitez@cspc.edu.ph", "contact_number": "09190840018"},
-                {"name": "VINCENT B. CORTEZ", "position": "Instructor / Head, MIS", "email": "vincentcortez@cspc.edu.ph", "contact_number": "09304821749"}
-            ],
-            manpower_json={
-                "admin_regular": 53,
-                "admin_casual": 54,
-                "academic_regular": 217,
-                "academic_casual": 0,
-                "total_employees": 324
-            },
-            annual_ict_budget=Decimal("31907000.00"),
-            core_offices_json=core_offices_registry,
-            strategic_concerns_json=strategic_concerns_data,
-            pmf_matrix_json=pmf_matrix_data,
-            systems_json=systems_data,
-            databases_json=databases_data,
-            internal_projects_json=internal_projects_data,
+            scope_json={"with_regional_offices": True, "with_bureaus": False},
+            mandate_html=f"The mandate of {agency_name} is established under its enabling statutory charter to provide progressive leadership in administrative governance, national policy formulation, and citizen frontline service delivery.",
+            functions="Deliver efficient public services to citizens and stakeholders; execute regulatory and monitoring responsibilities; formulate national development policies; and uphold digital transformation across all institutional operations.",
+            vision_html="A digitally empowered, transparent, and resilient public institution delivering world-class public service for all citizens.",
+            mission_html="To provide accountable, citizen-centric, and accessible digital governance through strategic technological modernization and innovation.",
+            present_situation_html="Frontline service workflows and legacy registries face transaction sync latency during peak public access periods. Cloud virtualization, microservices containerization, and automated GovCloud real-time failover are prioritized for implementation.",
+            enterprise_architecture_narrative=ea_default_text,
+            drbcp_affected_assets_json=drbcp_affected_assets_default,
+            drbcp_recovery_strategy_html=drbcp_recovery_strategy_default,
+            drbcp_sop_phases_html=drbcp_sop_phases_default,
+            drbcp_compliance_narrative_html=drbcp_compliance_narrative_default,
+            subsystem_network_layouts_json=[],
+            is_archived=False,
+            final_pdf_vault_url=None,
+            signatory_prepared_by="Chief Information Officer",
+            preparer_position="Director, ICT Management Office",
+            cio_organizational_unit="ICT Management Service",
+            preparer_tel="09190000000",
+            preparer_email=f"cio@{seed_domain}",
+            focal_name="Alternate Focal Person",
+            focal_position="Chief, Planning and Governance Division",
+            focal_organizational_unit="Planning and Monitoring Service",
+            focal_email=f"focal@{seed_domain}",
+            focal_contact_no="09300000000",
+            signatory_approved_by=head_title,
+            agency_head_position=head_title,
+            drbcp_approval_date="March 15, 2026",
+            annual_ict_budget=Decimal("45000000.00"),
+            planners_json=[],
+            major_final_outputs=[],
+            strategic_concerns_json=[],
+            systems_json=[],
+            databases_json=[],
+            internal_projects_json=[],
             cross_projects_json=[],
-            
-            # Connectivity Details
-            mithi_network_profile={
-                "has_lan": True,
-                "has_intranet": True,
-                "has_vpn": True,
-                "is_connected_to_internet": True,
-                "internet_access_modes": ["Leased Line", "WiFi", "DSL"],
-                "isps": ["PLDT", "Globe"],
-                "combined_bandwidth_mbps": 100,
-                "employees_with_internet_access": 324,
-                "employees_with_official_email": 324
-            },
-            mithi_special_solutions=[
-                {"solution_name": "Geographic Information System", "is_used": True, "maintenance_cost": 25000.00}
-            ],
-            mithi_data_center={
-                "has_data_center": True,
-                "data_center_count": 2,
-                "has_backup_site": True,
-                "maintenance_strategy": "In-house with third-party escalations"
-            },
-            mithi_hardware_inventory=[
-                {
-                    "device_type": "Desktop PC",
-                    "yearly_owned": {"2026": 120, "2027": 150, "2028": 180},
-                    "yearly_leased": {"2026": 0, "2027": 0, "2028": 0},
-                    "older_than_3_years": 45
-                }
-            ],
-            implementation_schedules=[
-                {
-                    "project_id": "00000000-0000-0000-0000-000000000001",
-                    "project_name": "Deployment of Moodle LMS",
-                    "milestones": {"2026_Q1": True, "2026_Q2": True, "2026_Q3": True, "2026_Q4": True}
-                }
-            ]
+            pmf_matrix_json=[],
+            mithi_special_solutions=[],
+            mithi_hardware_inventory=[],
+            implementation_schedules=[]
         )
         db.add(narrative)
         db.flush()
-        logger.info(f"Default Master Narrative established for cycle '{baseline_period}'.")
+    else:
+        # Actively overwrite any stale legacy SUC/CSPC values
+        if "cspc" in (narrative.agency_name or "").lower() or not narrative.agency_name:
+            narrative.agency_name = agency_name
+        if "cspc" in (narrative.agency_website_url or "").lower() or not narrative.agency_website_url:
+            narrative.agency_website_url = agency_website
+        if "president" in (narrative.agency_head_position or "").lower() or "suc" in (narrative.agency_head_position or "").lower():
+            narrative.agency_head_position = head_title
+        if "cspc" in (narrative.preparer_email or "").lower():
+            narrative.preparer_email = f"cio@{seed_domain}"
+        if "cspc" in (narrative.focal_email or "").lower():
+            narrative.focal_email = f"focal@{seed_domain}"
+        if "cspc" in (narrative.signatory_approved_by or "").lower():
+            narrative.signatory_approved_by = head_title
+            
+        if not getattr(narrative, 'enterprise_architecture_narrative', None):
+            narrative.enterprise_architecture_narrative = ea_default_text
+        if not getattr(narrative, 'drbcp_affected_assets_json', None):
+            narrative.drbcp_affected_assets_json = drbcp_affected_assets_default
+        if not getattr(narrative, 'drbcp_recovery_strategy_html', None):
+            narrative.drbcp_recovery_strategy_html = drbcp_recovery_strategy_default
+        if not getattr(narrative, 'drbcp_sop_phases_html', None):
+            narrative.drbcp_sop_phases_html = drbcp_sop_phases_default
+        if hasattr(narrative, 'drbcp_compliance_narrative_html') and not getattr(narrative, 'drbcp_compliance_narrative_html', None):
+            setattr(narrative, 'drbcp_compliance_narrative_html', drbcp_compliance_narrative_default)
+        if hasattr(narrative, 'drbcp_approval_date') and not getattr(narrative, 'drbcp_approval_date', None):
+            setattr(narrative, 'drbcp_approval_date', "March 15, 2026")
+        db.flush()
 
-    # ==========================================================
-    # POPULATING COMPLEMENTARY NORMALIZED RELATIONAL DIRECTORIES
-    # ==========================================================
-    logger.info("Synchronizing normalized core office functions relational table...")
-    for office in core_offices_registry:
-        existing_office = db.query(CoreOfficeFunction).filter(
-            CoreOfficeFunction.office_name == office["office_name"],
-            CoreOfficeFunction.issp_period == baseline_period
-        ).first()
-        if not existing_office:
-            db_office = CoreOfficeFunction(
-                issp_period=baseline_period,
-                office_name=office["office_name"],
-                division=office["division"],
-                description=office["description"]
-            )
-            db.add(db_office)
-
-    logger.info("Synchronizing normalized strategic concerns relational table...")
-    for idx, concern in enumerate(strategic_concerns_data):
-        existing_concern = db.query(StrategicConcern).filter(
-            StrategicConcern.critical_system == concern["critical_system"],
-            StrategicConcern.issp_period == baseline_period
-        ).first()
-        if not existing_concern:
-            db_concern = StrategicConcern(
-                issp_period=baseline_period,
-                mfo=concern["mfo"],
-                critical_system=concern["critical_system"],
-                problems=concern["problems"],
-                intended_use=concern["intended_use"],
-                order_index=idx
-            )
-            db.add(db_concern)
-
-    logger.info("Synchronizing normalized performance metrics relational table...")
-    for pmf in pmf_matrix_data:
-        existing_pmf = db.query(PerformanceMetric).filter(
-            PerformanceMetric.project_title == pmf["project_title"],
-            PerformanceMetric.indicator == pmf["indicator"],
-            PerformanceMetric.issp_period == baseline_period
-        ).first()
-        if not existing_pmf:
-            db_pmf = PerformanceMetric(
-                issp_period=baseline_period,
-                project_title=pmf["project_title"],
-                result_hierarchy=pmf["result_hierarchy"],
-                indicator=pmf["indicator"],
-                baseline=pmf["baseline"],
-                target=pmf["target"],
-                collection_method=pmf["collection_method"],
-                responsibility=pmf["responsibility"]
-            )
-            db.add(db_pmf)
-
-    logger.info("Seeding default Glossary Terms (Pages 6-10)...")
-    glossary_terms = [
-        {"term": "Agency", "definition": "Refers to any bureau, office, commission, authority, or instrumentality of the national government, including government-owned or-controlled corporations (GOCC), authorized by law or by their respective charters to contract for or undertake information and communications technology networks, databases, infrastructure or development projects.", "order_index": 1},
-        {"term": "Application System", "definition": "Refers to a group of related activities or processes designed to support a very specific function (e.g., Payroll System, Accounting System, etc.). It is referred to as a 'computer-based information system' prepared for the organization to process tasks that are unique to the particular needs or 'tailor fit' for the particular operation.", "order_index": 2},
-        {"term": "Biometrics", "definition": "The science and technology of measuring and statistically analyzing biological data. In ICT, it refers to technologies for measuring and analyzing human body characteristics such as fingerprints, eye retinas and irises, voice patterns, facial patterns and hand measurements, especially for the authentication of someone.", "order_index": 3},
-        {"term": "Business Process", "definition": "A collection of business transactions between business partners and/or internal activities within one business. These transactions and/or activities together support the objective of the business process.", "order_index": 4},
-        {"term": "Computing Scheme", "definition": "May be classified into two, namely stand-alone or independent systems, and networked systems.", "order_index": 5},
-        {"term": "Client-Server", "definition": "The most recent approach in networking wherein the logic of the application is divided between a front-end computer (called the client) and a back-end computer (called a server). The client generally provides and uses information while the server retrieves, selects, sorts, calculates, sends only needed data and manages the database.", "order_index": 6},
-        {"term": "Database (DB)", "definition": "An organized group or set of inter-related information about a subject that can be processed, retrieved, analyzed and used in drawing conclusions and making decisions.", "order_index": 7},
-        {"term": "ISSP", "definition": "Information Systems Strategic Plan - refers to a three (3) to five (5) year computerization framework of an agency which describes how the organization intends to strategically use ICT in pursuit of its mission and functions.", "order_index": 8},
-        {"term": "MITHI", "definition": "Medium-Term Information and Communications Technology Harmonization Initiative - a government-wide program to harmonize all ICT resources and programs.", "order_index": 9}
+    # -------------------------------------------------------------
+    # 2. ORGANIZATIONAL OUTCOMES (Part I.A.4 Broader Scope)
+    # -------------------------------------------------------------
+    logger.info("Seeding Organizational Outcomes (Part I.A.4 Broader Scope)...")
+    outcomes_to_seed = [
+        {
+            "outcome_name": "Citizen Frontline Public Services Program", 
+            "type_label": "Organizational Outcome", 
+            "description": "To provide quality, prompt, accessible, and automated public service delivery to citizens and institutional stakeholders."
+        },
+        {
+            "outcome_name": "General Administration and Support (GAS)", 
+            "type_label": "Organizational Outcome", 
+            "description": "To ensure transparent, efficient, automated, and audited administrative governance and resource management."
+        },
+        {
+            "outcome_name": "Policy Formulation, Monitoring, and Research Program", 
+            "type_label": "Organizational Outcome", 
+            "description": "To formulate strategic sector policies, conduct applied regulatory studies, and monitor national governance frameworks."
+        },
+        {
+            "outcome_name": "Community and Regional Development Extension Program", 
+            "type_label": "Major Final Output", 
+            "description": "To deploy technical assistance, capacity development, and regional extension initiatives nationwide."
+        }
     ]
-    for term in glossary_terms:
-        existing = db.query(GlossaryTerm).filter(GlossaryTerm.term == term["term"]).first()
-        if not existing:
-            db.add(GlossaryTerm(**term))
+    outcome_instances = {}
+    for out_data in outcomes_to_seed:
+        outcome = db.query(OrganizationalOutcome).filter(
+            OrganizationalOutcome.outcome_name == out_data["outcome_name"],
+            OrganizationalOutcome.issp_period == baseline_period
+        ).first()
+        if not outcome:
+            outcome = OrganizationalOutcome(
+                issp_period=baseline_period,
+                program_name=out_data["outcome_name"],
+                **out_data
+            )
+            db.add(outcome)
+            db.flush()
         else:
-            existing.definition = term["definition"]
-            existing.order_index = term["order_index"]
+            if not outcome.program_name and outcome.outcome_name:
+                outcome.program_name = outcome.outcome_name
+            db.flush()
+        outcome_instances[out_data["outcome_name"]] = outcome
 
-    logger.info("Seeding General Submission Guidelines (Page 11)...")
-    guidelines = [
-        {"step_number": 1, "instruction_text": "This Template is prescribed primarily to guide government agencies to formulate and present its ISSP in brief. Government agencies may provide information that could add better clarity to the ISSP. The ISSP Template Revised contains the basic information that is required by the government and therefore does not inhibit the agency from making their ISSPs more complex for other purposes."},
-        {"step_number": 2, "instruction_text": "The agency must submit one hard copy of the initial ISSP to DICT for review and evaluation, together with a transmittal letter signed by the agency head and addressed to the Secretary, Department of Information and Communications Technology, DICT Bldg., C.P. Garcia Ave., U.P. Campus, Diliman, Quezon City."},
-        {"step_number": 3, "instruction_text": "Once the ISSP is complete and complied with requirements as per review and evaluation of DICT, then the agency must submit two (2) hard copies of the final ISSP to the DICT for endorsement and a soft copy in CD (pdf or doc file)."},
-        {"step_number": 4, "instruction_text": "Agencies are advised to use font size 12 and government sized (A4) bond paper, however, page margin may vary."}
-    ]
-    for step in guidelines:
-        existing = db.query(GeneralInstruction).filter(GeneralInstruction.step_number == step["step_number"]).first()
-        if not existing:
-            db.add(GeneralInstruction(**step))
-        else:
-            existing.instruction_text = step["instruction_text"]
+    oo_frontline = outcome_instances["Citizen Frontline Public Services Program"]
+    oo_gas = outcome_instances["General Administration and Support (GAS)"]
+    oo_policy = outcome_instances["Policy Formulation, Monitoring, and Research Program"]
+    oo_ext = outcome_instances["Community and Regional Development Extension Program"]
 
-    logger.info("Seeding physical Server capacity tracks (Gap 15)...")
-    existing_capacity = db.query(ServerCapacityTrack).filter(ServerCapacityTrack.capacity_tier == "Above 4TB").first()
-    if not existing_capacity:
-        db.add(ServerCapacityTrack(campus_id=main_campus.id, capacity_tier="Above 4TB", location="IN-HOUSE", quantity=2))
+    # Purge any legacy/orphaned outcomes from previous seed versions
+    canonical_outcome_names = {o["outcome_name"] for o in outcomes_to_seed}
+    legacy_outcomes = db.query(OrganizationalOutcome).filter(
+        OrganizationalOutcome.issp_period == baseline_period,
+        ~OrganizationalOutcome.outcome_name.in_(canonical_outcome_names)
+    ).all()
+    for lout in legacy_outcomes:
+        db.query(Proposal).filter(
+            Proposal.issp_period == baseline_period,
+            Proposal.outcome_id == lout.id
+        ).update({"outcome_id": oo_gas.id}, synchronize_session=False)
+        db.delete(lout)
+    db.flush()
 
-    logger.info("Seeding baseline OS census tracking metrics (Gap 16)...")
-    standard_os = [
-        {"os_name": "Windows 11 Professional", "workstations_count": 120, "servers_count": 0},
-        {"os_name": "Ubuntu Server 22.04 LTS", "workstations_count": 0, "servers_count": 5},
-        {"os_name": "Windows Server 2022", "workstations_count": 0, "servers_count": 3}
-    ]
-    for os_data in standard_os:
-        existing = db.query(ClientOsCensus).filter(ClientOsCensus.os_name == os_data["os_name"]).first()
-        if not existing:
-            db.add(ClientOsCensus(**os_data))
+    # -------------------------------------------------------------
+    # 4. STAKEHOLDER ANALYSIS (Part I.C)
+    # -------------------------------------------------------------
+    logger.info("Seeding Stakeholder Analysis (Part I.C)...")
+    db.query(StakeholderAnalysis).filter(
+        StakeholderAnalysis.issp_period == baseline_period,
+        StakeholderAnalysis.stakeholder_group.ilike('%test%')
+    ).delete(synchronize_session=False)
+    db.flush()
 
-    logger.info("Seeding office software productivity census metrics (Gap 17)...")
-    standard_soft = [
-        {"software_name": "Microsoft Office 2021 LTSC", "license_count": 150},
-        {"software_name": "Adobe Creative Cloud", "license_count": 25},
-        {"software_name": "AutoCAD 2024", "license_count": 50}
-    ]
-    for soft_data in standard_soft:
-        existing = db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.software_name == soft_data["software_name"]).first()
-        if not existing:
-            db.add(OfficeSoftwareCensus(**soft_data))
-
-    logger.info("Seeding baseline SUC IT Staff Positions profiles (Gap 18)...")
-    positions = [
-        {"position_title": "Database Administrator", "status": "Permanent", "count": 1},
-        {"position_title": "Information Technology Officer I", "status": "Permanent", "count": 2},
-        {"position_title": "Systems Analyst", "status": "Contractual", "count": 1},
-        {"position_title": "Network Engineer", "status": "Permanent", "count": 1}
-    ]
-    for pos in positions:
-        existing = db.query(IctStaffPosition).filter(
-            IctStaffPosition.position_title == pos["position_title"],
-            IctStaffPosition.issp_period == baseline_period
-        ).first()
-        if not existing:
-            db.add(IctStaffPosition(
+    if db.query(StakeholderAnalysis).filter(StakeholderAnalysis.issp_period == baseline_period).count() == 0:
+        stakeholders_list = [
+            StakeholderAnalysis(
                 issp_period=baseline_period,
-                position_title=pos["position_title"],
-                status=pos["status"],
-                count=pos["count"]
+                stakeholder_group="General Citizens and Service Applicants",
+                transaction_processed_incoming="Online Service Inquiries, Application Submissions, and Electronic Fee Settlement",
+                complexity_incoming="Simple",
+                transaction_processed_outgoing="Official E-Certificates, Regulatory Clearances, and Validated Service Statements",
+                complexity_outgoing="Simple"
+            ),
+            StakeholderAnalysis(
+                issp_period=baseline_period,
+                stakeholder_group="Institutional Staff and Department Directors",
+                transaction_processed_incoming="Budget Allotment Requests, Operational Activity Filings, and Personnel Clearances",
+                complexity_incoming="Complex",
+                transaction_processed_outgoing="Disbursement Authorizations, Compliance Endorsements, and Performance Certifications",
+                complexity_outgoing="Simple"
+            ),
+            StakeholderAnalysis(
+                issp_period=baseline_period,
+                stakeholder_group="National Oversight and Regulatory Agencies (DICT, DBM, COA)",
+                transaction_processed_incoming="Statutory Audit Inquiries, Mandate Compliance Verification, and Circular Reviews",
+                complexity_incoming="Highly Technical",
+                transaction_processed_outgoing="Institutional Alignment Metrics, UACS Audit Reports, and Public Service Scorecards",
+                complexity_outgoing="Highly Technical"
+            )
+        ]
+        db.add_all(stakeholders_list)
+        db.flush()
+
+    # -------------------------------------------------------------
+    # 5. STRATEGIC CONCERNS (Part II.A)
+    # -------------------------------------------------------------
+    logger.info("Seeding Strategic Concerns (Part II.A)...")
+    sc1 = db.query(StrategicConcern).filter(
+        StrategicConcern.issp_period == baseline_period,
+        StrategicConcern.critical_system == "Citizen Frontline Registry and Electronic Payment System"
+    ).first()
+    if not sc1:
+        sc1 = StrategicConcern(
+            issp_period=baseline_period,
+            outcome_id=oo_frontline.id,
+            mfo="Citizen Frontline Public Services Program",
+            critical_system="Citizen Frontline Registry and Electronic Payment System",
+            problems="Peak public transaction registration latency exceeding 72 hours and occasional server timeouts during service application surges.",
+            intended_use="Deploy containerized microservices on GovCloud with automated digital payment gateway integration via eGovPay.",
+            order_index=1
+        )
+        db.add(sc1)
+        db.flush()
+
+    sc2 = db.query(StrategicConcern).filter(
+        StrategicConcern.issp_period == baseline_period,
+        StrategicConcern.critical_system == "Enterprise Document Tracking and Knowledge Management System"
+    ).first()
+    if not sc2:
+        sc2 = StrategicConcern(
+            issp_period=baseline_period,
+            outcome_id=oo_gas.id,
+            mfo="General Administration and Support (GAS)",
+            critical_system="Enterprise Document Tracking and Knowledge Management System",
+            problems="Manual document routing and lack of centralized electronic records repository for institutional decision-makers.",
+            intended_use="Web-based electronic document tracking platform with single-sign-on identity federation and audit trail verification.",
+            order_index=2
+        )
+        db.add(sc2)
+        db.flush()
+
+    sc3 = db.query(StrategicConcern).filter(
+        StrategicConcern.issp_period == baseline_period,
+        StrategicConcern.critical_system == "Policy Research and Statistical Analytics Repository"
+    ).first()
+    if not sc3:
+        sc3 = StrategicConcern(
+            issp_period=baseline_period,
+            outcome_id=oo_policy.id,
+            mfo="Policy Formulation, Monitoring, and Research Program",
+            critical_system="Policy Research and Statistical Analytics Repository",
+            problems="Siloed archival of policy research outputs and lack of centralized statistical indexation for government analysts.",
+            intended_use="Deploy cloud-hosted open-access policy data repository with standardized metadata and public API endpoints.",
+            order_index=3
+        )
+        db.add(sc3)
+        db.flush()
+
+    sc4 = db.query(StrategicConcern).filter(
+        StrategicConcern.issp_period == baseline_period,
+        StrategicConcern.critical_system == "Community Assistance and Regional Extension Information System"
+    ).first()
+    if not sc4:
+        sc4 = StrategicConcern(
+            issp_period=baseline_period,
+            outcome_id=oo_ext.id,
+            mfo="Community and Regional Development Extension Program",
+            critical_system="Community Assistance and Regional Extension Information System",
+            problems="Paper-based tracking of regional extension beneficiaries and technical assistance programs across regional offices.",
+            intended_use="Web-based regional portal for automated community beneficiary profiling and measurable impact analytics.",
+            order_index=4
+        )
+        db.add(sc4)
+        db.flush()
+
+    canonical_concern_systems = {
+        "Citizen Frontline Registry and Electronic Payment System",
+        "Enterprise Document Tracking and Knowledge Management System",
+        "Policy Research and Statistical Analytics Repository",
+        "Community Assistance and Regional Extension Information System"
+    }
+    legacy_concerns = db.query(StrategicConcern).filter(
+        StrategicConcern.issp_period == baseline_period,
+        ~StrategicConcern.critical_system.in_(canonical_concern_systems)
+    ).all()
+    for lcon in legacy_concerns:
+        db.delete(lcon)
+    db.flush()
+
+    # -------------------------------------------------------------
+    # 5.1 SECTION 8.0: DEPARTMENT NEEDS ASSESSMENTS (INTAKE POOL)
+    # -------------------------------------------------------------
+    logger.info("Seeding Section 8.0 Department Needs Assessments...")
+    na1 = db.query(NeedsAssessment).filter(
+        NeedsAssessment.department_id == operations_dept.id,
+        NeedsAssessment.title == "Online Public Service Registration and E-Payment Processing Latency"
+    ).first()
+    if not na1:
+        na1 = NeedsAssessment(
+            department_id=operations_dept.id,
+            title="Online Public Service Registration and E-Payment Processing Latency",
+            mfo_alignment="Citizen Frontline Public Services Program",
+            current_problem="Application surges cause transaction processing latency exceeding 72 hours and physical queues at public assistance counters.",
+            proposed_solution="Containerized microservices deployed on GovCloud with automated digital payment gateway integration via eGovPay.",
+            expected_impacts=["Sub-15 minute public service turnaround", "Elimination of paper-based application backlogs across all regional branches"],
+            is_archived=False,
+            is_aggregated=True,
+            strategic_concern_id=sc1.id
+        )
+        db.add(na1)
+        db.flush()
+    else:
+        na1.is_aggregated = True
+        na1.strategic_concern_id = sc1.id
+
+    na2 = db.query(NeedsAssessment).filter(
+        NeedsAssessment.department_id == admin_dept.id,
+        NeedsAssessment.title == "Administrative High-Performance Workstation and Managed Network Upgrade"
+    ).first()
+    if not na2:
+        na2 = NeedsAssessment(
+            department_id=admin_dept.id,
+            title="Administrative High-Performance Workstation and Managed Network Upgrade",
+            mfo_alignment="General Administration and Support (GAS)",
+            current_problem="Obsolete workstation hardware and switch throughput bottlenecks throttling data processing and institutional reporting.",
+            proposed_solution="Deployment of enterprise workstation laptops and high-speed PoE+ managed network switches.",
+            expected_impacts=["Sub-second local network processing speed", "Gigabit distribution across operational divisions"],
+            is_archived=False,
+            is_aggregated=False,
+            strategic_concern_id=None
+        )
+        db.add(na2)
+        db.flush()
+
+    na3 = db.query(NeedsAssessment).filter(
+        NeedsAssessment.department_id == ict_dept.id,
+        NeedsAssessment.title == "Cloud-Based High-Availability Architecture for Mission-Critical Services"
+    ).first()
+    if not na3:
+        na3 = NeedsAssessment(
+            department_id=ict_dept.id,
+            title="Cloud-Based High-Availability Architecture for Mission-Critical Services",
+            mfo_alignment="General Administration and Support (GAS)",
+            current_problem="On-premise servers vulnerable to localized power outages, typhoons, and single-point network failure.",
+            proposed_solution="Hybrid GovCloud failover standby instances ensuring automated failover within 4 hours RTO.",
+            expected_impacts=["99.9% uptime for frontline citizen services and institutional portals", "Off-site encrypted backup redundancy"],
+            is_archived=False,
+            is_aggregated=True,
+            strategic_concern_id=sc2.id
+        )
+        db.add(na3)
+        db.flush()
+    else:
+        na3.is_aggregated = True
+        na3.strategic_concern_id = sc2.id
+
+    # -------------------------------------------------------------
+    # 6. NETWORK INFRASTRUCTURE & CYBERSECURITY (Parts II.B & III.A)
+    # -------------------------------------------------------------
+    logger.info("Seeding Network Infrastructure and Official DICT Cybersecurity Controls (Pages 10 & 17)...")
+    db.query(NetworkInfrastructure).filter(NetworkInfrastructure.issp_period == baseline_period).delete()
+    db.flush()
+
+    net_existing = NetworkInfrastructure(
+        issp_period=baseline_period,
+        is_proposed=False,
+        office_location="Central Office",
+        connectivity_type="Dedicated Leased Line Fiber Optic",
+        bandwidth_mbps=100,
+        upload_speed_mbps=100,
+        download_speed_mbps=100,
+        is_ipv6_ready=True,
+        topology_description="Core fiber optic distribution backbone connecting administrative, operational, and public assistance divisions."
+    )
+    net_proposed = NetworkInfrastructure(
+        issp_period=baseline_period,
+        is_proposed=True,
+        office_location="Central & Regional Offices",
+        connectivity_type="Redundant GovNet Fiber Backbone + SD-WAN",
+        bandwidth_mbps=500,
+        upload_speed_mbps=500,
+        download_speed_mbps=500,
+        is_ipv6_ready=True,
+        topology_description="SD-WAN enterprise routing linking national headquarters with field branches and GovCloud hybrid interconnectivity."
+    )
+    db.add_all([net_existing, net_proposed])
+    db.flush()
+
+    # Complete 100% DICT Template v. 2026 Checklist (Pages 10 & 17 of Template)
+    OFFICIAL_DICT_CYBERSECURITY_CONTROLS = [
+        # 1. PHYSICAL SECURITY
+        {"domain": "Physical Security", "name": "Perimeter Protection", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Physical Security", "name": "Access Control", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Physical Security", "name": "Surveillance System", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Physical Security", "name": "Detection System", "mandatory": False, "existing_impl": False, "proposed_impl": True},
+
+        # 2. PERIMETER SECURITY
+        {"domain": "Perimeter Security", "name": "Next Generation Firewalls", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Perimeter Security", "name": "Intrusion Detection/Prevention Systems (IDS/IPS)", "mandatory": True, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Perimeter Security", "name": "Web Application Firewalls (WAFs)", "mandatory": True, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Perimeter Security", "name": "Demilitarized Zone (DMZ)", "mandatory": False, "existing_impl": True, "proposed_impl": True},
+
+        # 3. NETWORK SECURITY
+        {"domain": "Network Security", "name": "Data Encryption", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Network Security", "name": "Network Segmentation", "mandatory": False, "existing_impl": False, "proposed_impl": True},
+
+        # 4. ENDPOINT SECURITY
+        {"domain": "Endpoint Security", "name": "Anti-virus and Anti-malware Software", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Endpoint Security", "name": "Application Control", "mandatory": True, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Endpoint Security", "name": "BYOD Security", "mandatory": True, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Endpoint Security", "name": "Extended Detection and Response (XDR)", "mandatory": False, "existing_impl": False, "proposed_impl": True},
+
+        # 5. DATA SECURITY
+        {"domain": "Data Security", "name": "Data Classification", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Data Security", "name": "Data Loss Prevention (DLP)", "mandatory": True, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Data Security", "name": "Data Backups and Recovery", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+
+        # 6. APPLICATION SECURITY
+        {"domain": "Application Security", "name": "Regular Security Scanning and Testing", "mandatory": True, "existing_impl": False, "proposed_impl": True},
+
+        # 7. OTHER MEASURES
+        {"domain": "Other Measures", "name": "Vulnerability Assessment", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Patch Management", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Strong Password Policies", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Multi-Factor Authentication (MFA)", "mandatory": True, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Access Reviews", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Security Logs", "mandatory": True, "existing_impl": True, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Log Analysis", "mandatory": False, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Incident Response Plan", "mandatory": False, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Security Information and Event Management (SIEM)", "mandatory": False, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Penetration Testing", "mandatory": False, "existing_impl": False, "proposed_impl": True},
+        {"domain": "Other Measures", "name": "Secure Software Development Life Cycle (SDLC)", "mandatory": False, "existing_impl": False, "proposed_impl": True}
+    ]
+
+    # Delete any non-standard or corrupt controls from previous test runs
+    official_names = {c["name"] for c in OFFICIAL_DICT_CYBERSECURITY_CONTROLS}
+    db.query(CybersecurityControl).filter(
+        CybersecurityControl.issp_period == baseline_period,
+        ~CybersecurityControl.control_name.in_(official_names)
+    ).delete(synchronize_session=False)
+    db.flush()
+
+    # Seed controls for both Existing (Part II.B.2) and Proposed (Part III.A.2)
+    for c_def in OFFICIAL_DICT_CYBERSECURITY_CONTROLS:
+        # Part II.B.2 Existing Control
+        existing_ctrl = db.query(CybersecurityControl).filter(
+            CybersecurityControl.issp_period == baseline_period,
+            CybersecurityControl.is_proposed == False,
+            CybersecurityControl.control_name == c_def["name"]
+        ).first()
+
+        if not existing_ctrl:
+            db.add(CybersecurityControl(
+                issp_period=baseline_period,
+                is_proposed=False,
+                control_domain=c_def["domain"],
+                control_name=c_def["name"],
+                is_mandatory=c_def["mandatory"],
+                is_implemented=c_def["existing_impl"]
             ))
+        else:
+            existing_ctrl.control_domain = c_def["domain"]
+            existing_ctrl.is_mandatory = c_def["mandatory"]
 
-    logger.info("Configuring departmental sub-ceiling limits against global ceiling...")
-    ceilings_to_seed = {
-        "College of Engineering": Decimal("10000000.00"),
-        "College of Computer Studies": Decimal("8000000.00"),
-        "College of Education, Arts and Sciences": Decimal("5000000.00"),
-        "College of Health Sciences": Decimal("4000000.00"),
-        "College of Tourism, Hospitality, and Business Management": Decimal("3000000.00"),
-        "College of Technological and Developmental Education": Decimal("5000000.00"),
-        "Human Resources Management": Decimal("2000000.00")
+        # Part III.A.2 Proposed Control
+        proposed_ctrl = db.query(CybersecurityControl).filter(
+            CybersecurityControl.issp_period == baseline_period,
+            CybersecurityControl.is_proposed == True,
+            CybersecurityControl.control_name == c_def["name"]
+        ).first()
+
+        if not proposed_ctrl:
+            db.add(CybersecurityControl(
+                issp_period=baseline_period,
+                is_proposed=True,
+                control_domain=c_def["domain"],
+                control_name=c_def["name"],
+                is_mandatory=c_def["mandatory"],
+                is_implemented=c_def["proposed_impl"]
+            ))
+        else:
+            proposed_ctrl.control_domain = c_def["domain"]
+            proposed_ctrl.is_mandatory = c_def["mandatory"]
+
+    db.flush()
+
+    # -------------------------------------------------------------
+    # 7. E-GOVERNMENT CHECKLIST (Part II.D) - Sanitized from CSPC
+    # -------------------------------------------------------------
+    logger.info("Upserting and sanitizing E-Government Programs Checklist (Part II.D)...")
+    egov_definitions = [
+        {"program_name": "eLGU", "is_utilized": False, "url_or_system_name": None, "equivalent_system_details": "Not applicable (National Government Agency)", "adoption_ratio": None, "is_connected_to_portal": False},
+        {"program_name": "eGovPay", "is_utilized": True, "url_or_system_name": "https://egovpay.gov.ph", "equivalent_system_details": "Integrated via Landbank Link.BizPortal for digital service fee collection", "adoption_ratio": None, "is_connected_to_portal": True},
+        {"program_name": "PNPKI", "is_utilized": True, "url_or_system_name": "https://dict.gov.ph/pnpki", "equivalent_system_details": "Active digital signing deployed across agency directors", "adoption_ratio": "55% of eligible officials with active PNPKI certs", "is_connected_to_portal": False},
+        {"program_name": "HCMIS", "is_utilized": True, "url_or_system_name": f"https://hcmis.{seed_domain}", "equivalent_system_details": "Automated institutional HRMIS and biometric payroll system", "adoption_ratio": None, "is_connected_to_portal": False},
+        {"program_name": "IFMIS", "is_utilized": True, "url_or_system_name": f"https://ifmis.{seed_domain}", "equivalent_system_details": "Integrated accounting and digital disbursements ledger", "adoption_ratio": None, "is_connected_to_portal": False},
+        {"program_name": "Online Public Service Portal", "is_utilized": True, "url_or_system_name": f"https://services.{seed_domain}", "equivalent_system_details": "Public citizen services portal connected to national eGov PH Super App", "channels_json": ["Website", "Email", "Mobile", "Social Media"], "is_connected_to_portal": True},
+        {"program_name": "PhilGEPS", "is_utilized": True, "url_or_system_name": "https://notices.philgeps.gov.ph", "equivalent_system_details": "100% of public competitive bids and awarded contracts published", "adoption_ratio": None, "is_connected_to_portal": False},
+        {"program_name": "Records and Knowledge Management", "is_utilized": True, "url_or_system_name": f"https://records.{seed_domain}", "equivalent_system_details": "Integrated Electronic Document Management and Archiving System", "adoption_ratio": None, "is_connected_to_portal": False},
+        {"program_name": "Public Service Continuity Plan", "is_utilized": True, "url_or_system_name": f"https://{seed_domain}/pscp", "equivalent_system_details": "Formally approved by Executive Department Directorate", "adoption_ratio": None, "is_connected_to_portal": False}
+    ]
+
+    for ed in egov_definitions:
+        eg_record = db.query(EGovernmentChecklist).filter(
+            EGovernmentChecklist.issp_period == baseline_period,
+            EGovernmentChecklist.program_name == ed["program_name"]
+        ).first()
+        if not eg_record:
+            db.add(EGovernmentChecklist(issp_period=baseline_period, **ed))
+        else:
+            for k, v in ed.items():
+                setattr(eg_record, k, v)
+    db.flush()
+
+    # -------------------------------------------------------------
+    # 8. INFORMATION SYSTEMS (Part II.C & Part III.D)
+    # -------------------------------------------------------------
+    logger.info("Seeding Information Systems (Parts II.C & III.D)...")
+
+    canonical_system_names = {
+        "Human Resource Management Information System (HRMIS)",
+        "Citizen Frontline Registry and Electronic Payment System",
+        "Enterprise Document Tracking and Knowledge Management System"
+    }
+    legacy_systems = db.query(InformationSystem).filter(
+        InformationSystem.issp_period == baseline_period,
+        ~InformationSystem.name.in_(canonical_system_names)
+    ).all()
+    for lsys in legacy_systems:
+        db.delete(lsys)
+    db.flush()
+
+    # 8.1 Part II.C: Operational Baseline System
+    hrmis_system = db.query(InformationSystem).filter(
+        InformationSystem.issp_period == baseline_period,
+        InformationSystem.name == "Human Resource Management Information System (HRMIS)"
+    ).first()
+    if not hrmis_system:
+        hrmis_system = InformationSystem(
+            issp_period=baseline_period,
+            strategic_concern_id=sc2.id,
+            name="Human Resource Management Information System (HRMIS)",
+            status=SystemStatus.OPERATIONAL,
+            classification=SystemClassification.GENERAL_ADMINISTRATIVE,
+            hosting_type=SystemHostingType.ON_PREMISE,
+            online_url=f"https://hcmis.{seed_domain}",
+            description_and_purpose="Automated employee records, leave administration, payroll computation, and daily biometric attendance indexing.",
+            enhancement_details=None,
+            development_strategy=DevelopmentStrategy.IN_HOUSE,
+            development_platform="Python FastAPI, React, PostgreSQL",
+            database_name="hrmis_master_db",
+            data_storage_type="On-Premise SAN Storage with Automated Off-Site Mirror",
+            internal_users="Agency Personnel, HR Officers, Accounting Staff, Executive Directorate",
+            external_users="Civil Service Commission (CSC), Government Service Insurance System (GSIS)",
+            system_owner_office="Human Resource Development Division",
+            is_integrated_with_others=True,
+            internal_integrated_systems="Enterprise Document Tracking System",
+            external_integrated_systems="GSIS Electronic Billing and Collection System (eBCS)",
+            generates_data_for_others=True,
+            processes_data_from_others=True,
+            is_deployed_on_shared_platform=False,
+            processes_personal_information=True,
+            has_undergone_pia=True
+        )
+        db.add(hrmis_system)
+        db.flush()
+    else:
+        hrmis_system.online_url = f"https://hcmis.{seed_domain}"
+        hrmis_system.status = SystemStatus.OPERATIONAL
+        db.flush()
+
+    # 8.2 Part II.C & III.D: Existing System Scheduled for Enhancement
+    frontline_system = db.query(InformationSystem).filter(
+        InformationSystem.issp_period == baseline_period,
+        InformationSystem.name == "Citizen Frontline Registry and Electronic Payment System"
+    ).first()
+    if not frontline_system:
+        frontline_system = InformationSystem(
+            issp_period=baseline_period,
+            strategic_concern_id=sc1.id,
+            name="Citizen Frontline Registry and Electronic Payment System",
+            status=SystemStatus.FOR_ENHANCEMENT,
+            classification=SystemClassification.OPERATIONS_FRONTLINE,
+            hosting_type=SystemHostingType.HYBRID,
+            online_url=f"https://portal.{seed_domain}",
+            description_and_purpose="Handles online citizen service applications, public registry indexing, fee assessment, and electronic transaction accounting.",
+            enhancement_details="Containerization of frontline microservices on GovCloud, integration with national eGovPay API gateway, and automated disaster recovery database clustering.",
+            development_strategy=DevelopmentStrategy.OUTSOURCED,
+            development_platform="Next.js, Python FastAPI, PostgreSQL Enterprise",
+            database_name="frontline_registry_db",
+            data_storage_type="GovCloud Enterprise NVMe Storage",
+            internal_users="Frontline Officers, Operations Staff, Financial Cashiers",
+            external_users="General Citizens, Corporate Entities, National Oversight Agencies",
+            system_owner_office="Public Frontline Services and Operations Division",
+            is_integrated_with_others=True,
+            internal_integrated_systems="Enterprise Document Tracking System",
+            external_integrated_systems="DICT eGov Portal, Landbank Link.BizPortal",
+            generates_data_for_others=True,
+            processes_data_from_others=True,
+            is_deployed_on_shared_platform=True,
+            processes_personal_information=True,
+            has_undergone_pia=True
+        )
+        db.add(frontline_system)
+        db.flush()
+    else:
+        frontline_system.online_url = f"https://portal.{seed_domain}"
+        if not frontline_system.enhancement_details:
+            frontline_system.enhancement_details = "Containerization of frontline microservices on GovCloud, integration with national eGovPay API gateway, and automated disaster recovery database clustering."
+        db.flush()
+
+    # 8.3 Part III.D: New System Scheduled for Development
+    dms_system = db.query(InformationSystem).filter(
+        InformationSystem.issp_period == baseline_period,
+        InformationSystem.name == "Enterprise Document Tracking and Knowledge Management System"
+    ).first()
+    if not dms_system:
+        dms_system = InformationSystem(
+            issp_period=baseline_period,
+            strategic_concern_id=sc2.id,
+            name="Enterprise Document Tracking and Knowledge Management System",
+            status=SystemStatus.FOR_DEVELOPMENT,
+            classification=SystemClassification.SUPPORT_TO_OPERATIONS,
+            hosting_type=SystemHostingType.ONLINE,
+            online_url=f"https://dms.{seed_domain}",
+            description_and_purpose="Automated document routing, digital barcode tracking, executive directives indexing, and records archiving.",
+            development_strategy=DevelopmentStrategy.IN_HOUSE,
+            development_platform="Python FastAPI, React, PostgreSQL",
+            database_name="enterprise_dms_db",
+            data_storage_type="GovCloud Hybrid Object Storage with Local Mirror",
+            internal_users="Agency Personnel, Directorate Heads, Records Custodians",
+            external_users="Authorized Liaison Officers, Inter-Agency Coordinators",
+            system_owner_office="Administrative and Financial Management Service",
+            is_integrated_with_others=True,
+            internal_integrated_systems="Citizen Frontline Registry",
+            external_integrated_systems="National Data Exchange (NGDX)",
+            generates_data_for_others=False,
+            processes_data_from_others=True,
+            is_deployed_on_shared_platform=True,
+            processes_personal_information=True,
+            has_undergone_pia=True
+        )
+        db.add(dms_system)
+        db.flush()
+    else:
+        dms_system.online_url = f"https://dms.{seed_domain}"
+        db.flush()
+
+    # -------------------------------------------------------------
+    # 9. ICT PROJECTS (Part III.E.1 Internal & III.E.2 Cross-Agency)
+    # -------------------------------------------------------------
+    logger.info("Seeding Strategic ICT Projects (Part III.E)...")
+    canonical_project_titles = {
+        "Citizen Frontline Portal Modernization and GovCloud Migration Project",
+        "National Single Window & Inter-Agency Interoperability Project"
     }
 
-    for dept_name, limit in ceilings_to_seed.items():
-        dept = dept_instances.get(dept_name)
-        if dept:
-            ceiling = db.query(BudgetCeiling).filter(
-                BudgetCeiling.department_id == dept.id
-            ).first()
-            if not ceiling:
-                ceiling = BudgetCeiling(
-                    department_id=dept.id,
-                    issp_period=baseline_period
-                )
-                ceiling.sub_ceiling = limit # Auto-derives the 70/30 split cleanly via model setter
-                db.add(ceiling)
-                logger.info(f"Ceiling established for {dept_name}: PHP {limit:,.2f} (70/30 CapEx/MOOE split)")
-            else:
-                ceiling.sub_ceiling = limit
-                ceiling.issp_period = baseline_period
-                logger.info(f"Ceiling updated for {dept_name}: PHP {limit:,.2f}")
+    orphan_projects = db.query(IctProject).filter(
+        IctProject.issp_period == baseline_period,
+        ~IctProject.project_title.in_(canonical_project_titles)
+    ).all()
+    for op_proj in orphan_projects:
+        db.query(PerformanceMetric).filter(
+            PerformanceMetric.issp_period == baseline_period,
+            or_(
+                PerformanceMetric.project_id == op_proj.id,
+                PerformanceMetric.project_title == op_proj.project_title
+            )
+        ).delete(synchronize_session=False)
+        db.delete(op_proj)
+    db.flush()
 
-    # ==========================================================
-    # PROGRAMMATIC PROPOSALS & SUBSCRIPTIONS SEEDING (Part V.C/D)
-    # ==========================================================
-    logger.info("Seeding approved proposals and subscriptions matching guide cost breakdown...")
-    
-    # Resolving target engineering department as an example parent
-    engineering_dept = dept_instances.get("College of Engineering")
-    engineering_dept_id = engineering_dept.id if engineering_dept else 1
+    proj_frontline_modernization = db.query(IctProject).filter(
+        IctProject.issp_period == baseline_period,
+        IctProject.project_title == "Citizen Frontline Portal Modernization and GovCloud Migration Project"
+    ).first()
+    if not proj_frontline_modernization:
+        proj_frontline_modernization = IctProject(
+            issp_period=baseline_period,
+            system_id=frontline_system.id,
+            project_title="Citizen Frontline Portal Modernization and GovCloud Migration Project",
+            project_category=ProjectCategory.INTERNAL_ICT_PROJECT,
+            description="Complete re-architecture and deployment of the agency frontline registration services to GovCloud containerized clusters.",
+            objectives="Eliminate peak service processing delays and reduce citizen transaction turnaround time from 3 working days to under 15 minutes.",
+            aligns_pip=True,
+            aligns_ncsp=True,
+            aligns_egmp=True,
+            aligns_pcb=True,
+            aligns_others=False,
+            aligns_others_specify=None,
+            harmonizes_national_priority=True,
+            harmonizes_resource_optimization=True,
+            harmonizes_pegif=True,
+            harmonizes_cross_collaboration=True,
+            harmonizes_scalability=True,
+            duration_start_year=2026,
+            duration_end_year=2028,
+            annual_deliverables={
+                "Year 1": "GovCloud infrastructure provisioning, database migration, and security penetration testing.",
+                "Year 2": "eGovPay payment gateway integration and automated citizen verification module deployment.",
+                "Year 3": "Full nationwide disaster recovery drill, high-availability testing, and staff training.",
+                "2026": "GovCloud infrastructure provisioning, database migration, and security penetration testing.",
+                "2027": "eGovPay payment gateway integration and automated citizen verification module deployment.",
+                "2028": "Full nationwide disaster recovery drill, high-availability testing, and staff training."
+            },
+            year_1_deliverables="GovCloud infrastructure provisioning, database migration, and security penetration testing.",
+            year_2_deliverables="eGovPay payment gateway integration and automated citizen verification module deployment.",
+            year_3_deliverables="Full nationwide disaster recovery drill, high-availability testing, and staff training.",
+            implementing_unit="Information and Communications Technology Division (ICTD)",
+            funding_source=FundSource.GAA
+        )
+        db.add(proj_frontline_modernization)
+        db.flush()
 
-    # Multi-Year CapEx hardware acquisitions mapped from the guide
-    proposals_matrix = [
-        # Office Productivity
-        {"item_key": "pc_standard", "item_name": "Standard Office PC (Clerical)", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 80, "2027": 100, "2028": 100}, "project_key": "Office_Productivity"},
-        {"item_key": "heavy_duty_printer", "item_name": "Heavy Duty Network Workgroup Printer", "unit_cost": Decimal("25000.00"), "yearly_quantities": {"2026": 5, "2027": 30, "2028": 20}, "project_key": "Office_Productivity"},
-        {"item_key": "laptop_faculty", "item_name": "Faculty Workstation Laptop", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 2, "2027": 50, "2028": 40}, "project_key": "Office_Productivity"},
-        {"item_key": "projector_standard", "item_name": "Standard Classroom Projector", "unit_cost": Decimal("30000.00"), "yearly_quantities": {"2026": 5, "2027": 5, "2028": 5}, "project_key": "Office_Productivity"},
-        {"item_key": "pc_standard", "item_name": "Standard Desktop Workstation Printer (Laser)", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 2, "2027": 1, "2028": 0}, "project_key": "Office_Productivity"},
-        {"item_key": "pc_standard", "item_name": "Standard Desktop Workstation Printer (Ink Jet)", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 5, "2027": 5, "2028": 10}, "project_key": "Office_Productivity"},
-        {"item_key": "scanner_standard", "item_name": "Standard Office Scanner", "unit_cost": Decimal("25000.00"), "yearly_quantities": {"2026": 10, "2027": 20, "2028": 5}, "project_key": "Office_Productivity"},
-        {"item_key": "pc_standard", "item_name": "HDMI Cable set", "unit_cost": Decimal("1000.00"), "yearly_quantities": {"2026": 5, "2027": 10, "2028": 0}, "project_key": "Office_Productivity"},
-        {"item_key": "pc_standard", "item_name": "External Hard Drive 2TB", "unit_cost": Decimal("3000.00"), "yearly_quantities": {"2026": 5, "2027": 5, "2028": 5}, "project_key": "Office_Productivity"},
-        {"item_key": "pc_standard", "item_name": "Flash Drive 64GB", "unit_cost": Decimal("1000.00"), "yearly_quantities": {"2026": 8, "2027": 8, "2028": 8}, "project_key": "Office_Productivity"},
-        {"item_key": "pc_standard", "item_name": "UPS Backup Power Unit", "unit_cost": Decimal("5000.00"), "yearly_quantities": {"2026": 15, "2027": 36, "2028": 36}, "project_key": "Office_Productivity"},
-        
-        # Moodle LMS (2.1)
-        {"item_key": "pc_standard", "item_name": "Desktop Computer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 2, "2027": 0, "2028": 0}, "project_key": "LMS"},
-        {"item_key": "laptop_faculty", "item_name": "Laptop", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 1, "2027": 0, "2028": 0}, "project_key": "LMS"},
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "LMS"},
-        {"item_key": "pc_standard", "item_name": "HDMI Cable set", "unit_cost": Decimal("1000.00"), "yearly_quantities": {"2026": 5, "2027": 0, "2028": 0}, "project_key": "LMS"},
-        {"item_key": "pc_standard", "item_name": "External Hard Drive 2TB", "unit_cost": Decimal("3000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "LMS"},
-        {"item_key": "pc_standard", "item_name": "UPS Backup Power Unit", "unit_cost": Decimal("5000.00"), "yearly_quantities": {"2026": 2, "2027": 2, "2028": 2}, "project_key": "LMS"},
+    proj_cross_nsw = db.query(IctProject).filter(
+        IctProject.issp_period == baseline_period,
+        IctProject.project_title == "National Single Window & Inter-Agency Interoperability Project"
+    ).first()
+    if not proj_cross_nsw:
+        proj_cross_nsw = IctProject(
+            issp_period=baseline_period,
+            system_id=frontline_system.id,
+            project_title="National Single Window & Inter-Agency Interoperability Project",
+            project_category=ProjectCategory.CROSS_AGENCY_ICT_PROJECT,
+            description="Joint interoperability initiative enabling automated data exchange between national agencies, oversight departments, and public registries.",
+            objectives="Establish PeGIF-compliant API gateways on the National Government Data Exchange (NGDX) to eliminate redundant document requirements.",
+            aligns_pip=False,
+            aligns_ncsp=True,
+            aligns_egmp=True,
+            aligns_pcb=True,
+            aligns_others=False,
+            aligns_others_specify=None,
+            harmonizes_national_priority=True,
+            harmonizes_resource_optimization=True,
+            harmonizes_pegif=True,
+            harmonizes_cross_collaboration=True,
+            harmonizes_scalability=True,
+            duration_start_year=2026,
+            duration_end_year=2028,
+            annual_deliverables={
+                "Year 1": "Joint Memorandum Circular (JMC) signing, PeGIF API gateway architecture, and data exchange staging.",
+                "Year 2": "Secure NGDX data pipeline integration and multi-agency test runs.",
+                "Year 3": "Production deployment and automated cross-agency verification.",
+                "2026": "Joint Memorandum Circular (JMC) signing, PeGIF API gateway architecture, and data exchange staging.",
+                "2027": "Secure NGDX data pipeline integration and multi-agency test runs.",
+                "2028": "Production deployment and automated cross-agency verification."
+            },
+            year_1_deliverables="Joint Memorandum Circular (JMC) signing, PeGIF API gateway architecture, and data exchange staging.",
+            year_2_deliverables="Secure NGDX data pipeline integration and multi-agency test runs.",
+            year_3_deliverables="Production deployment and automated cross-agency verification.",
+            implementing_unit="Information and Communications Technology Division (ICTD)",
+            funding_source=FundSource.GAA,
+            lead_agency="Department of Information and Communications Technology (DICT)",
+            partner_agencies="Department of Budget and Management (DBM), Bureau of the Treasury (BTr)"
+        )
+        db.add(proj_cross_nsw)
+        db.flush()
 
-        # Leased Line Bandwidth (2.2)
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "Bandwidth"},
-        {"item_key": "router_cisco", "item_name": "CISCO Core Edge Router", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 0, "2027": 0, "2028": 1}, "project_key": "Bandwidth"},
-        {"item_key": "patch_panel", "item_name": "24-Port Cat6 Patch Panel", "unit_cost": Decimal("3500.00"), "yearly_quantities": {"2026": 3, "2027": 3, "2028": 3}, "project_key": "Bandwidth"},
-        {"item_key": "router_internet", "item_name": "Enterprise Internet Router", "unit_cost": Decimal("7000.00"), "yearly_quantities": {"2026": 4, "2027": 4, "2028": 4}, "project_key": "Bandwidth"},
+    # -------------------------------------------------------------
+    # 10. PMF METRICS FRAMEWORK (Part III.F)
+    # -------------------------------------------------------------
+    logger.info("Seeding Performance Measurement Framework (Part III.F)...")
+    canonical_metric_indicators = {
+        "Percentage of citizen services adopting online digital processing modules",
+        "Average public service transaction completion duration",
+        "PeGIF-compliant API endpoints deployed and registered on NGDX"
+    }
+    db.query(PerformanceMetric).filter(
+        PerformanceMetric.issp_period == baseline_period,
+        ~PerformanceMetric.indicator.in_(canonical_metric_indicators)
+    ).delete(synchronize_session=False)
+    db.flush()
 
-        # WiFi Campus Network (2.3)
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 2, "2027": 2, "2028": 2}, "project_key": "WiFi"},
-        {"item_key": "connectors_utp", "item_name": "RJ45 UTP Connectors Pack", "unit_cost": Decimal("15.00"), "yearly_quantities": {"2026": 200, "2027": 200, "2028": 15}, "project_key": "WiFi"},
-        {"item_key": "patch_panel", "item_name": "24-Port Cat6 Patch Panel", "unit_cost": Decimal("3500.00"), "yearly_quantities": {"2026": 10, "2027": 10, "2028": 10}, "project_key": "WiFi"},
-        {"item_key": "ap_wifi6", "item_name": "Enterprise Wi-Fi 6 Access Point", "unit_cost": Decimal("10000.00"), "yearly_quantities": {"2026": 20, "2027": 20, "2028": 20}, "project_key": "WiFi"},
+    pmf_metrics = [
+        {
+            "project_id": proj_frontline_modernization.id,
+            "project_title": proj_frontline_modernization.project_title,
+            "result_hierarchy": "Output",
+            "indicator": "Percentage of citizen services adopting online digital processing modules",
+            "baseline": "35%",
+            "target": "100% adoption",
+            "collection_method": "Automated database audit logs",
+            "responsibility": "Public Frontline Services and Operations Division"
+        },
+        {
+            "project_id": proj_frontline_modernization.id,
+            "project_title": proj_frontline_modernization.project_title,
+            "result_hierarchy": "Immediate Outcome",
+            "indicator": "Average public service transaction completion duration",
+            "baseline": "3 working days",
+            "target": "Under 15 minutes",
+            "collection_method": "Application APM analytics",
+            "responsibility": "Information and Communications Technology Division (ICTD)"
+        },
+        {
+            "project_id": proj_cross_nsw.id,
+            "project_title": proj_cross_nsw.project_title,
+            "result_hierarchy": "Output",
+            "indicator": "PeGIF-compliant API endpoints deployed and registered on NGDX",
+            "baseline": "0 endpoints",
+            "target": "5 secure API gateways",
+            "collection_method": "API gateway transaction audit logs",
+            "responsibility": "Information and Communications Technology Division (ICTD)"
+        }
+    ]
+    for pm in pmf_metrics:
+        if not db.query(PerformanceMetric).filter(
+            PerformanceMetric.issp_period == baseline_period,
+            PerformanceMetric.project_title == pm["project_title"],
+            PerformanceMetric.indicator == pm["indicator"]
+        ).first():
+            db.add(PerformanceMetric(issp_period=baseline_period, **pm))
+    db.flush()
 
-        # Technology for Education (2.4)
-        {"item_key": "pc_standard", "item_name": "Desktop Computer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 20, "2027": 0, "2028": 0}, "project_key": "Tech_for_Ed"},
-        {"item_key": "laptop_faculty", "item_name": "Laptop", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 1, "2027": 0, "2028": 0}, "project_key": "Tech_for_Ed"},
-        {"item_key": "led_tv_classroom", "item_name": "Classroom Smart LED TV", "unit_cost": Decimal("40000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "Tech_for_Ed"},
-        {"item_key": "switch_24", "item_name": "24-Port Managed Switch", "unit_cost": Decimal("15000.00"), "yearly_quantities": {"2026": 0, "2027": 2, "2028": 0}, "project_key": "Tech_for_Ed"},
-        {"item_key": "pc_standard", "item_name": "HDMI Cable set", "unit_cost": Decimal("1000.00"), "yearly_quantities": {"2026": 5, "2027": 5, "2028": 0}, "project_key": "Tech_for_Ed"},
-        {"item_key": "pc_standard", "item_name": "External Hard Drive 2TB", "unit_cost": Decimal("3000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "Tech_for_Ed"},
-        {"item_key": "pc_standard", "item_name": "UPS Backup Power Unit", "unit_cost": Decimal("5000.00"), "yearly_quantities": {"2026": 10, "2027": 10, "2028": 10}, "project_key": "Tech_for_Ed"},
-        {"item_key": "patch_panel", "item_name": "24-Port Cat6 Patch Panel", "unit_cost": Decimal("3500.00"), "yearly_quantities": {"2026": 2, "2027": 2, "2028": 2}, "project_key": "Tech_for_Ed"},
-
-        # Enhancement of Buhi Campus (2.5)
-        {"item_key": "pc_standard", "item_name": "Desktop Computer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 3, "2027": 0, "2028": 0}, "project_key": "Buhi_Campus"},
-        {"item_key": "router_cisco", "item_name": "CISCO Core Edge Router", "unit_cost": Decimal("70000.00"), "yearly_quantities": {"2026": 0, "2027": 2, "2028": 2}, "project_key": "Buhi_Campus"},
-        {"item_key": "switch_24", "item_name": "24-Port Managed Switch", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 0, "2027": 0, "2028": 1}, "project_key": "Buhi_Campus"},
-        {"item_key": "patch_panel", "item_name": "24-Port Cat6 Patch Panel", "unit_cost": Decimal("3500.00"), "yearly_quantities": {"2026": 5, "2027": 2, "2028": 2}, "project_key": "Buhi_Campus"},
-        {"item_key": "pc_standard", "item_name": "UPS Backup Power Unit", "unit_cost": Decimal("5000.00"), "yearly_quantities": {"2026": 4, "2027": 4, "2028": 4}, "project_key": "Buhi_Campus"},
-        {"item_key": "ap_wifi6", "item_name": "Enterprise Wi-Fi 6 Access Point", "unit_cost": Decimal("10000.00"), "yearly_quantities": {"2026": 5, "2027": 5, "2028": 5}, "project_key": "Buhi_Campus"},
-        {"item_key": "cable_utp_set", "item_name": "UTP Cat6 Cabling Box (305m)", "unit_cost": Decimal("6000.00"), "yearly_quantities": {"2026": 0, "2027": 1, "2028": 1}, "project_key": "Buhi_Campus"},
-        {"item_key": "router_internet", "item_name": "Enterprise Internet Router", "unit_cost": Decimal("7000.00"), "yearly_quantities": {"2026": 2, "2027": 2, "2028": 2}, "project_key": "Buhi_Campus"},
-
-        # PBAX Enhancement to Digital VOIP (2.6)
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "VOIP"},
-
-        # CATV Upgrade to SMART TV (2.7)
-        {"item_key": "led_tv_classroom", "item_name": "Classroom Smart LED TV", "unit_cost": Decimal("40000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "SMART_TV"},
-
-        # Main Campus LAN Enhancement (2.8)
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 6, "2027": 6, "2028": 6}, "project_key": "LAN_Enhancement"},
-        {"item_key": "router_cisco", "item_name": "CISCO Core Edge Router", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 3, "2027": 10, "2028": 5}, "project_key": "LAN_Enhancement"},
-        {"item_key": "switch_24", "item_name": "24-Port Managed Switch", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 3, "2027": 10, "2028": 5}, "project_key": "LAN_Enhancement"},
-
-        # Computer Laboratories Enhancement (2.9)
-        {"item_key": "pc_standard", "item_name": "Desktop Computer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 302, "2027": 450, "2028": 450}, "project_key": "Computer_Labs"},
-        {"item_key": "laptop_faculty", "item_name": "Laptop", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 5, "2027": 5, "2028": 10}, "project_key": "Computer_Labs"},
-        {"item_key": "projector_standard", "item_name": "Standard Classroom Projector", "unit_cost": Decimal("30000.00"), "yearly_quantities": {"2026": 10, "2027": 10, "2028": 5}, "project_key": "Computer_Labs"},
-        {"item_key": "heavy_duty_printer", "item_name": "Heavy Duty Network Workgroup Printer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 5, "2027": 6, "2028": 20}, "project_key": "Computer_Labs"},
-        {"item_key": "scanner_standard", "item_name": "Standard Office Scanner", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "Computer_Labs"},
-        {"item_key": "led_tv_classroom", "item_name": "Classroom Smart LED TV", "unit_cost": Decimal("40000.00"), "yearly_quantities": {"2026": 4, "2027": 15, "2028": 10}, "project_key": "Computer_Labs"},
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 6, "2027": 6, "2028": 6}, "project_key": "Computer_Labs"},
-        {"item_key": "router_cisco", "item_name": "CISCO Core Edge Router", "unit_cost": Decimal("70000.00"), "yearly_quantities": {"2026": 2, "2027": 6, "2028": 5}, "project_key": "Computer_Labs"},
-        {"item_key": "switch_24", "item_name": "24-Port Managed Switch", "unit_cost": Decimal("30000.00"), "yearly_quantities": {"2026": 1, "2027": 5, "2028": 5}, "project_key": "Computer_Labs"},
-        {"item_key": "pc_standard", "item_name": "Smart Card Reader", "unit_cost": Decimal("8000.00"), "yearly_quantities": {"2026": 5, "2027": 5, "2028": 5}, "project_key": "Computer_Labs"},
-
-        # Data Center Enhancement (2.10)
-        {"item_key": "pc_standard", "item_name": "Desktop Computer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 2, "2027": 0, "2028": 0}, "project_key": "Data_Center"},
-        {"item_key": "laptop_faculty", "item_name": "Laptop", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 1, "2027": 5, "2028": 5}, "project_key": "Data_Center"},
-        {"item_key": "led_tv_classroom", "item_name": "Classroom Smart LED TV", "unit_cost": Decimal("40000.00"), "yearly_quantities": {"2026": 3, "2027": 3, "2028": 0}, "project_key": "Data_Center"},
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 6, "2027": 6, "2028": 6}, "project_key": "Data_Center"},
-        {"item_key": "switch_24", "item_name": "24-Port Managed Switch", "unit_cost": Decimal("100000.00"), "yearly_quantities": {"2026": 1, "2027": 2, "2028": 1}, "project_key": "Data_Center"},
-
-        # CCTV Systems Integrate to Command Center (2.11)
-        {"item_key": "pc_standard", "item_name": "Desktop Computer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 2, "2027": 0, "2028": 0}, "project_key": "CCTV_Command_Center"},
-        {"item_key": "led_tv_classroom", "item_name": "Classroom Smart LED TV", "unit_cost": Decimal("40000.00"), "yearly_quantities": {"2026": 1, "2027": 0, "2028": 0}, "project_key": "CCTV_Command_Center"},
-        {"item_key": "bay_rack", "item_name": "Bay Rack Unit", "unit_cost": Decimal("20000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}, "project_key": "CCTV_Command_Center"},
-        {"item_key": "heavy_duty_printer", "item_name": "Heavy Duty Network Workgroup Printer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 0, "2027": 12, "2028": 10}, "project_key": "CCTV_Command_Center"},
-
-        # Various CSPC Information System (2.13)
-        {"item_key": "pc_standard", "item_name": "Desktop Computer", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 20, "2027": 0, "2028": 0}, "project_key": "Various_Systems"},
-        {"item_key": "pc_standard", "item_name": "Barcode Reader", "unit_cost": Decimal("30000.00"), "yearly_quantities": {"2026": 10, "2027": 10, "2028": 10}, "project_key": "Various_Systems"},
-        {"item_key": "pc_standard", "item_name": "Kiosk unit", "unit_cost": Decimal("50000.00"), "yearly_quantities": {"2026": 5, "2027": 10, "2028": 1}, "project_key": "Various_Systems"}
+    # -------------------------------------------------------------
+    # 11. PART IV.A DETAILED RESOURCE DEPLOYMENT
+    # -------------------------------------------------------------
+    logger.info("Seeding Part IV.A Detailed Resource Line Items...")
+    canonical_items_config = [
+        {
+            "item_name": "High-Performance Mobile Workstation Laptop",
+            "department_id": ict_dept.id,
+            "outcome_id": oo_gas.id,
+            "project_id": None,
+            "needs_assessment_id": na2.id,
+            "category": ProposalCategory.HARDWARE,
+            "strategic_category": ProjectCategory.OFFICE_PRODUCTIVITY,
+            "office_location": OfficeLocation.CENTRAL_OFFICE,
+            "fund_source": FundSource.GAA,
+            "uacs_object_code": UacsObjectCode.ICT_EQUIPMENT,
+            "expenditure_class": ExpenditureClass.CAPITAL_OUTLAY,
+            "item_key": "laptop_enterprise",
+            "unit_cost": Decimal("70000.00"),
+            "year_1_qty": 10,
+            "year_2_qty": 5,
+            "year_3_qty": 5,
+            "total_qty": 20,
+            "total_cost": Decimal("1400000.00"),
+            "yearly_quantities": {"2026": 10, "2027": 5, "2028": 5},
+            "justification": "Required enterprise mobile workstations for technical analysts managing core digital infrastructure.",
+            "system_development_status": SystemDevelopmentStatus.NOT_APPLICABLE,
+            "created_by_students": False,
+            "target_office_automated": ict_dept.name,
+            "is_expansion": False
+        },
+        {
+            "item_name": "Office Productivity Suite Cloud Subscription",
+            "department_id": admin_dept.id,
+            "outcome_id": oo_gas.id,
+            "project_id": None,
+            "needs_assessment_id": None,
+            "category": ProposalCategory.SUBSCRIPTION,
+            "strategic_category": ProjectCategory.OFFICE_PRODUCTIVITY,
+            "office_location": OfficeLocation.CENTRAL_OFFICE,
+            "fund_source": FundSource.GAA,
+            "uacs_object_code": UacsObjectCode.ICT_SOFTWARE_SUBSCRIPTION,
+            "expenditure_class": ExpenditureClass.MOOE,
+            "item_key": "office_suite_cloud",
+            "unit_cost": Decimal("8500.00"),
+            "year_1_qty": 60,
+            "year_2_qty": 60,
+            "year_3_qty": 60,
+            "total_qty": 180,
+            "total_cost": Decimal("1530000.00"),
+            "yearly_quantities": {"2026": 60, "2027": 60, "2028": 60},
+            "justification": "Annual institutional productivity software licenses across administrative operational divisions.",
+            "system_development_status": SystemDevelopmentStatus.NOT_APPLICABLE,
+            "created_by_students": False,
+            "target_office_automated": admin_dept.name,
+            "is_expansion": True
+        },
+        {
+            "item_name": "GovCloud Microservices Migration Contractor",
+            "department_id": ict_dept.id,
+            "outcome_id": oo_frontline.id,
+            "project_id": proj_frontline_modernization.id,
+            "needs_assessment_id": na1.id,
+            "category": ProposalCategory.SOFTWARE,
+            "strategic_category": ProjectCategory.INTERNAL_ICT_PROJECT,
+            "office_location": OfficeLocation.CENTRAL_OFFICE,
+            "fund_source": FundSource.GAA,
+            "uacs_object_code": UacsObjectCode.ICT_CONSULTING_DEVELOPMENT,
+            "expenditure_class": ExpenditureClass.MOOE,
+            "item_key": "other",
+            "unit_cost": Decimal("1500000.00"),
+            "year_1_qty": 1,
+            "year_2_qty": 1,
+            "year_3_qty": 0,
+            "total_qty": 2,
+            "total_cost": Decimal("3000000.00"),
+            "yearly_quantities": {"2026": 1, "2027": 1, "2028": 0},
+            "justification": "Specialized cloud engineering contractor to execute microservices containerization and load testing.",
+            "system_development_status": SystemDevelopmentStatus.FOR_ENHANCEMENT,
+            "created_by_students": False,
+            "target_office_automated": ict_dept.name,
+            "is_expansion": True
+        },
+        {
+            "item_name": "PeGIF & NGDX Integration Engineering Consultant",
+            "department_id": ict_dept.id,
+            "outcome_id": oo_gas.id,
+            "project_id": proj_cross_nsw.id,
+            "needs_assessment_id": None,
+            "category": ProposalCategory.SOFTWARE,
+            "strategic_category": ProjectCategory.CROSS_AGENCY_ICT_PROJECT,
+            "office_location": OfficeLocation.CENTRAL_OFFICE,
+            "fund_source": FundSource.GAA,
+            "uacs_object_code": UacsObjectCode.ICT_CONSULTING_DEVELOPMENT,
+            "expenditure_class": ExpenditureClass.MOOE,
+            "item_key": "other",
+            "unit_cost": Decimal("400000.00"),
+            "year_1_qty": 1,
+            "year_2_qty": 1,
+            "year_3_qty": 1,
+            "total_qty": 3,
+            "total_cost": Decimal("1200000.00"),
+            "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1},
+            "justification": "Specialized API consultant to implement and certify secure NGDX national gateways.",
+            "system_development_status": SystemDevelopmentStatus.NOT_APPLICABLE,
+            "created_by_students": False,
+            "target_office_automated": ict_dept.name,
+            "is_expansion": True
+        },
+        {
+            "item_name": "GovCloud Disaster Recovery Standby Subscription",
+            "department_id": ict_dept.id,
+            "outcome_id": oo_gas.id,
+            "project_id": None,
+            "needs_assessment_id": na3.id,
+            "category": ProposalCategory.SUBSCRIPTION,
+            "strategic_category": ProjectCategory.CONTINUING_COSTS,
+            "office_location": OfficeLocation.CENTRAL_OFFICE,
+            "fund_source": FundSource.GAA,
+            "uacs_object_code": UacsObjectCode.ICT_SOFTWARE_SUBSCRIPTION,
+            "expenditure_class": ExpenditureClass.MOOE,
+            "item_key": "other",
+            "unit_cost": Decimal("500000.00"),
+            "year_1_qty": 1,
+            "year_2_qty": 1,
+            "year_3_qty": 1,
+            "total_qty": 3,
+            "total_cost": Decimal("1500000.00"),
+            "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1},
+            "justification": "Mandatory cloud standby failover instances ensuring sub-4-hour RTO for mission-critical portals.",
+            "system_development_status": SystemDevelopmentStatus.NOT_APPLICABLE,
+            "created_by_students": False,
+            "target_office_automated": ict_dept.name,
+            "is_expansion": True
+        }
     ]
 
-    for p in proposals_matrix:
-        existing_p = db.query(Proposal).filter(
-            Proposal.item_name == p["item_name"],
-            Proposal.project_key == p["project_key"],
-            Proposal.issp_period == baseline_period
+    canonical_names = {item["item_name"] for item in canonical_items_config}
+
+    for conf in canonical_items_config:
+        item = db.query(Proposal).filter(
+            Proposal.issp_period == baseline_period,
+            Proposal.item_name == conf["item_name"]
         ).first()
-        if not existing_p:
-            db_p = Proposal(
-                department_id=engineering_dept_id,
+
+        if not item:
+            item = Proposal(
                 issp_period=baseline_period,
                 status=ProposalStatus.APPROVED,
-                item_name=p["item_name"],
-                item_key=p["item_key"],
-                unit_cost=p["unit_cost"],
-                yearly_quantities=p["yearly_quantities"],
-                total_qty=sum(p["yearly_quantities"].values()),
-                project_key=p["project_key"],
-                payload={"comments": []},
-                is_archived=False,
-                s3_storage_class="STANDARD",
-                is_restoring=False
+                **conf
             )
-            db.add(db_p)
+            db.add(item)
+        else:
+            for k, v in conf.items():
+                setattr(item, k, v)
+            item.status = ProposalStatus.APPROVED
+            item.is_archived = False
+            item.sync_payload()
 
-    # Multi-Year MOOE software subscriptions mapped from the guide
-    subscriptions_matrix = [
-        # Office Productivity
-        {"software_name": "Office Productivity Subscription", "subscription_type": "Annual License", "justification": "Required license seat allocations to support college academic classrooms operations.", "annual_cost_per_user": Decimal("15000.00"), "yearly_users": {"2026": 40, "2027": 70, "2028": 60}, "project_key": "Office_Productivity"},
-        {"software_name": "Office Productivity Training Program", "subscription_type": "Training", "justification": "Comprehensive skills enablement training for office automation applications.", "annual_cost_per_user": Decimal("10000.00"), "yearly_users": {"2026": 50, "2027": 50, "2028": 50}, "project_key": "Office_Productivity"},
-        
-        # Moodle LMS (2.1)
-        {"software_name": "Moodle LMS Training Program", "subscription_type": "Training", "justification": "Enabling faculty coordinators and course managers to operate learning management platforms.", "annual_cost_per_user": Decimal("10000.00"), "yearly_users": {"2026": 5, "2027": 5, "2028": 5}, "project_key": "LMS"},
+    legacy_items = db.query(Proposal).filter(
+        Proposal.issp_period == baseline_period,
+        ~Proposal.item_name.in_(canonical_names)
+    ).all()
+    for leg in legacy_items:
+        leg.is_archived = True
 
-        # Technology for Education (2.4)
-        {"software_name": "Tech for Ed Training Program", "subscription_type": "Training", "justification": "Training program to advance dynamic technical skills among educators.", "annual_cost_per_user": Decimal("10000.00"), "yearly_users": {"2026": 10, "2027": 10, "2028": 10}, "project_key": "Tech_for_Ed"},
+    db.flush()
 
-        # Enhancement of Buhi Campus (2.5)
-        {"software_name": "Buhi Campus Training Program", "subscription_type": "Training", "justification": "Skills training and enablement workshops for Buhi satellite operations staff.", "annual_cost_per_user": Decimal("10000.00"), "yearly_users": {"2026": 5, "2027": 5, "2028": 5}, "project_key": "Buhi_Campus"},
+    # -------------------------------------------------------------
+    # 12. ANNEX 1: MASTER ASSET INVENTORY
+    # -------------------------------------------------------------
+    logger.info("Seeding Annex 1 Master Asset Inventory across departments (DICT Categories)...")
+    inventory_items = [
+        # 1. Servers
+        {"department_id": ict_dept.id, "item_name": "Enterprise 2U Rackmount Server", "specs": "16-Core Processor, 64GB RAM, 2TB SSD Enterprise", "exact_model": "Rackmount R750", "dict_category": "Servers", "quantity": 30, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("250000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Legacy 2U Decommissioned Server", "specs": "8-Core Processor, 32GB RAM, 1TB HDD", "exact_model": "Rackmount R720", "dict_category": "Servers", "quantity": 5, "status": AssetStatus.CONDEMNED, "acquired_price": Decimal("180000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": True, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Hot-Standby Rackmount Server", "specs": "8-Core Processor, 32GB RAM, 1TB SSD", "exact_model": "Rackmount R640", "dict_category": "Servers", "quantity": 1, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("190000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": True, "is_software": False},
 
-        # PBAX Enhancement (2.6)
-        {"software_name": "PBAX Voip Training Program", "subscription_type": "Training", "justification": "Administrator training for central VOIP and digital telecommunications hardware.", "annual_cost_per_user": Decimal("10000.00"), "yearly_users": {"2026": 10, "2027": 10, "2028": 10}, "project_key": "VOIP"},
+        # 2. Desktops
+        {"department_id": ict_dept.id, "item_name": "Standard Administrative Desktop Workstation", "specs": "Intel Core i5, 8GB RAM, 500GB HDD", "exact_model": "Desktop 3040", "dict_category": "Desktop", "quantity": 120, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("38000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Legacy Decommissioned Desktop PC", "specs": "Intel Core i3, 4GB RAM, 500GB HDD", "exact_model": "Desktop 3020", "dict_category": "Desktop", "quantity": 15, "status": AssetStatus.CONDEMNED, "acquired_price": Decimal("32000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": True, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Administrative Standby Desktop PC", "specs": "Intel Core i5, 8GB RAM, 1TB HDD", "exact_model": "ProDesk 400", "dict_category": "Desktop", "quantity": 10, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("40000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": True, "is_software": False},
+        {"department_id": operations_dept.id, "item_name": "Public Assistance Frontline Desktop Workstation", "specs": "Intel Core i5 10th Gen, 16GB RAM, 512GB SSD", "exact_model": "Frontline 7080", "dict_category": "Desktop", "quantity": 15, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("42000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
 
-        # Computer Laboratories Enhancement (2.9)
-        {"software_name": "Computer Labs Training Program", "subscription_type": "Training", "justification": "Hands-on training for system administrators and laboratory technicians.", "annual_cost_per_user": Decimal("10000.00"), "yearly_users": {"2026": 10, "2027": 10, "2028": 10}, "project_key": "Computer_Labs"}
+        # 3. Laptops
+        {"department_id": ict_dept.id, "item_name": "Enterprise Mobile Laptop", "specs": "Intel Core i7, 16GB RAM, 512GB SSD", "exact_model": "ProBook L14", "dict_category": "Laptop", "quantity": 80, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("55000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Legacy Unserviceable Laptop", "specs": "Intel Core i3, 4GB RAM, 500GB HDD", "exact_model": "ProBook E440", "dict_category": "Laptop", "quantity": 10, "status": AssetStatus.CONDEMNED, "acquired_price": Decimal("35000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": True, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Administrative Standby Laptop", "specs": "Intel Core i5, 8GB RAM, 256GB SSD", "exact_model": "Latitude 3480", "dict_category": "Laptop", "quantity": 6, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("48000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": True, "is_software": False},
+        {"department_id": admin_dept.id, "item_name": "Heavy-Duty Workstation Laptop", "specs": "Intel Core i7, 32GB RAM, 1TB SSD", "exact_model": "Workstation P15", "dict_category": "Laptop", "quantity": 25, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("85000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+
+        # 4. Mobile Phone & Tablet
+        {"department_id": ict_dept.id, "item_name": "Field Inspection Dispatch Phone", "specs": "Octa-Core, 4GB RAM, 128GB Storage, 5G", "exact_model": "Galaxy A15", "dict_category": "Mobile Phone", "quantity": 55, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("9500.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Field Operations Inspection Tablet", "specs": "10.1-inch, 4GB RAM, 64GB Storage, LTE", "exact_model": "Tab M10", "dict_category": "Tablet", "quantity": 30, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("12000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+
+        # 5. Printers
+        {"department_id": ict_dept.id, "item_name": "Heavy-Duty Multifunction Network Laser Printer", "specs": "Multifunction Network Laser Printer", "exact_model": "LaserJet Pro M428fdw", "dict_category": "Printer", "quantity": 25, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("35000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+        {"department_id": ict_dept.id, "item_name": "Monochrome Decommissioned Laser Printer", "specs": "Monochrome Laser Printer", "exact_model": "LaserJet P2035", "dict_category": "Printer", "quantity": 5, "status": AssetStatus.CONDEMNED, "acquired_price": Decimal("18000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": True, "is_backup": False, "is_software": False},
+
+        # 6. Network Switches
+        {"department_id": ict_dept.id, "item_name": "24-Port Managed Core Gigabit PoE+ Switch", "specs": "24-Port Gigabit Managed PoE+ Switch", "exact_model": "Switch 2960-X", "dict_category": "Network Switch", "quantity": 50, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("75000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
+
+        # 7. Others (Hardware) - Specified (Cleaned from duplicate seeding)
+        {"department_id": ict_dept.id, "item_name": "Online Rackmount Double-Conversion UPS", "specs": "3000VA / 2700W 2U Rackmount UPS", "exact_model": "Smart-UPS RT 3000VA", "dict_category": "Others (ICT Equipment)", "other_category_name": "Uninterruptible Power Supply (UPS)", "quantity": 8, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("65000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": True, "is_software": False},
+
+        # 8. Software Applications
+        {"department_id": ict_dept.id, "item_name": "Office Productivity Tool", "specs": "Desktop productivity perpetual licenses", "exact_model": "Office Standard Suite", "dict_category": "Office Productivity Tool", "quantity": 30, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("15000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": True, "is_perpetual": True},
+        {"department_id": ict_dept.id, "item_name": "Grammar checker", "specs": "Professional writing and document grammar tool", "exact_model": "Professional Writing Suite", "dict_category": "Grammar checker", "quantity": 120, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("3500.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": True, "is_perpetual": False},
+        {"department_id": ict_dept.id, "item_name": "Graphics and Simulation Software", "specs": "Technical simulation and design tools", "exact_model": "Engineering Design Suite", "dict_category": "Graphics and Simulation Software", "quantity": 80, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("45000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": True, "is_perpetual": True},
+        {"department_id": ict_dept.id, "item_name": "Antivirus", "specs": "Endpoint Detection and Response Cloud Subscription", "exact_model": "Endpoint Protection Cloud", "dict_category": "Antivirus", "quantity": 55, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("2500.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": True, "is_perpetual": False},
+        {"department_id": ict_dept.id, "item_name": "IT Help Desk Tool", "specs": "Institutional service desk ticketing platform", "exact_model": "Service Desk Management System", "dict_category": "IT Help Desk Tool", "quantity": 30, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("12000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": True, "is_perpetual": True},
+        {"department_id": ict_dept.id, "item_name": "Photo and Video Editing Software", "specs": "Media production creative workstation software", "exact_model": "Creative Production Suite", "dict_category": "Photo and Video Editing Software", "quantity": 25, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("32000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": True, "is_perpetual": True},
+        {"department_id": ict_dept.id, "item_name": "Web Application Firewall", "specs": "Perimeter cloud application security", "exact_model": "Cloud WAF Enterprise Protection", "dict_category": "Web Application Firewall", "quantity": 50, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("40000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": True, "is_perpetual": True}
     ]
 
-    for s in subscriptions_matrix:
-        db_s = SubscriptionProposal(
-            department_id=engineering_dept_id,
-            issp_period=baseline_period,
-            status=ProposalStatus.APPROVED,
-            subscription_type=s["subscription_type"],
-            software_name=s["software_name"],
-            justification=s["justification"],
-            yearly_users=s["yearly_users"],
-            annual_cost_per_user=s["annual_cost_per_user"],
-            total_multiyear_mooe=sum(s["yearly_users"].values()) * s["annual_cost_per_user"],
-            project_key=s["project_key"],
-            payload={"comments": []},
-            is_archived=False,
-            s3_storage_class="STANDARD",
-            is_restoring=False
-        )
-        db.add(db_s)
+    for inv in inventory_items:
+        existing = db.query(ExistingInventory).filter(
+            ExistingInventory.department_id == inv["department_id"],
+            ExistingInventory.item_name == inv["item_name"],
+            ExistingInventory.status == inv["status"],
+            ExistingInventory.exact_model == inv["exact_model"]
+        ).first()
 
-    # Multi-Year Continuing Costs mapped from the guide
-    continuing_matrix = [
-        {"item_description": "Internet Subscription (Main Campus)", "project_key": "Internet_Main", "unit_cost": Decimal("1500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Internet Subscription (Buhi Campus)", "project_key": "Internet_Buhi", "unit_cost": Decimal("15000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Hosting Services", "project_key": "Hosting", "unit_cost": Decimal("40000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Office Subscription", "project_key": "Office_License", "unit_cost": Decimal("800000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Firewall Subscription", "project_key": "Firewall", "unit_cost": Decimal("500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Plagscan Subscription", "project_key": "Plagscan", "unit_cost": Decimal("500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Adobe Creative Cloud", "project_key": "Adobe", "unit_cost": Decimal("1000000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "SAP/SRP Software", "project_key": "SAP", "unit_cost": Decimal("1000000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Library (e-Journal)", "project_key": "Library_Journal", "unit_cost": Decimal("700000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Antivirus subscription", "project_key": "Antivirus", "unit_cost": Decimal("500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Network Monitoring Software", "project_key": "Monitoring", "unit_cost": Decimal("500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Windows Server OS licenses", "project_key": "Windows_Server", "unit_cost": Decimal("1000000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "Video Conferencing Account", "project_key": "Zoom", "unit_cost": Decimal("30000.00"), "yearly_quantities": {"2026": 1, "2027": 3, "2028": 3}},
-        {"item_description": "MATLAB", "project_key": "Matlab", "unit_cost": Decimal("500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
-        {"item_description": "ETAP Software Simulator", "project_key": "ETAP", "unit_cost": Decimal("500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}}
+        if not existing:
+            db.add(ExistingInventory(
+                date_acquired=datetime.now(timezone.utc) - timedelta(days=365 * (5 if inv["is_end_of_life"] else 1)),
+                **inv
+            ))
+        else:
+            for k, v in inv.items():
+                if hasattr(existing, k):
+                    setattr(existing, k, v)
+    db.flush()
+
+    # -------------------------------------------------------------
+    # 13. ANNEX 2: DRBCP BIA, TEAMS & KPIS - Purged of SIAS Artifacts
+    # -------------------------------------------------------------
+    logger.info("Seeding Annex 2 Disaster Recovery & Business Continuity...")
+    
+    db.query(BusinessImpactAnalysis).filter(
+        BusinessImpactAnalysis.issp_period == baseline_period,
+        or_(
+            BusinessImpactAnalysis.system_name.ilike('%sias%'),
+            BusinessImpactAnalysis.system_name.ilike('%student%'),
+            BusinessImpactAnalysis.system_name.ilike('%test%')
+        )
+    ).delete(synchronize_session=False)
+    db.flush()
+
+    canonical_bias = [
+        {
+            "system_id": frontline_system.id,
+            "system_name": frontline_system.name,
+            "classification": "Frontline / Mission-Critical",
+            "mtpd_hours": 8,
+            "rto_hours": 4,
+            "rpo_hours": 1
+        },
+        {
+            "system_id": dms_system.id,
+            "system_name": dms_system.name,
+            "classification": "Administrative / Support to Operations",
+            "mtpd_hours": 24,
+            "rto_hours": 8,
+            "rpo_hours": 4
+        },
+        {
+            "system_id": hrmis_system.id,
+            "system_name": hrmis_system.name,
+            "classification": "Administrative / General Support",
+            "mtpd_hours": 24,
+            "rto_hours": 12,
+            "rpo_hours": 4
+        }
     ]
 
-    for cc in continuing_matrix:
-        db_cc = AnnualCostBreakdown(
-            issp_period=baseline_period,
-            project_key=cc["project_key"],
-            cost_type="Continuing",
-            item_description=cc["item_description"],
-            unit_cost=cc["unit_cost"],
-            yearly_quantities=cc["yearly_quantities"]
-        )
-        db.add(db_cc)
+    for bia_data in canonical_bias:
+        existing_bia = db.query(BusinessImpactAnalysis).filter(
+            BusinessImpactAnalysis.issp_period == baseline_period,
+            BusinessImpactAnalysis.system_name == bia_data["system_name"]
+        ).first()
+        if not existing_bia:
+            db.add(BusinessImpactAnalysis(issp_period=baseline_period, **bia_data))
+        else:
+            for k, v in bia_data.items():
+                setattr(existing_bia, k, v)
+    db.flush()
 
+    db.query(DisasterRecoveryTeam).filter(
+        DisasterRecoveryTeam.issp_period == baseline_period,
+        or_(
+            DisasterRecoveryTeam.contact_person.ilike('%test%'),
+            DisasterRecoveryTeam.responsibility.ilike('%test%')
+        )
+    ).delete(synchronize_session=False)
+    db.flush()
+
+    dr_teams_to_seed = [
+        {"role": "Incident Commander", "responsibility": "Declares disaster state and authorizes GovCloud DR standby site activation.", "contact_person": "DIRECTOR / INCIDENT COMMANDER", "contact_details": "09190000000"},
+        {"role": "Infrastructure Lead", "responsibility": "Restores servers, national network distribution, and GovCloud connectivity.", "contact_person": "INFRASTRUCTURE LEAD", "contact_details": "09300000000"},
+        {"role": "Data/App Custodian", "responsibility": "Ensures database integrity, snapshot rollbacks, and application failover validation.", "contact_person": "LEAD SYSTEMS ANALYST", "contact_details": "09120000000"},
+        {"role": "Security Officer", "responsibility": "Monitors for cyber threats and anomalous traffic patterns during failover.", "contact_person": "CHIEF INFORMATION SECURITY OFFICER", "contact_details": "09980000000"}
+    ]
+    for dt in dr_teams_to_seed:
+        existing_dt = db.query(DisasterRecoveryTeam).filter(
+            DisasterRecoveryTeam.issp_period == baseline_period,
+            DisasterRecoveryTeam.role == dt["role"]
+        ).first()
+        if not existing_dt:
+            db.add(DisasterRecoveryTeam(issp_period=baseline_period, **dt))
+        else:
+            for k, v in dt.items():
+                setattr(existing_dt, k, v)
+    db.flush()
+
+    db.query(DRBCPMetric).filter(
+        DRBCPMetric.issp_period == baseline_period,
+        DRBCPMetric.indicator.ilike('%test%')
+    ).delete(synchronize_session=False)
+    db.flush()
+
+    dr_kpis_to_seed = [
+        {"indicator": "System Availability", "target_metric": "99.9% Up-time (excluding planned maintenance)"},
+        {"indicator": "RTO Achievement", "target_metric": "Recovery within 4 hours of disaster declaration"},
+        {"indicator": "Backup Success Rate", "target_metric": "100% successful daily automated backups"},
+        {"indicator": "Testing Frequency", "target_metric": "1 Comprehensive Exercise per Year"}
+    ]
+    for kpi in dr_kpis_to_seed:
+        existing_kpi = db.query(DRBCPMetric).filter(
+            DRBCPMetric.issp_period == baseline_period,
+            DRBCPMetric.indicator == kpi["indicator"]
+        ).first()
+        if not existing_kpi:
+            db.add(DRBCPMetric(issp_period=baseline_period, **kpi))
+        else:
+            for k, v in kpi.items():
+                setattr(existing_kpi, k, v)
+    db.flush()
+
+    # -------------------------------------------------------------
+    # 14. BUDGET CEILINGS (Departmental Allotments)
+    # -------------------------------------------------------------
+    logger.info("Seeding departmental budget ceilings...")
+    for d_name, d_inst in dept_instances.items():
+        existing_ceiling = db.query(BudgetCeiling).filter(
+            BudgetCeiling.department_id == d_inst.id,
+            BudgetCeiling.issp_period == baseline_period
+        ).first()
+        if not existing_ceiling:
+            db_ceiling = BudgetCeiling(
+                department_id=d_inst.id,
+                allocated_capex=Decimal("25000000.00"),
+                allocated_mooe=Decimal("15000000.00"),
+                issp_period=baseline_period
+            )
+            db.add(db_ceiling)
+
+    # -------------------------------------------------------------
+    # 15. SYSTEM SETTINGS
+    # -------------------------------------------------------------
+    if not db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first():
+        db.add(SystemSetting(key="global_budget_ceiling", value="200000000.00"))
+
+    if not db.query(SystemSetting).filter(SystemSetting.key == "issp_active_cycle").first():
+        db.add(SystemSetting(key="issp_active_cycle", value=baseline_period))
+
+    # -------------------------------------------------------------
+    # 16. GLOSSARY (OFFICIAL DICT DEFINITIONS - Template Page 5)
+    # -------------------------------------------------------------
+    terms_to_seed = [
+        {"term": "Agency", "definition": "Refers to any bureau, office, commission, authority, or instrumentality of the national government, including government-owned or–controlled corporations (GOCC), authorized by law or by their respective charters to contract for or undertake information and communications technology networks and databases, infrastructure or development projects.", "order_index": 1},
+        {"term": "Business Process", "definition": "A collection of business transactions between business partners and/or internal activities within one business. These transactions and/or activities together support the objective of the business process.", "order_index": 2},
+        {"term": "Chief Information Officer", "definition": "Refers to a senior officer responsible for the development, planning, and implementation of the government entity's information systems strategic plan (ISSP) or ICT plan, and management of the agency's ICT systems, platforms, and applications.", "order_index": 3},
+        {"term": "Information Systems Strategic Plan (ISSP)", "definition": "A multi-year blueprint that defines an agency's overall ICT direction, demonstrating how its information systems and digital infrastructure support its core statutory mandate and national priorities.", "order_index": 4},
+        {"term": "MITHI", "definition": "Medium-Term Information and Communications Technology Harmonization Initiative - a joint oversight mechanism (DICT, DBM, NEDA) harmonizing government ICT programs.", "order_index": 5},
+        {"term": "PeGIF", "definition": "Philippine e-Government Interoperability Framework - technical standard facilitating automated data exchange across government systems via secure APIs.", "order_index": 6},
+        {"term": "Recovery Time Objective (RTO)", "definition": "The target duration of time and service level within which a business process or mission-critical system must be restored after a disaster or disruption.", "order_index": 7},
+        {"term": "Recovery Point Objective (RPO)", "definition": "The maximum acceptable amount of data loss measured in time preceding a disaster or disruption.", "order_index": 8}
+    ]
+    for t in terms_to_seed:
+        if not db.query(GlossaryTerm).filter(GlossaryTerm.term == t["term"]).first():
+            db.add(GlossaryTerm(**t))
+
+    # -------------------------------------------------------------
+    # 16.1 GENERAL INSTRUCTIONS (Official DICT Guidelines - Page 11)
+    # -------------------------------------------------------------
+    instructions_to_seed = [
+        {"step_number": 1, "instruction_text": "Accomplish Part I (Agency Profile & Strategic Context) citing the specific enabling statutory charter or executive issuance."},
+        {"step_number": 2, "instruction_text": "Audit and document Part II (Current ICT Assessment) ensuring that strategic concerns link directly to Organizational Outcomes (OO/MFO/SO)."},
+        {"step_number": 3, "instruction_text": "Establish Part III (Proposed ICT Strategy) ensuring Privacy Impact Assessments (PIA) are scheduled for all systems processing personal data."},
+        {"step_number": 4, "instruction_text": "Enforce DBM Capitalization Thresholds (₱50,000.00) and multi-year physical deployment targets under Part IV.A resource tables."},
+        {"step_number": 5, "instruction_text": "Assert strict four-way mathematical parity across Part IV.B Summary of Investment tables (Grand Total B.1 == B.2 == B.3 == B.4)."}
+    ]
+    for i in instructions_to_seed:
+        if not db.query(GeneralInstruction).filter(GeneralInstruction.step_number == i["step_number"]).first():
+            db.add(GeneralInstruction(**i))
+
+    os_census_to_seed = [
+        {"os_name": "Windows 11 Enterprise", "workstations_count": 250, "servers_count": 0},
+        {"os_name": "Windows 10 Pro", "workstations_count": 180, "servers_count": 0},
+        {"os_name": "Ubuntu Linux LTS 24.04", "workstations_count": 45, "servers_count": 8},
+        {"os_name": "Windows Server 2022 Datacenter", "workstations_count": 0, "servers_count": 6},
+        {"os_name": "Red Hat Enterprise Linux 9", "workstations_count": 0, "servers_count": 4}
+    ]
+    for osc in os_census_to_seed:
+        if not db.query(ClientOsCensus).filter(ClientOsCensus.os_name == osc["os_name"]).first():
+            db.add(ClientOsCensus(**osc))
+
+    software_census_to_seed = [
+        {"software_name": "Office 365 Enterprise", "license_count": 450},
+        {"software_name": "Google Workspace Enterprise", "license_count": 600},
+        {"software_name": "Adobe Creative Cloud Suite", "license_count": 35},
+        {"software_name": "AutoCAD Design Suite", "license_count": 50},
+        {"software_name": "SPSS Statistics Enterprise License", "license_count": 25}
+    ]
+    for swc in software_census_to_seed:
+        if not db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.software_name == swc["software_name"]).first():
+            db.add(OfficeSoftwareCensus(**swc))
+
+    ext_campus = campus_instances.get("RO-FIELD") or main_campus
+
+    server_capacities_to_seed = [
+        {"campus_id": main_campus.id, "capacity_tier": "Above 4TB", "location": "IN-HOUSE", "quantity": 4},
+        {"campus_id": main_campus.id, "capacity_tier": "2TB to 4TB", "location": "IN-HOUSE", "quantity": 6},
+        {"campus_id": ext_campus.id, "capacity_tier": "Below 2TB", "location": "IN-HOUSE", "quantity": 2}
+    ]
+    for sc_data in server_capacities_to_seed:
+        if not db.query(ServerCapacityTrack).filter(
+            ServerCapacityTrack.campus_id == sc_data["campus_id"],
+            ServerCapacityTrack.capacity_tier == sc_data["capacity_tier"],
+            ServerCapacityTrack.location == sc_data["location"]
+        ).first():
+            db.add(ServerCapacityTrack(**sc_data))
+
+    annual_costs_to_seed = [
+        {"project_key": "Internet_Main", "cost_type": "Continuing", "item_description": "Dedicated Leased Line Fiber 100Mbps", "unit_cost": Decimal("1200000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}},
+        {"project_key": "Cloud_DR", "cost_type": "Continuing", "item_description": "GovCloud Disaster Recovery Mirror", "unit_cost": Decimal("500000.00"), "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1}}
+    ]
+    for acb in annual_costs_to_seed:
+        if not db.query(AnnualCostBreakdown).filter(
+            AnnualCostBreakdown.issp_period == baseline_period,
+            AnnualCostBreakdown.project_key == acb["project_key"]
+        ).first():
+            db.add(AnnualCostBreakdown(issp_period=baseline_period, **acb))
+
+    # Record initial audit entry for COA compliance tracking
+    initial_audit = AuditTrail(
+        module="GOVERNANCE",
+        action="SYSTEM_BOOTSTRAP_SEEDED",
+        user_id=None,
+        new_value={"cycle": baseline_period, "agency": agency_name, "version": "DICT v.2026"}
+    )
+    db.add(initial_audit)
+
+    db.commit()
+    logger.info("Relational database graph successfully committed.")
+
+    # -------------------------------------------------------------
+    # 17. ASSERT FOUR-WAY FINANCIAL PARITY (Part IV.B)
+    # -------------------------------------------------------------
+    logger.info("Executing Four-Way Financial Parity Assertion (Part IV.B)...")
+    parity_data = calculate_financial_summaries(db, baseline_period)
+    if not parity_data["is_parity_valid"]:
+        raise ValueError(f"Parity Failed! Discrepancy: ₱{parity_data['parity_discrepancy']:,.2f}")
+    
+    logger.info(f"★ CERTIFIED BALANCED ★ Grand Total across B.1, B.2, B.3, B.4: ₱{parity_data['certified_grand_total']:,.2f}")
+
+    # -------------------------------------------------------------
+    # 18. END-TO-END SINGULARITY GRAPH CERTIFICATION
+    # -------------------------------------------------------------
+    logger.info("Certifying Complete Graph Singularity (DICT v.2026 Provenance)...")
+    graph_validation = ISSPSingularityEngine.validate_complete_issp_graph(db, baseline_period)
+    logger.info(f"★ GRAPH PROVENANCE CERTIFIED ★ {graph_validation['message']}")
+
+    # -------------------------------------------------------------
+    # 19. SEED DICT DOCUMENT TREE
+    # -------------------------------------------------------------
     seed_document_hierarchy(db)
+    db.commit()
     return dept_instances
 
 
 def onboard_user(db, email, password, role_tag, dept_name, dept_instances):
-    """
-    Onboards or updates a specific user account under institutional domain restrictions.
-    """
-    parts = email.split('@')
-    if len(parts) != 2 or parts[1] != "cspc.edu.ph":
-        logger.error(f"Onboarding Blocked: '{email}' does not belong to the institutional domain 'cspc.edu.ph'.")
+    if not is_domain_allowed(email):
+        logger.error(f"Onboarding Blocked: '{email}' is outside authorized domains: {settings.ALLOWED_EMAIL_DOMAINS}")
         return
 
     role_map = {
         "mis_admin": RoleTag.ROLE_MIS_ADMIN,
         "dept_user": RoleTag.ROLE_DEPT_USER,
-        "ROLE_MIS_ADMIN": RoleTag.ROLE_MIS_ADMIN,
-        "ROLE_DEPT_USER": RoleTag.ROLE_DEPT_USER
+        "supply_user": RoleTag.ROLE_SUPPLY_USER,
     }
-    
-    resolved_role = role_map.get(role_tag)
-    if not resolved_role:
-         raise ValueError(f"'{role_tag}' is not a valid seed role mapping.")
+    resolved_role = role_map.get(role_tag, RoleTag.ROLE_DEPT_USER)
 
     dept_id = None
-    if dept_name:
-        dept = db.query(Department).filter(Department.name == dept_name).first()
-        if not dept and dept_instances and dept_name in dept_instances:
-            dept = dept_instances[dept_name]
-        
-        if dept:
-            dept_id = dept.id
-        else:
-            logger.warning(f"Department '{dept_name}' not found; proceeding with unassociated user.")
+    if dept_name and dept_instances and dept_name in dept_instances:
+        dept_id = dept_instances[dept_name].id
 
     user = db.query(User).filter(User.email == email).first()
-    salt = bcrypt.gensalt()
-    hashed_pwd = bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+    hashed_pwd = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
     if not user:
         user = User(
@@ -1415,28 +2136,51 @@ def onboard_user(db, email, password, role_tag, dept_name, dept_instances):
             password_hash=hashed_pwd
         )
         db.add(user)
-        logger.info(f"User account created successfully: '{email}' ({resolved_role.value})")
+        db.flush()
+        logger.info(f"User account created: '{email}' ({resolved_role.value})")
+
+        # Record user onboarding in audit trail
+        audit = AuditTrail(
+            module="AUTHENTICATION",
+            action="USER_SEEDED_INITIAL",
+            user_id=user.id,
+            department_id=dept_id,
+            new_value={"email": email, "role": resolved_role.value}
+        )
+        db.add(audit)
+        db.flush()
     else:
         user.password_hash = hashed_pwd
         user.role_tag = resolved_role
         user.department_id = dept_id
-        logger.info(f"User account credentials and parameters updated: '{email}'")
+        user.is_whitelisted = True
+        db.flush()
+        logger.info(f"User credentials updated: '{email}'")
+
+        # Record user credential sync in audit trail
+        audit = AuditTrail(
+            module="AUTHENTICATION",
+            action="USER_SEED_CREDENTIALS_UPDATED",
+            user_id=user.id,
+            department_id=dept_id,
+            new_value={"email": email, "role": resolved_role.value}
+        )
+        db.add(audit)
+        db.flush()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Secure e-ISSP Database Seeder and Onboarding Utility")
-    parser.add_argument("--seed-metadata", action="store_true", help="Seed baseline departments, catalog products, and planning cycles.")
-    parser.add_argument("--create-user", action="store_true", help="Onboard a new institutional user or update an existing user profile.")
-    parser.add_argument("--email", type=str, help="Institutional email address (@cspc.edu.ph).")
-    parser.add_argument("--password", type=str, help="Password for user (defaults to settings.DEFAULT_SEED_PASSWORD if not specified).")
-    parser.add_argument("--role", type=str, choices=["mis_admin", "dept_user"], help="Assigned user authorization role.")
-    parser.add_argument("--department", type=str, help="Name of academic or administrative department to associate with user.")
-    
+    parser = argparse.ArgumentParser(description="Secure e-ISSP Database Seeder (DICT ISSP v.2026 Canonical)")
+    parser.add_argument("--seed-metadata", action="store_true", help="Seed baseline singular relational graph.")
+    parser.add_argument("--create-user", action="store_true", help="Onboard a user.")
+    parser.add_argument("--email", type=str, help="Institutional email address.")
+    parser.add_argument("--password", type=str, help="Password for user.")
+    parser.add_argument("--role", type=str, choices=["mis_admin", "dept_user", "supply_user"], help="Authorization role.")
+    parser.add_argument("--department", type=str, help="Department name to link.")
+
     args = parser.parse_args()
 
-    logger.info("Connecting to target database cluster...")
     engine = create_engine(settings.DATABASE_URL)
-    
     if "sqlite" in settings.DATABASE_URL.lower():
         @event.listens_for(engine, "connect")
         def set_sqlite_pragma(dbapi_connection, connection_record):
@@ -1447,66 +2191,36 @@ def main():
                 pass
             cursor.close()
 
-    # Align schemas before doing any actions or transactions (Gaps 4, 11, 12, 18, 19, 21, 22, 26)
     align_database_schemas(engine)
-
-    logger.info("Compiling and verifying database schema metadata...")
+    patch_runtime_enum_columns()
     Base.metadata.create_all(bind=engine)
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = SessionLocal()
 
     try:
-        dept_instances = {}
+        dept_instances = bootstrap_metadata(db)
+        default_seed_pwd = getattr(settings, "DEFAULT_SEED_PASSWORD", None) or "admin123"
+
+        if args.create_user and args.email and args.password and args.role:
+            onboard_user(db, args.email, args.password, args.role, args.department, dept_instances)
+        else:
+            allowed = getattr(settings, "ALLOWED_EMAIL_DOMAINS", ["*"])
+            seed_domain = "agency.gov.ph"
+            for d in allowed:
+                if d and d != "*":
+                    seed_domain = d.strip().lower()
+                    break
+
+            onboard_user(db, f"mis@{seed_domain}", default_seed_pwd, "mis_admin", None, dept_instances)
+            onboard_user(db, f"planner@{seed_domain}", default_seed_pwd, "dept_user", "Public Frontline Services and Operations Division", dept_instances)
+            onboard_user(db, f"supply@{seed_domain}", default_seed_pwd, "supply_user", "Procurement and Property Management Office", dept_instances)
         
-        # Unattended default run (e.g. initial infrastructure bootstrap deployment)
-        if not args.seed_metadata and not args.create_user:
-            logger.info("No explicit CLI flags specified. Bootstrapping baseline metadata & default accounts...")
-            dept_instances = bootstrap_metadata(db)
-            
-            admin_email = os.getenv("SEED_ADMIN_EMAIL", "mis@cspc.edu.ph")
-            onboard_user(
-                db, 
-                email=admin_email, 
-                password=settings.DEFAULT_SEED_PASSWORD, 
-                role_tag="mis_admin", 
-                dept_name=None, 
-                dept_instances=dept_instances
-            )
-            
-            dept_user_email = os.getenv("SEED_DEPT_EMAIL") or "faculty.eng@cspc.edu.ph"
-            onboard_user(
-                db,
-                email=dept_user_email,
-                password=settings.DEFAULT_SEED_PASSWORD,
-                role_tag="dept_user",
-                dept_name="College of Engineering",
-                dept_instances=dept_instances
-            )
-            
-            db.commit()
-            logger.info("Unattended database bootstrapping completed.")
-            return
-
-        # Explicit targeted CLI execution
-        if args.seed_metadata:
-            dept_instances = bootstrap_metadata(db)
-            db.commit()
-
-        if args.create_user:
-            if not args.email:
-                logger.error("CLI Execution Error: --email is required when --create-user is set.")
-                sys.exit(1)
-            
-            password = args.password or settings.DEFAULT_SEED_PASSWORD
-            role = args.role or "dept_user"
-            
-            onboard_user(db, args.email, password, role, args.department, dept_instances)
-            db.commit()
-
+        db.commit()
+        logger.info("Default seed execution completed successfully.")
     except Exception as e:
         db.rollback()
-        logger.error(f"Critical seeding transaction failure: {e}")
+        logger.error(f"Seeding failed: {str(e)}", exc_info=True)
         sys.exit(1)
     finally:
         db.close()

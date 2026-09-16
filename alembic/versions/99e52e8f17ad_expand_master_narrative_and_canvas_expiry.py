@@ -54,14 +54,12 @@ def upgrade() -> None:
         
         # Drop the consolidated/mismatched columns safely
         batch_op.drop_column('network_topology_url')
-        batch_op.drop_column('network_layout_url')
 
 
 def downgrade() -> None:
     """Downgrade database schema."""
     # 1. Rollback 'master_narratives'
     with op.batch_alter_table('master_narratives', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('network_layout_url', sa.String(length=500), nullable=True))
         batch_op.add_column(sa.Column('network_topology_url', sa.String(length=500), nullable=True))
         
         batch_op.drop_column('network_diagram_url')

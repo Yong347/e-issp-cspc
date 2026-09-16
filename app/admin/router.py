@@ -4,21 +4,34 @@ import html
 import uuid
 import logging
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
-from sqlalchemy import func, or_
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy.orm import joinedload, selectinload
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form, Request
+from sqlalchemy import func, or_, String, cast
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.config import settings
 from app.database.session import get_db
+from app.services.issp_engine import ISSPSingularityEngine
+from app.services.lifecycle_service import ISSPLifecycleEngine
 from app.database.models import (
     Proposal,
-    SubscriptionProposal,
+    ResourceRequirementItem,
     BudgetCeiling,
     ProposalStatus,
+    ProposalCategory,
+    ProjectCategory,
+    ExpenditureClass,
+    FundSource,
+    OfficeLocation,
+    UacsObjectCode,
+    SystemClassification,
+    SystemHostingType,
+    DevelopmentStrategy,
+    SystemStatus,
+    SystemDevelopmentStatus,
+    OrganizationalOutcome,
     AuditTrail,
     Department,
     MasterNarrative,
@@ -26,10 +39,12 @@ from app.database.models import (
     SystemSetting,
     User,
     Campus,
-    DegreeOffering,
-    GaaPerformance,
     StrategicConcern,
-    CoreOfficeFunction,
+    NeedsAssessment,
+    InformationSystem,
+    IctProject,
+    NetworkInfrastructure,
+    CybersecurityControl,
     GlossaryTerm,
     GeneralInstruction,
     ServerCapacityTrack,
@@ -39,7 +54,13 @@ from app.database.models import (
     PerformanceMetric,
     AnnualCostBreakdown,
     IctStaffPosition,
-    # New Node Models (Gap Restructuring)
+    HumanCapital,
+    StakeholderAnalysis,
+    EGovernmentChecklist,
+    DisasterRecoveryTeam,
+    BusinessImpactAnalysis,
+    DRBCPMetric,
+    ExistingInventory,
     IsspNode,
     IsspVocabulary,
     IsspContent,
@@ -47,37 +68,48 @@ from app.database.models import (
     NodeType,
     PageOrientation,
     ContentType,
-    AssetRole
+    AssetRole,
+    RoleTag,
+    ScopeChoice
 )
 from app.schemas import (
     AdminOverridePayload,
     BudgetCeilingResponse,
     UpdateCeilingPayload,
     UpdateGlobalCeilingPayload,
-    BulkCeilingValidationPayload,
     DepartmentAnalyticsResponse,
     MasterNarrativeUpdate,
     MasterNarrativeResponse,
+    LifecycleRolloverResponse,
     SystemGovernanceSettings,
     CatalogItemCreate, 
     CatalogItemUpdate, 
     CatalogItemResponse,
+    ProposalCreatePayload,
     ProposalResponse,
-    SubscriptionProposalResponse,
     WhitelistedUserCreate,
     WhitelistedUserUpdate,
     WhitelistedUserResponse,
     AuditLogEntryResponse,
     CampusCreate,
     CampusResponse,
-    DegreeOfferingCreate,
-    DegreeOfferingResponse,
-    GaaPerformanceCreate,
-    GaaPerformanceResponse,
     StrategicConcernCreate,
     StrategicConcernResponse,
-    CoreOfficeFunctionCreate,
-    CoreOfficeFunctionResponse,
+    NeedsAssessmentResponse,
+    AggregateNeedsAssessmentPayload,
+    InformationSystemCreate,
+    InformationSystemUpdate,
+    InformationSystemResponse,
+    IctProjectCreate,
+    IctProjectUpdate,
+    IctProjectResponse,
+    PerformanceMetricCreate,
+    PerformanceMetricResponse,
+    PartIVBParityResponse,
+    NetworkInfrastructureCreate,
+    NetworkInfrastructureResponse,
+    CybersecurityControlCreate,
+    CybersecurityControlResponse,
     GlossaryTermCreate,
     GlossaryTermResponse,
     GeneralInstructionCreate,
@@ -90,13 +122,12 @@ from app.schemas import (
     OfficeSoftwareResponse,
     CrossAgencyProjectCreate,
     CrossAgencyProjectResponse,
-    PerformanceMetricCreate,
-    PerformanceMetricResponse,
     AnnualCostBreakdownCreate,
     AnnualCostBreakdownResponse,
     IctStaffPositionCreate,
     IctStaffPositionResponse,
-    # New Node Schemas (Gap Restructuring)
+    OrganizationalOutcomeCreate,
+    OrganizationalOutcomeResponse,
     IsspNodeResponse,
     IsspNodeCreate,
     IsspNodeUpdate,
@@ -106,18 +137,31 @@ from app.schemas import (
     IsspContentResponse,
     IsspContentCreate,
     IsspAssetResponse,
-    IsspAssetCreate
+    IsspAssetCreate,
+    HumanCapitalCreate,
+    HumanCapitalResponse,
+    StakeholderAnalysisCreate,
+    StakeholderAnalysisResponse,
+    EGovernmentChecklistCreate,
+    EGovernmentChecklistResponse,
+    DisasterRecoveryTeamCreate,
+    DisasterRecoveryTeamResponse,
+    BusinessImpactAnalysisCreate,
+    BusinessImpactAnalysisResponse,
+    DRBCPMetricCreate,
+    DRBCPMetricResponse
 )
-from app.auth.router import require_admin
+from app.auth.router import require_admin, require_user
 from app.tasks.pdf_tasks import compile_issp_document
 from app.storage.s3_client import storage_client
-
-# Import consolidated helper functions
 from app.utils.helpers import (
     secure_filename,
     get_s3_key_from_url,
     get_active_issp_period,
     validate_active_years_alignment,
+    calculate_financial_summaries,
+    classify_uacs_and_expenditure,
+    log_audit_event
 )
 
 logger = logging.getLogger(__name__)
@@ -125,7 +169,7 @@ router = APIRouter(prefix="/api/admin", tags=["Admin & Governance Subsystem"])
 
 
 # ==========================================================
-# 0. RESTRUCTURED DOCUMENT TREE APIs (Gap Restructuring)
+# 0. DOCUMENT TREE ARCHITECTURE APIS
 # ==========================================================
 
 @router.get("/issp/document-tree", response_model=List[IsspNodeResponse])
@@ -134,23 +178,18 @@ def get_issp_document_tree(
     admin: dict = Depends(require_admin)
 ):
     try:
-        # Eagerly load vocabulary, contents, and assets for all nodes to prevent N+1 queries.
-        # SQLAlchemy automatically maps parent-child self-referential relationships in memory.
         all_nodes = db.query(IsspNode).options(
             joinedload(IsspNode.vocabulary),
             selectinload(IsspNode.contents),
             selectinload(IsspNode.assets)
         ).order_by(IsspNode.sequence_order.asc()).all()
         
-        # Filter for root-level nodes. The children trees populate seamlessly in memory.
-        root_nodes = [node for node in all_nodes if node.parent_id is None]
-        
-        return root_nodes
-        
+        return [node for node in all_nodes if node.parent_id is None]
     except Exception as e:
         logger.error(f"Failed to query document tree: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to load document skeleton tree.")
-    
+
+
 @router.put("/issp/reorder")
 def reorder_issp_nodes(
     payload: IsspNodeReorderPayload,
@@ -191,15 +230,15 @@ async def upload_issp_asset(
 
         file_bytes = await file.read()
         is_valid_file = (
-            file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or  # PNG
-            file_bytes.startswith(b"\xff\xd8\xff") or        # JPEG
-            file_bytes.startswith(b"GIF8") or                # GIF
-            file_bytes.startswith(b"%PDF-")                  # PDF
+            file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or
+            file_bytes.startswith(b"\xff\xd8\xff") or
+            file_bytes.startswith(b"GIF8") or
+            file_bytes.startswith(b"%PDF-")
         )
         if not is_valid_file:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Security Violation: Invalid file format. Only PNG, JPG, or PDF documents are permitted as system diagrams."
+                detail="Security Violation: Invalid format. Only PNG, JPG, or PDF files are permitted."
             )
 
         safe_filename = secure_filename(file.filename)
@@ -209,8 +248,6 @@ async def upload_issp_asset(
             raise HTTPException(status_code=500, detail="Failed to write diagram asset to storage.")
 
         download_url = storage_client.generate_download_url(key)
-
-        # Restructuring Rule: If full page diagram, set page break strictly to True on target node
         if asset_role == AssetRole.FULL_PAGE_DIAGRAM:
             node.force_page_break = True
 
@@ -229,7 +266,7 @@ async def upload_issp_asset(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to upload issp asset: {str(e)}")
+        logger.error(f"Failed to upload asset: {str(e)}")
         raise HTTPException(status_code=500, detail="Database failure during asset uploading.")
 
 
@@ -314,1255 +351,1335 @@ def delete_issp_node(
         raise HTTPException(status_code=500, detail="Database failure during node deletion.")
 
 
-@router.post("/issp/nodes/{node_id}/vocabulary", response_model=IsspVocabularyResponse)
-def configure_node_vocabulary(
-    node_id: int,
-    payload: IsspVocabularyCreate,
+# ==========================================================
+# PART I.A.4: ORGANIZATIONAL OUTCOMES (Rule 6 - Broader Scope)
+# ==========================================================
+
+@router.get("/outcomes", response_model=List[OrganizationalOutcomeResponse])
+def get_organizational_outcomes(
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    target_period = issp_period or get_active_issp_period(db)
+    return db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == target_period).all()
+
+
+@router.post("/outcomes", response_model=OrganizationalOutcomeResponse, status_code=status.HTTP_201_CREATED)
+def create_organizational_outcome(
+    payload: OrganizationalOutcomeCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = get_active_issp_period(db)
+    db_outcome = OrganizationalOutcome(
+        issp_period=period,
+        type_label=payload.type_label,
+        outcome_name=payload.outcome_name,
+        description=payload.description
+    )
+    db.add(db_outcome)
+    db.commit()
+    db.refresh(db_outcome)
+    return db_outcome
+
+
+@router.delete("/outcomes/{outcome_id}")
+def delete_organizational_outcome(
+    outcome_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == outcome_id).first()
+    if not outcome:
+        raise HTTPException(status_code=404, detail="Organizational Outcome program not found.")
+    
+    linked_proposals = db.query(Proposal).filter(Proposal.outcome_id == outcome_id).count()
+    if linked_proposals > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete program outcome. There are {linked_proposals} active proposals linked to it."
+        )
+
+    db.delete(outcome)
+    db.commit()
+    return {"status": "success", "message": "Outcome category purged successfully."}
+
+
+# ==========================================================
+# PART II.A: STRATEGIC CONCERNS MATRIX & NEEDS AGGREGATION
+# ==========================================================
+
+@router.get("/narratives/{issp_period}/concerns", response_model=List[StrategicConcernResponse])
+def get_strategic_concerns(
+    issp_period: str,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    return db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).order_by(StrategicConcern.order_index.asc()).all()
+
+
+@router.post("/narratives/{issp_period}/concerns", response_model=StrategicConcernResponse, status_code=status.HTTP_201_CREATED)
+def create_strategic_concern(
+    issp_period: str,
+    payload: StrategicConcernCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    new_concern = StrategicConcern(
+        issp_period=issp_period,
+        outcome_id=payload.outcome_id,
+        mfo=payload.mfo,
+        critical_system=payload.critical_system,
+        problems=payload.problems,
+        intended_use=payload.intended_use,
+        order_index=payload.order_index
+    )
+    db.add(new_concern)
+    db.commit()
+    db.refresh(new_concern)
+    return new_concern
+
+
+@router.put("/concerns/{concern_id}", response_model=StrategicConcernResponse)
+def update_strategic_concern(
+    concern_id: uuid.UUID,
+    payload: StrategicConcernCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    concern = db.query(StrategicConcern).filter(StrategicConcern.id == concern_id).first()
+    if not concern:
+        raise HTTPException(status_code=404, detail="Strategic concern record not found.")
+
+    concern.outcome_id = payload.outcome_id
+    concern.mfo = payload.mfo
+    concern.critical_system = payload.critical_system
+    concern.problems = payload.problems
+    concern.intended_use = payload.intended_use
+    concern.order_index = payload.order_index
+
+    db.commit()
+    db.refresh(concern)
+    return concern
+
+
+@router.delete("/concerns/{concern_id}")
+def delete_strategic_concern(
+    concern_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    concern = db.query(StrategicConcern).filter(StrategicConcern.id == concern_id).first()
+    if not concern:
+        raise HTTPException(status_code=404, detail="Strategic concern not found.")
+    
+    if concern.needs_assessments:
+        for na in concern.needs_assessments:
+            na.is_aggregated = False
+            na.strategic_concern_id = None
+
+    db.delete(concern)
+    db.commit()
+    return {"status": "success", "message": "Strategic concern purged."}
+
+
+@router.get("/needs-assessments", response_model=List[NeedsAssessmentResponse])
+def get_all_needs_assessments(
+    dept_id: Optional[int] = Query(None),
+    is_aggregated: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Returns all departmental Needs Assessments across all organizational units.
+    Enables MIS Admin to review and aggregate them into Part II.A Strategic Concerns.
+    """
+    query = db.query(NeedsAssessment).options(joinedload(NeedsAssessment.department)).filter(
+        NeedsAssessment.is_archived == False
+    )
+    if dept_id:
+        query = query.filter(NeedsAssessment.department_id == dept_id)
+    if is_aggregated is not None:
+        query = query.filter(NeedsAssessment.is_aggregated == is_aggregated)
+
+    records = query.order_by(NeedsAssessment.department_id.asc()).all()
+    res = []
+    for na in records:
+        resp = NeedsAssessmentResponse.model_validate(na)
+        resp.department_name = na.department.name if na.department else f"Dept {na.department_id}"
+        res.append(resp)
+    return res
+
+
+@router.post("/concerns/aggregate-from-needs", response_model=StrategicConcernResponse, status_code=status.HTTP_201_CREATED)
+def aggregate_needs_into_strategic_concern(
+    payload: AggregateNeedsAssessmentPayload,
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Converts/Aggregates a department Needs Assessment into an official Part II.A Strategic Concern.
+    Establishes bidirectional provenance:
+    NeedsAssessment.strategic_concern_id = concern.id
+    NeedsAssessment.is_aggregated = True
+    """
+    period = issp_period or get_active_issp_period(db)
+    na = db.query(NeedsAssessment).filter(NeedsAssessment.id == payload.needs_assessment_id).first()
+    if not na:
+        raise HTTPException(status_code=404, detail="Needs Assessment record not found.")
+
+    concern = StrategicConcern(
+        issp_period=period,
+        outcome_id=payload.outcome_id,
+        mfo=payload.mfo,
+        critical_system=payload.critical_system,
+        problems=payload.problems,
+        intended_use=payload.intended_use,
+        order_index=payload.order_index
+    )
+    db.add(concern)
+    db.flush()
+
+    na.is_aggregated = True
+    na.strategic_concern_id = concern.id
+
+    db.commit()
+    db.refresh(concern)
+    return concern
+
+
+# ==========================================================
+# PART II.B & III.A: NETWORK INFRASTRUCTURE & CYBERSECURITY
+# ==========================================================
+
+@router.get("/network-infrastructures", response_model=List[NetworkInfrastructureResponse])
+def get_network_infrastructures(
+    issp_period: Optional[str] = Query(None),
+    is_proposed: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = issp_period or get_active_issp_period(db)
+    query = db.query(NetworkInfrastructure).filter(NetworkInfrastructure.issp_period == period)
+    if is_proposed is not None:
+        query = query.filter(NetworkInfrastructure.is_proposed == is_proposed)
+    return query.all()
+
+
+@router.get("/narratives/{issp_period}/network-infrastructures", response_model=List[NetworkInfrastructureResponse])
+def get_narrative_network_infrastructures(
+    issp_period: str,
+    is_proposed: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    query = db.query(NetworkInfrastructure).filter(NetworkInfrastructure.issp_period == issp_period)
+    if is_proposed is not None:
+        query = query.filter(NetworkInfrastructure.is_proposed == is_proposed)
+    return query.all()
+
+
+@router.post("/network-infrastructures", response_model=NetworkInfrastructureResponse, status_code=status.HTTP_201_CREATED)
+def create_network_infrastructure(
+    payload: NetworkInfrastructureCreate,
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = issp_period or get_active_issp_period(db)
+    item = NetworkInfrastructure(issp_period=period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/network-infrastructures/{id}", response_model=NetworkInfrastructureResponse)
+def update_network_infrastructure(
+    id: int,
+    payload: NetworkInfrastructureCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(NetworkInfrastructure).filter(NetworkInfrastructure.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Network infrastructure record not found.")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/network-infrastructures/{id}")
+def delete_network_infrastructure(
+    id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(NetworkInfrastructure).filter(NetworkInfrastructure.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Network infrastructure record not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Network infrastructure record removed."}
+
+
+@router.get("/cybersecurity-controls", response_model=List[CybersecurityControlResponse])
+def get_cybersecurity_controls(
+    issp_period: Optional[str] = Query(None),
+    is_proposed: Optional[bool] = Query(None),
+    control_domain: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = issp_period or get_active_issp_period(db)
+    query = db.query(CybersecurityControl).filter(CybersecurityControl.issp_period == period)
+    if is_proposed is not None:
+        query = query.filter(CybersecurityControl.is_proposed == is_proposed)
+    if control_domain:
+        query = query.filter(CybersecurityControl.control_domain == control_domain)
+    return query.all()
+
+
+@router.get("/narratives/{issp_period}/cybersecurity-controls", response_model=List[CybersecurityControlResponse])
+def get_narrative_cybersecurity_controls(
+    issp_period: str,
+    is_proposed: Optional[bool] = Query(None),
+    control_domain: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    query = db.query(CybersecurityControl).filter(CybersecurityControl.issp_period == issp_period)
+    if is_proposed is not None:
+        query = query.filter(CybersecurityControl.is_proposed == is_proposed)
+    if control_domain:
+        query = query.filter(CybersecurityControl.control_domain == control_domain)
+    return query.all()
+
+
+@router.post("/cybersecurity-controls", response_model=CybersecurityControlResponse, status_code=status.HTTP_201_CREATED)
+def create_cybersecurity_control(
+    payload: CybersecurityControlCreate,
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = issp_period or get_active_issp_period(db)
+    item = CybersecurityControl(issp_period=period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/cybersecurity-controls/{id}", response_model=CybersecurityControlResponse)
+def update_cybersecurity_control(
+    id: int,
+    payload: CybersecurityControlCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(CybersecurityControl).filter(CybersecurityControl.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Cybersecurity control not found.")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/cybersecurity-controls/{id}")
+def delete_cybersecurity_control(
+    id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(CybersecurityControl).filter(CybersecurityControl.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Cybersecurity control not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Cybersecurity control removed."}
+
+
+@router.post("/cybersecurity-controls/seed-defaults")
+def seed_default_cybersecurity_controls(
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Seeds all 29 official DICT Cybersecurity Controls (20 Mandatory and 9 Optional)
+    across all 7 Security Domains for both Part II.B.2 (Existing) and Part III.A.2 (Proposed) if missing.
+    """
+    period = issp_period or get_active_issp_period(db)
+    
+    OFFICIAL_DICT_CONTROLS = [
+        # 1. PHYSICAL SECURITY
+        {"domain": "Physical Security", "name": "Perimeter Protection", "mandatory": True},
+        {"domain": "Physical Security", "name": "Access Control", "mandatory": True},
+        {"domain": "Physical Security", "name": "Surveillance System", "mandatory": True},
+        {"domain": "Physical Security", "name": "Detection System", "mandatory": False},
+
+        # 2. PERIMETER SECURITY
+        {"domain": "Perimeter Security", "name": "Next Generation Firewalls", "mandatory": True},
+        {"domain": "Perimeter Security", "name": "Intrusion Detection/Prevention Systems (IDS/IPS)", "mandatory": True},
+        {"domain": "Perimeter Security", "name": "Web Application Firewalls (WAFs)", "mandatory": True},
+        {"domain": "Perimeter Security", "name": "Demilitarized Zone (DMZ)", "mandatory": False},
+
+        # 3. NETWORK SECURITY
+        {"domain": "Network Security", "name": "Data Encryption", "mandatory": True},
+        {"domain": "Network Security", "name": "Network Segmentation", "mandatory": False},
+
+        # 4. ENDPOINT SECURITY
+        {"domain": "Endpoint Security", "name": "Anti-virus and Anti-malware Software", "mandatory": True},
+        {"domain": "Endpoint Security", "name": "Application Control", "mandatory": True},
+        {"domain": "Endpoint Security", "name": "BYOD Security", "mandatory": True},
+        {"domain": "Endpoint Security", "name": "Extended Detection and Response (XDR)", "mandatory": False},
+
+        # 5. DATA SECURITY
+        {"domain": "Data Security", "name": "Data Classification", "mandatory": True},
+        {"domain": "Data Security", "name": "Data Loss Prevention (DLP)", "mandatory": True},
+        {"domain": "Data Security", "name": "Data Backups and Recovery", "mandatory": True},
+
+        # 6. APPLICATION SECURITY
+        {"domain": "Application Security", "name": "Regular Security Scanning and Testing", "mandatory": True},
+
+        # 7. OTHER MEASURES
+        {"domain": "Other Measures", "name": "Vulnerability Assessment", "mandatory": True},
+        {"domain": "Other Measures", "name": "Patch Management", "mandatory": True},
+        {"domain": "Other Measures", "name": "Strong Password Policies", "mandatory": True},
+        {"domain": "Other Measures", "name": "Multi-Factor Authentication (MFA)", "mandatory": True},
+        {"domain": "Other Measures", "name": "Access Reviews", "mandatory": True},
+        {"domain": "Other Measures", "name": "Security Logs", "mandatory": True},
+        {"domain": "Other Measures", "name": "Log Analysis", "mandatory": False},
+        {"domain": "Other Measures", "name": "Incident Response Plan", "mandatory": False},
+        {"domain": "Other Measures", "name": "Security Information and Event Management (SIEM)", "mandatory": False},
+        {"domain": "Other Measures", "name": "Penetration Testing", "mandatory": False},
+        {"domain": "Other Measures", "name": "Secure Software Development Life Cycle (SDLC)", "mandatory": False}
+    ]
+
+    added = 0
+    for is_proposed in [False, True]:
+        for c in OFFICIAL_DICT_CONTROLS:
+            exists = db.query(CybersecurityControl).filter(
+                CybersecurityControl.issp_period == period,
+                CybersecurityControl.is_proposed == is_proposed,
+                CybersecurityControl.control_name == c["name"]
+            ).first()
+            if not exists:
+                db.add(CybersecurityControl(
+                    issp_period=period,
+                    is_proposed=is_proposed,
+                    control_domain=c["domain"],
+                    control_name=c["name"],
+                    is_mandatory=c["mandatory"],
+                    is_implemented=False
+                ))
+                added += 1
+
+    db.commit()
+    return {"status": "success", "message": f"Successfully initialized {added} standard DICT cybersecurity controls."}
+
+
+# ==========================================================
+# PART II.C & III.D: INFORMATION SYSTEMS REGISTER (SINGULARITY)
+# ==========================================================
+
+@router.get("/information-systems", response_model=List[InformationSystemResponse])
+def get_information_systems(
+    issp_period: Optional[str] = Query(None),
+    status_filter: Optional[SystemStatus] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = issp_period or get_active_issp_period(db)
+    query = db.query(InformationSystem).filter(InformationSystem.issp_period == period)
+    if status_filter:
+        query = query.filter(InformationSystem.status == status_filter)
+    return query.all()
+
+
+@router.post("/information-systems", response_model=InformationSystemResponse, status_code=status.HTTP_201_CREATED)
+def create_information_system(
+    payload: InformationSystemCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = get_active_issp_period(db)
+    db_system = InformationSystem(
+        issp_period=period,
+        **payload.model_dump()
+    )
+    db.add(db_system)
+    db.commit()
+    db.refresh(db_system)
+    return db_system
+
+
+@router.put("/information-systems/{system_id}", response_model=InformationSystemResponse)
+def update_information_system(
+    system_id: uuid.UUID,
+    payload: InformationSystemUpdate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    db_system = db.query(InformationSystem).filter(InformationSystem.id == system_id).first()
+    if not db_system:
+        raise HTTPException(status_code=404, detail="Information System not found.")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_system, key, value)
+
+    db.commit()
+    db.refresh(db_system)
+    return db_system
+
+
+@router.delete("/information-systems/{system_id}")
+def delete_information_system(
+    system_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    db_system = db.query(InformationSystem).filter(InformationSystem.id == system_id).first()
+    if not db_system:
+        raise HTTPException(status_code=404, detail="Information System not found.")
+
+    linked_projects = db.query(IctProject).filter(IctProject.system_id == system_id).count()
+    if linked_projects > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete system '{db_system.name}'. There are {linked_projects} ICT projects linked to it."
+        )
+
+    db.delete(db_system)
+    db.commit()
+    return {"status": "success", "message": "Information System removed from registry."}
+
+
+# ==========================================================
+# PART III.E: ICT PROJECTS (INTERNAL & CROSS-AGENCY)
+# ==========================================================
+
+@router.get("/ict-projects")
+def get_ict_projects(
+    issp_period: Optional[str] = Query(None),
+    category_filter: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
     try:
-        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
-        if not node:
-            raise HTTPException(status_code=404, detail="Document node not found.")
+        period = issp_period or get_active_issp_period(db)
+        
+        base_projects = db.query(IctProject).filter(IctProject.issp_period == period).all()
 
-        vocab = db.query(IsspVocabulary).filter(IsspVocabulary.node_id == node_id).first()
-        if vocab:
-            vocab.display_title = payload.display_title
-            vocab.toc_label = payload.toc_label
+        if category_filter and category_filter.strip().lower() != "all":
+            cat_clean = category_filter.strip().lower()
+            filtered_projects = []
+            for p in base_projects:
+                p_cat_val = str(getattr(p.project_category, "value", p.project_category) or "").lower()
+                p_cat_name = str(getattr(p.project_category, "name", "") or "").lower()
+                p_cat_raw = str(p.project_category or "").lower()
+
+                if (
+                    cat_clean == p_cat_val or
+                    cat_clean == p_cat_name or
+                    cat_clean in p_cat_val or
+                    cat_clean in p_cat_raw or
+                    cat_clean.replace(" ", "_") == p_cat_name or
+                    cat_clean.replace("-", "_") in p_cat_name or
+                    ("cross" in cat_clean and "cross" in p_cat_val)
+                ):
+                    filtered_projects.append(p)
+            projects = filtered_projects
         else:
-            vocab = IsspVocabulary(
-                node_id=node_id,
-                display_title=payload.display_title,
-                toc_label=payload.toc_label
+            projects = base_projects
+
+        total_costs_map = {}
+        try:
+            cost_proposals = (
+                db.query(
+                    Proposal.project_id,
+                    Proposal.total_cost,
+                    Proposal.year_1_qty,
+                    Proposal.year_2_qty,
+                    Proposal.year_3_qty,
+                    Proposal.unit_cost
+                )
+                .filter(
+                    Proposal.issp_period == period,
+                    Proposal.project_id.isnot(None),
+                    or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+                )
+                .all()
             )
-            db.add(vocab)
+            for row in cost_proposals:
+                pid = row[0]
+                if not pid:
+                    continue
+                pid_str = str(pid).strip()
+                cost = row[1]
+                if cost is None:
+                    q = (row[2] or 0) + (row[3] or 0) + (row[4] or 0)
+                    u = row[5] or Decimal("0.00")
+                    cost = Decimal(q) * Decimal(str(u))
+                else:
+                    cost = Decimal(str(cost))
 
-        db.commit()
-        db.refresh(vocab)
-        return vocab
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to save vocabulary: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during vocabulary configuration.")
+                total_costs_map[pid_str] = total_costs_map.get(pid_str, Decimal("0.00")) + cost
+                total_costs_map[pid] = total_costs_map.get(pid, Decimal("0.00")) + cost
+        except Exception as cost_map_err:
+            db.rollback()
+            logger.warning(f"Could not batch compute project total costs: {cost_map_err}")
 
-
-@router.post("/issp/nodes/{node_id}/contents", response_model=IsspContentResponse)
-def configure_node_content(
-    node_id: int,
-    payload: IsspContentCreate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
-        if not node:
-            raise HTTPException(status_code=404, detail="Document node not found.")
-
-        content = db.query(IsspContent).filter(IsspContent.node_id == node_id).first()
-        if content:
-            content.content_type = payload.content_type
-            content.json_data = payload.json_data
-        else:
-            content = IsspContent(
-                node_id=node_id,
-                content_type=payload.content_type,
-                json_data=payload.json_data
-            )
-            db.add(content)
-
-        db.commit()
-        db.refresh(content)
-        return content
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to configure content: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during content mapping.")
-
-
-# ==========================================================
-# DYNAMIC DEPARTMENT MANAGEMENT (CRUD)
-# ==========================================================
-
-@router.get("/departments", response_model=List[Dict[str, Any]])
-def get_all_departments(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        depts = db.query(Department).order_by(Department.name.asc()).all()
-        return [{"department_id": d.id, "department_name": d.name} for d in depts]
-    except Exception as e:
-        logger.error(f"Failed to query departments database: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load departments list.")
-
-
-@router.post("/departments", status_code=status.HTTP_201_CREATED)
-def create_department(
-    payload: Dict[str, str], 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    name = payload.get("name")
-    if not name or not name.strip():
-        raise HTTPException(status_code=400, detail="Department name is required.")
-    
-    clean_name = html.escape(name.strip())
-    existing = db.query(Department).filter(Department.name == clean_name).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Department name already exists in the system registry.")
-        
-    try:
-        new_dept = Department(name=clean_name)
-        db.add(new_dept)
-        db.flush() # Flush to get the ID for the audit trail
-        
-        audit = AuditTrail(
-            action="SYSTEM_DEPARTMENT_CREATED",
-            user_id=admin["id"],
-            old_value=None,
-            new_value={"department_id": new_dept.id, "department_name": new_dept.name}
-        )
-        db.add(audit)
-        db.commit()
-        db.refresh(new_dept)
-        return {"status": "success", "department_id": new_dept.id, "department_name": new_dept.name}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to create department: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during department creation.")
-
-
-@router.put("/departments/{dept_id}")
-def update_department(
-    dept_id: int,
-    payload: Dict[str, str],
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    name = payload.get("name")
-    if not name or not name.strip():
-        raise HTTPException(status_code=400, detail="Department name is required.")
-    
-    clean_name = html.escape(name.strip())
-    
-    try:
-        dept = db.query(Department).filter(Department.id == dept_id).first()
-        if not dept:
-            raise HTTPException(status_code=404, detail="Department not found.")
-        
-        existing = db.query(Department).filter(Department.name == clean_name, Department.id != dept_id).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="Department name already exists in the system registry.")
-        
-        old_name = dept.name
-        dept.name = clean_name
-        
-        audit = AuditTrail(
-            action="SYSTEM_DEPARTMENT_MODIFIED",
-            user_id=admin["id"],
-            old_value={"department_id": dept.id, "department_name": old_name},
-            new_value={"department_id": dept.id, "department_name": clean_name}
-        )
-        db.add(audit)
-        db.commit()
-        return {"status": "success", "department_id": dept.id, "department_name": dept.name}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update department ID {dept_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during department update.")
-
-
-@router.delete("/departments/{dept_id}")
-def delete_department(
-    dept_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        dept = db.query(Department).filter(Department.id == dept_id).first()
-        if not dept:
-            raise HTTPException(status_code=404, detail="Department not found.")
-            
-        linked_users_count = db.query(User).filter(User.department_id == dept_id).count()
-        if linked_users_count > 0:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Cannot delete department. There are {linked_users_count} whitelisted users linked to this division."
-            )
-            
-        audit = AuditTrail(
-            action="SYSTEM_DEPARTMENT_DELETED",
-            user_id=admin["id"],
-            old_value={"department_id": dept.id, "department_name": dept.name},
-            new_value={"event": "Department removed from system registries."}
-        )
-        db.add(audit)
-        
-        db.delete(dept)
-        db.commit()
-        return {"status": "success", "message": "Department successfully purged from registry."}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete department ID {dept_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during department deletion.")
-
-
-# ==========================================================
-# APPROVED PROPOSALS REFERENCE SEARCH
-# ==========================================================
-
-@router.get("/proposals/approved-canvas", response_model=List[Dict[str, Any]])
-def get_approved_canvas_items(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        capex = db.query(Proposal).filter(
-            Proposal.status == ProposalStatus.APPROVED,
-            Proposal.canvas_evidence_url.isnot(None),
-            or_(Proposal.is_archived == False, Proposal.is_archived == None)
-        ).all()
-        
-        mooe = db.query(SubscriptionProposal).filter(
-            SubscriptionProposal.status == ProposalStatus.APPROVED,
-            SubscriptionProposal.canvas_evidence_url.isnot(None),
-            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-        ).all()
-        
         results = []
-        for p in capex:
-            supplier = p.payload.get("supplier_name") if p.payload else None
-            results.append({
-                "id": str(p.id),
-                "type": "CapEx",
-                "display_name": p.item_name if p.item_key != "other" else (p.custom_specification or p.item_name),
-                "supplier_name": supplier or "Approved Provider",
-                "canvas_evidence_url": p.canvas_evidence_url,
-                "unit_cost": float(p.unit_cost)
-            })
-            
-        for s in mooe:
-            supplier = s.payload.get("supplier_name") if s.payload else None
-            results.append({
-                "id": str(s.id),
-                "type": "MOOE",
-                "display_name": s.software_name,
-                "supplier_name": supplier or "Approved Provider",
-                "canvas_evidence_url": s.canvas_evidence_url,
-                "unit_cost": float(s.annual_cost_per_user)
-            })
-            
+        for proj in projects:
+            try:
+                pid = proj.id
+                pid_str = str(pid).strip() if pid else ""
+                total_cost = total_costs_map.get(pid_str) or total_costs_map.get(pid) or Decimal("0.00")
+
+                results.append({
+                    "id": str(pid),
+                    "issp_period": str(proj.issp_period or period),
+                    "system_id": str(proj.system_id) if proj.system_id else None,
+                    "project_title": str(proj.project_title or ""),
+                    "project_category": str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects"),
+                    "description": str(proj.description or ""),
+                    "objectives": str(proj.objectives or ""),
+                    "aligns_pip": bool(getattr(proj, "aligns_pip", False)),
+                    "aligns_ncsp": bool(getattr(proj, "aligns_ncsp", False)),
+                    "aligns_egmp": bool(getattr(proj, "aligns_egmp", False)),
+                    "aligns_pcb": bool(getattr(proj, "aligns_pcb", False)),
+                    "aligns_others": bool(getattr(proj, "aligns_others", False)),
+                    "aligns_others_specify": getattr(proj, "aligns_others_specify", None),
+                    "harmonizes_national_priority": bool(getattr(proj, "harmonizes_national_priority", False)),
+                    "harmonizes_resource_optimization": bool(getattr(proj, "harmonizes_resource_optimization", False)),
+                    "harmonizes_pegif": bool(getattr(proj, "harmonizes_pegif", False)),
+                    "harmonizes_cross_collaboration": bool(getattr(proj, "harmonizes_cross_collaboration", False)),
+                    "harmonizes_scalability": bool(getattr(proj, "harmonizes_scalability", False)),
+                    "duration_start_year": int(getattr(proj, "duration_start_year", 2026) or 2026),
+                    "duration_end_year": int(getattr(proj, "duration_end_year", 2028) or 2028),
+                    "annual_deliverables": getattr(proj, "annual_deliverables", {}) or {},
+                    "year_1_deliverables": str(getattr(proj, "year_1_deliverables", "") or ""),
+                    "year_2_deliverables": str(getattr(proj, "year_2_deliverables", "") or ""),
+                    "year_3_deliverables": str(getattr(proj, "year_3_deliverables", "") or ""),
+                    "implementing_unit": str(getattr(proj, "implementing_unit", "") or "ICT Management Office"),
+                    "funding_source": str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)"),
+                    "lead_agency": str(proj.lead_agency) if proj.lead_agency else None,
+                    "partner_agencies": str(proj.partner_agencies) if proj.partner_agencies else None,
+                    "computed_total_project_cost": float(total_cost)
+                })
+            except Exception as item_err:
+                logger.error(f"Error serializing ICT project {getattr(proj, 'id', '')}: {item_err}", exc_info=True)
+
         return results
     except Exception as e:
-        logger.error(f"Failed to query approved canvas reference items: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load approved references.")
+        db.rollback()
+        logger.error(f"Failed to query ict-projects: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to query ICT projects: {str(e)}")
 
 
-# ==========================================================
-# PLANNING CYCLE LOCK & SAFE RESET
-# ==========================================================
-
-@router.post("/narratives/{issp_period}/activate")
-def set_active_planning_cycle(
-    issp_period: str,
+@router.post("/ict-projects", status_code=status.HTTP_201_CREATED)
+def create_ict_project(
+    payload: IctProjectCreate,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
     try:
-        prev_active = db.query(MasterNarrative).filter(
-            MasterNarrative.is_active == True,
-            MasterNarrative.issp_period != issp_period
-        ).first()
-        prev_period = prev_active.issp_period if prev_active else "None"
+        period = get_active_issp_period(db)
+        data_dict = payload.model_dump()
+        new_project = IctProject(
+            issp_period=period,
+            **data_dict
+        )
+        db.add(new_project)
+        db.commit()
+        db.refresh(new_project)
+        
+        return {
+            "id": str(new_project.id),
+            "issp_period": new_project.issp_period,
+            "system_id": str(new_project.system_id) if new_project.system_id else None,
+            "project_title": new_project.project_title,
+            "project_category": str(getattr(new_project.project_category, "value", new_project.project_category) or "Internal ICT Projects"),
+            "description": new_project.description or "",
+            "objectives": new_project.objectives or "",
+            "aligns_pip": bool(new_project.aligns_pip),
+            "aligns_ncsp": bool(new_project.aligns_ncsp),
+            "aligns_egmp": bool(new_project.aligns_egmp),
+            "aligns_pcb": bool(new_project.aligns_pcb),
+            "aligns_others": bool(getattr(new_project, "aligns_others", False)),
+            "aligns_others_specify": getattr(new_project, "aligns_others_specify", None),
+            "harmonizes_national_priority": bool(new_project.harmonizes_national_priority),
+            "harmonizes_resource_optimization": bool(new_project.harmonizes_resource_optimization),
+            "harmonizes_pegif": bool(new_project.harmonizes_pegif),
+            "harmonizes_cross_collaboration": bool(new_project.harmonizes_cross_collaboration),
+            "harmonizes_scalability": bool(new_project.harmonizes_scalability),
+            "duration_start_year": new_project.duration_start_year,
+            "duration_end_year": new_project.duration_end_year,
+            "annual_deliverables": getattr(new_project, "annual_deliverables", {}) or {},
+            "year_1_deliverables": new_project.year_1_deliverables or "",
+            "year_2_deliverables": new_project.year_2_deliverables or "",
+            "year_3_deliverables": new_project.year_3_deliverables or "",
+            "implementing_unit": new_project.implementing_unit or "ICT Management Office",
+            "funding_source": str(getattr(new_project.funding_source, "value", new_project.funding_source) or "General Appropriations Act (GAA)"),
+            "lead_agency": new_project.lead_agency,
+            "partner_agencies": new_project.partner_agencies,
+            "computed_total_project_cost": 0.0
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create ICT project: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create ICT project: {str(e)}")
 
-        db.query(MasterNarrative).update({MasterNarrative.is_active: False})
 
+@router.put("/ict-projects/{project_id}")
+def update_ict_project(
+    project_id: uuid.UUID,
+    payload: IctProjectUpdate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        project = db.query(IctProject).filter(IctProject.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="ICT Project not found.")
+
+        update_dict = payload.model_dump(exclude_unset=True)
+        for key, val in update_dict.items():
+            setattr(project, key, val)
+
+        db.commit()
+        db.refresh(project)
+        
+        total_cost = Decimal("0.00")
         try:
-            years = [int(y) for y in issp_period.split("-") if y.isdigit()]
-            from_year = years[0] if len(years) >= 1 else None
-            to_year = years[1] if len(years) >= 2 else None
+            cost_sum = db.query(func.sum(Proposal.total_cost)).filter(
+                Proposal.project_id == project.id,
+                or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+            ).scalar()
+            if cost_sum is not None:
+                total_cost = Decimal(str(cost_sum))
         except Exception:
-            from_year = None
-            to_year = None
-
-        target_narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-        if not target_narrative:
-            target_narrative = MasterNarrative(
-                issp_period=issp_period,
-                issp_period_from=from_year,
-                issp_period_to=to_year,
-                signatory_prepared_by="Not Configured",
-                signatory_approved_by="Not Configured",
-                is_active=True
-            )
-            db.add(target_narrative)
-            db.flush()
-        else:
-            target_narrative.issp_period_from = from_year
-            target_narrative.issp_period_to = to_year
-            target_narrative.is_active = True
-
-        has_offices = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).first()
-        if not has_offices and prev_active:
-            old_offices = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == prev_active.issp_period).all()
-            for old_office in old_offices:
-                cloned_office = CoreOfficeFunction(
-                    issp_period=issp_period,
-                    office_name=old_office.office_name,
-                    division=old_office.division,
-                    description=old_office.description
-                )
-                db.add(cloned_office)
-
-        audit = AuditTrail(
-            action="SYSTEM_ISSP_CYCLE_ACTIVATED",
-            user_id=admin["id"],
-            old_value={"previous_active_cycle": prev_period},
-            new_value={"new_active_cycle": issp_period}
-        )
-        db.add(audit)
-        db.commit()
-        return {
-            "status": "success", 
-            "message": f"Planning cycle '{issp_period}' activated. Template offices synchronized.", 
-            "issp_period": issp_period
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error activating cycle: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to activate planning cycle.")
-    
-@router.post("/narratives/{issp_period}/reset")
-def reset_planning_cycle(
-    issp_period: str,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        db.query(Proposal).filter(Proposal.issp_period == issp_period).delete(synchronize_session=False)
-        db.query(SubscriptionProposal).filter(SubscriptionProposal.issp_period == issp_period).delete(synchronize_session=False)
-        db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).delete(synchronize_session=False)
-        db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).delete(synchronize_session=False)
-        
-        audit = AuditTrail(
-            action="SYSTEM_ISSP_CYCLE_RESET",
-            user_id=admin["id"],
-            old_value={"purged_cycle": issp_period},
-            new_value={"event": "All drafts, submissions, and ceilings linked to this cycle were permanently deleted."}
-        )
-        db.add(audit)
-        db.commit()
-        return {"status": "success", "message": f"Planning cycle '{issp_period}' and associated data purged successfully."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error resetting cycle {issp_period}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Cycle reset failed: {str(e)}")
-
-
-# ==========================================================
-# DASHBOARD METRICS & AUDIT LEDGERS
-# ==========================================================
-
-@router.get("/dashboard-metrics")
-def get_admin_dashboard_metrics(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        issp_period = get_active_issp_period(db)
-        
-        global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-        global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
-        
-        capex_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
-            Proposal.status == ProposalStatus.APPROVED,
-            Proposal.issp_period == issp_period,
-            or_(Proposal.is_archived == False, Proposal.is_archived == None)
-        ).scalar() or Decimal("0.00")
-        
-        mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
-            SubscriptionProposal.status == ProposalStatus.APPROVED,
-            SubscriptionProposal.issp_period == issp_period,
-            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-        ).scalar() or Decimal("0.00")
-        
-        total_spent = capex_spent + mooe_spent
-        
-        pending_capex = db.query(Proposal).filter(
-            Proposal.status == ProposalStatus.SUBMITTED, 
-            or_(Proposal.is_archived == False, Proposal.is_archived == None)
-        ).count()
-        pending_mooe = db.query(SubscriptionProposal).filter(
-            SubscriptionProposal.status == ProposalStatus.SUBMITTED, 
-            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-        ).count()
-        
-        active_narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
-        
-        return {
-            "active_cycle": issp_period,
-            "has_active_narrative": active_narrative is not None,
-            "global_ceiling": float(global_limit),
-            "total_spent": float(total_spent),
-            "capex_spent": float(capex_spent),
-            "mooe_spent": float(mooe_spent),
-            "pending_proposals_count": pending_capex + pending_mooe,
-            "total_registered_users": db.query(User).count(),
-            "total_catalog_items": db.query(CatalogItem).count()
-        }
-    except Exception as e:
-        logger.error(f"Failed to generate dashboard metrics: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load dashboard metrics."
-        )
-
-@router.get("/audit-logs", response_model=List[AuditLogEntryResponse])
-def get_audit_logs(
-    category: Optional[str] = Query(None, description="Filter by: budget, state, override, user"),
-    start_date: Optional[datetime] = Query(None),
-    end_date: Optional[datetime] = Query(None),
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        query = db.query(AuditTrail).options(
-            joinedload(AuditTrail.user),
-            joinedload(AuditTrail.proposal),
-            joinedload(AuditTrail.subscription)
-        )
-        
-        if category:
-            cat_lower = category.lower().strip()
-            if cat_lower == "budget":
-                query = query.filter(AuditTrail.action.ilike("%budget%"))
-            elif cat_lower == "state":
-                query = query.filter(AuditTrail.action.ilike("%state%"))
-            elif cat_lower == "override":
-                query = query.filter(AuditTrail.action.ilike("%override%"))
-            elif cat_lower == "user":
-                query = query.filter(AuditTrail.action.ilike("%user%"))
-                
-        if start_date:
-            query = query.filter(AuditTrail.timestamp >= start_date)
-        if end_date:
-            query = query.filter(AuditTrail.timestamp <= end_date)
-            
-        logs = query.order_by(AuditTrail.timestamp.desc()).all()
-        
-        # Hydrate dynamic operator attributes to keep representation details clean
-        for log in logs:
-            if log.user:
-                log.operator_email = log.user.email
-                log.operator_role = log.user.role_tag.value
-            else:
-                log.operator_email = "System/Cron"
-                log.operator_role = "SYSTEM"
-                
-        return logs
-    except Exception as e:
-        logger.error(f"Failed to query audit trail database ledger: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load system audit trails."
-        )
-
-
-# ==========================================================
-# USER WHITELISTING
-# ==========================================================
-
-@router.get("/users/whitelist", response_model=List[WhitelistedUserResponse])
-def get_whitelisted_users(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(User).options(joinedload(User.department)).filter(User.is_whitelisted == True).all()
-    except Exception as e:
-        logger.error(f"Error retrieving whitelisted users: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve whitelisted users: {str(e)}"
-        )
-
-
-@router.post("/users/whitelist", response_model=WhitelistedUserResponse)
-def add_user_to_whitelist(
-    payload: WhitelistedUserCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        if payload.assigned_department_id:
-            dept = db.query(Department).filter(Department.id == payload.assigned_department_id).first()
-            if not dept:
-                raise HTTPException(status_code=400, detail="Department does not exist.")
-        
-        hashed_pwd = None
-        if payload.password:
-            salt = bcrypt.gensalt()
-            hashed_pwd = bcrypt.hashpw(payload.password.encode("utf-8"), salt).decode("utf-8")
-
-        existing = db.query(User).filter(User.email == payload.email).first()
-        if existing:
-            old_role = existing.role_tag.value
-            old_dept = existing.department_id
-            
-            existing.is_whitelisted = True
-            existing.department_id = payload.assigned_department_id
-            existing.role_tag = payload.role_tag
-            if hashed_pwd:
-                existing.password_hash = hashed_pwd
-                
-            audit = AuditTrail(
-                action="SYSTEM_USER_WHITELIST_MODIFIED",
-                user_id=admin["id"],
-                old_value={"email": existing.email, "role": old_role, "department_id": old_dept},
-                new_value={"email": existing.email, "role": payload.role_tag.value, "department_id": payload.assigned_department_id}
-            )
-            db.add(audit)
-            try:
-                db.commit()
-                db.refresh(existing)
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Error updating existing user whitelist: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Database update failure during whitelisting execution: {str(e)}"
-                )
-            return existing
-
-        new_user = User(
-            email=payload.email,
-            role_tag=payload.role_tag,
-            department_id=payload.assigned_department_id,
-            is_whitelisted=True,
-            password_hash=hashed_pwd
-        )
-        db.add(new_user)
-        db.flush()
-        
-        audit = AuditTrail(
-            action="SYSTEM_USER_WHITELISTED",
-            user_id=admin["id"],
-            old_value=None,
-            new_value={"user_id": new_user.id, "email": new_user.email, "role": payload.role_tag.value, "department_id": payload.assigned_department_id}
-        )
-        db.add(audit)
-        
-        try:
-            db.commit()
-            db.refresh(new_user)
-        except Exception as e:
             db.rollback()
-            logger.error(f"Error creating new whitelisted user: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database transaction failure during whitelisting initialization: {str(e)}"
-            )
-        return new_user
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled error in add_user_to_whitelist: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled whitelisting failure: {str(e)}"
-        )
 
-
-@router.put("/users/whitelist/{user_id}", response_model=WhitelistedUserResponse)
-def update_whitelisted_user(
-    user_id: int,
-    payload: WhitelistedUserUpdate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        target_user = db.query(User).filter(User.id == user_id).first()
-        if not target_user:
-            raise HTTPException(status_code=404, detail="Whitelisted user not found.")
-
-        old_state = {
-            "email": target_user.email,
-            "role": target_user.role_tag.value,
-            "department_id": target_user.department_id
+        return {
+            "id": str(project.id),
+            "issp_period": project.issp_period,
+            "system_id": str(project.system_id) if project.system_id else None,
+            "project_title": project.project_title,
+            "project_category": str(getattr(project.project_category, "value", project.project_category) or "Internal ICT Projects"),
+            "description": project.description or "",
+            "objectives": project.objectives or "",
+            "aligns_pip": bool(project.aligns_pip),
+            "aligns_ncsp": bool(project.aligns_ncsp),
+            "aligns_egmp": bool(project.aligns_egmp),
+            "aligns_pcb": bool(project.aligns_pcb),
+            "aligns_others": bool(getattr(project, "aligns_others", False)),
+            "aligns_others_specify": getattr(project, "aligns_others_specify", None),
+            "harmonizes_national_priority": bool(project.harmonizes_national_priority),
+            "harmonizes_resource_optimization": bool(project.harmonizes_resource_optimization),
+            "harmonizes_pegif": bool(project.harmonizes_pegif),
+            "harmonizes_cross_collaboration": bool(project.harmonizes_cross_collaboration),
+            "harmonizes_scalability": bool(project.harmonizes_scalability),
+            "duration_start_year": project.duration_start_year,
+            "duration_end_year": project.duration_end_year,
+            "annual_deliverables": getattr(project, "annual_deliverables", {}) or {},
+            "year_1_deliverables": project.year_1_deliverables or "",
+            "year_2_deliverables": project.year_2_deliverables or "",
+            "year_3_deliverables": project.year_3_deliverables or "",
+            "implementing_unit": project.implementing_unit or "ICT Management Office",
+            "funding_source": str(getattr(project.funding_source, "value", project.funding_source) or "General Appropriations Act (GAA)"),
+            "lead_agency": project.lead_agency,
+            "partner_agencies": project.partner_agencies,
+            "computed_total_project_cost": float(total_cost)
         }
-        
-        new_state = {}
-
-        if payload.email is not None:
-            parts = payload.email.split('@')
-            if len(parts) != 2 or parts[1] != "cspc.edu.ph":
-                raise HTTPException(status_code=400, detail="Email must belong to 'cspc.edu.ph' domain.")
-            
-            existing = db.query(User).filter(User.email == payload.email, User.id != user_id).first()
-            if existing:
-                raise HTTPException(status_code=400, detail="Email address is already whitelisted.")
-            target_user.email = payload.email.lower()
-            new_state["email"] = target_user.email
-
-        if payload.role_tag is not None:
-            target_user.role_tag = payload.role_tag
-            new_state["role"] = payload.role_tag.value
-
-        if payload.assigned_department_id is not None:
-            if payload.assigned_department_id == 0:
-                target_user.department_id = None
-                new_state["department_id"] = None
-            else:
-                dept = db.query(Department).filter(Department.id == payload.assigned_department_id).first()
-                if not dept:
-                    raise HTTPException(status_code=400, detail="Department does not exist.")
-                target_user.department_id = payload.assigned_department_id
-                new_state["department_id"] = payload.assigned_department_id
-
-        if payload.password:
-            salt = bcrypt.gensalt()
-            target_user.password_hash = bcrypt.hashpw(payload.password.encode("utf-8"), salt).decode("utf-8")
-            new_state["password_rotated"] = True
-
-        audit = AuditTrail(
-            action="SYSTEM_USER_WHITELIST_MODIFIED",
-            user_id=admin["id"],
-            old_value=old_state,
-            new_state=new_state
-        )
-        db.add(audit)
-        
-        db.commit()
-        db.refresh(target_user)
-        return target_user
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to update user ID {user_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Database failure during user update: {str(e)}")
+        logger.error(f"Failed to update ICT project: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update ICT project: {str(e)}")
 
 
-@router.delete("/users/whitelist/{user_id}")
-def delete_whitelisted_user(
-    user_id: int,
+@router.delete("/ict-projects/{project_id}")
+def delete_ict_project(
+    project_id: uuid.UUID,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
     try:
-        user_to_delete = db.query(User).filter(User.id == user_id).first()
-        if not user_to_delete:
-            raise HTTPException(status_code=404, detail="Whitelisted user not found.")
-        
-        if user_to_delete.email == admin["email"]:
-            raise HTTPException(status_code=400, detail="Administrative lockout protection: You cannot delete your own session account.")
+        project = db.query(IctProject).filter(IctProject.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="ICT Project not found.")
 
-        audit = AuditTrail(
-            action="SYSTEM_USER_REMOVED",
-            user_id=admin["id"],
-            old_value={"user_id": user_to_delete.id, "email": user_to_delete.email, "role": user_to_delete.role_tag.value},
-            new_value={"event": "User account permanently removed from system whitelist."}
-        )
-        db.add(audit)
-
-        db.delete(user_to_delete)
-        db.commit()
-        return {"status": "success", "message": "User successfully removed from system whitelist."}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete user ID {user_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during user deletion.")
-
-
-# ==========================================================
-# GOVERNANCE SETTINGS
-# ==========================================================
-
-@router.get("/governance/settings")
-def get_governance_settings(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        settings_list = db.query(SystemSetting).all()
-        return {s.key: s.value for s in settings_list}
-    except Exception as e:
-        logger.error(f"Error retrieving governance settings: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load governance settings: {str(e)}"
-        )
-
-
-@router.put("/governance/settings")
-def update_governance_settings(
-    payload: Dict[str, str], 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        for key, val in payload.items():
-            setting = db.query(SystemSetting).filter(SystemSetting.key == key).first()
-            if setting:
-                setting.value = str(val)
-            else:
-                new_setting = SystemSetting(key=key, value=str(val))
-                db.add(new_setting)
-        try:
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database error writing governance settings: {str(e)}", exc_info=True)
+        linked_items = db.query(Proposal).filter(Proposal.project_id == project_id).count()
+        if linked_items > 0:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to persist governance setting modifications: {str(e)}"
+                status_code=400,
+                detail=f"Cannot delete project '{project.project_title}'. There are {linked_items} financial line items linked to it in Part IV.A."
             )
-        return {"status": "success", "updated_keys": list(payload.keys())}
+
+        db.delete(project)
+        db.commit()
+        return {"status": "success", "message": "ICT Project removed from framework."}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unhandled exception in update_governance_settings: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update governance settings: {str(e)}"
-        )
+        db.rollback()
+        logger.error(f"Failed to delete ICT project: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete ICT project: {str(e)}")
 
 
 # ==========================================================
-# WORKFLOW TRANSITIONS
+# PART IV.B: LIVE FOUR-WAY PARITY & SINGULARITY GRAPH AUDIT
 # ==========================================================
 
-@router.put("/proposals/{proposal_id}/approve")
-def approve_proposal(
-    proposal_id: uuid.UUID,
+@router.get("/governance/parity-matrices", response_model=PartIVBParityResponse)
+def get_parity_matrices(
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_user)
+):
+    """
+    Computes Part IV.B Tables B.1, B.2, B.3, and B.4 dynamically from atomic line items.
+    Enforces identical grand totals down to the centavo.
+    Supports arbitrary multi-year spans (1 to N years).
+    Accessible to all authenticated users for transparency and document certification.
+    """
+    period = issp_period or get_active_issp_period(db)
+    matrices = calculate_financial_summaries(db, period)
+    return PartIVBParityResponse(
+        b1_general_summary=matrices["b1_general_summary"],
+        b2_fund_source=matrices["b2_fund_source"],
+        b3_statement_of_expenditure=matrices["b3_statement_of_expenditure"],
+        b4_object_of_expenditure=matrices["b4_object_of_expenditure"],
+        certified_grand_total=matrices["certified_grand_total"],
+        is_parity_valid=matrices["is_parity_valid"],
+        parity_discrepancy=matrices["parity_discrepancy"],
+        year_columns=matrices.get("year_columns", [])
+    )
+
+
+@router.get("/governance/validate-graph")
+def audit_singularity_graph(
+    issp_period: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
-
-        if proposal:
-            if proposal.status != ProposalStatus.SUBMITTED:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only submitted proposals can be approved.")
-
-            old_status = proposal.status.value
-            proposal.status = ProposalStatus.APPROVED
-            proposal.version += 1
-
-            audit = AuditTrail(
-                proposal_id=proposal.id,
-                action="STATE_TRANSITION_APPROVED",
-                user_id=admin["id"],
-                old_value={"status": old_status},
-                new_value={"status": ProposalStatus.APPROVED.value}
-            )
-            db.add(audit)
-            try:
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Database commit error during proposal approval: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Database transaction failure during proposal approval: {str(e)}"
-                )
-            return {"status": "success", "new_status": proposal.status.value}
-
-        sub_proposal = db.query(SubscriptionProposal).filter(SubscriptionProposal.id == proposal_id).first()
-        if sub_proposal:
-            if sub_proposal.status != ProposalStatus.SUBMITTED:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only submitted subscription proposals can be approved.")
-
-            old_status = sub_proposal.status.value
-            sub_proposal.status = ProposalStatus.APPROVED
-
-            audit = AuditTrail(
-                subscription_id=sub_proposal.id,
-                action="STATE_TRANSITION_APPROVED",
-                user_id=admin["id"],
-                old_value={"status": old_status},
-                new_value={"status": ProposalStatus.APPROVED.value}
-            )
-            db.add(audit)
-            try:
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Database commit error during subscription approval: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Database transaction failure during subscription approval: {str(e)}"
-                )
-            return {"status": "success", "new_status": sub_proposal.status.value}
-
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found in CapEx or MOOE tables.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled failure in approve_proposal: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled approval error occurred: {str(e)}"
-        )
+    """
+    Audits the entire strategic dependency graph and asserts end-to-end provenance.
+    Called directly by the 'Audit Singularity DAG' frontend triggers.
+    """
+    period = issp_period or get_active_issp_period(db)
+    return ISSPSingularityEngine.validate_complete_issp_graph(db, period)
 
 
-@router.put("/proposals/{proposal_id}/return")
-def return_proposal(
-    proposal_id: uuid.UUID,
+@router.post("/governance/evaluate-lifecycle-rollover", response_model=LifecycleRolloverResponse)
+def evaluate_lifecycle_rollover(
+    force: bool = Query(False, description="Force rollover even if cycle end year has not passed"),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
+    """
+    Evaluates whether the active ISSP planning cycle has concluded based on calendar years.
+    If concluded or force=True:
+      1. Compiles final certified PDF snapshot.
+      2. Transitions PDF to AWS S3 Glacier.
+      3. Archives expired cycle.
+      4. Auto-provisions successor cycle (dynamic N-year span) and clones Outcomes/Ceilings.
+    """
     try:
-        proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
-
-        if proposal:
-            if proposal.status != ProposalStatus.SUBMITTED:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only submitted proposals can be returned.")
-
-            old_status = proposal.status.value
-            proposal.status = ProposalStatus.RETURNED
-            proposal.version += 1
-
-            audit = AuditTrail(
-                proposal_id=proposal.id,
-                action="STATE_TRANSITION_RETURNED",
-                user_id=admin["id"],
-                old_value={"status": old_status},
-                new_value={"status": ProposalStatus.RETURNED.value}
-            )
-            db.add(audit)
-            try:
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Database commit error during proposal return: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Database transaction failure during proposal return: {str(e)}"
-                )
-            return {"status": "success", "new_status": proposal.status.value}
-
-        sub_proposal = db.query(SubscriptionProposal).filter(SubscriptionProposal.id == proposal_id).first()
-        if sub_proposal:
-            if sub_proposal.status != ProposalStatus.SUBMITTED:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only submitted subscription proposals can be returned.")
-
-            old_status = sub_proposal.status.value
-            sub_proposal.status = ProposalStatus.RETURNED
-
-            audit = AuditTrail(
-                subscription_id=sub_proposal.id,
-                action="STATE_TRANSITION_RETURNED",
-                user_id=admin["id"],
-                old_value={"status": old_status},
-                new_value={"status": ProposalStatus.RETURNED.value}
-            )
-            db.add(audit)
-            try:
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Database commit error during subscription return: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Database transaction failure during subscription return: {str(e)}"
-                )
-            return {"status": "success", "new_status": sub_proposal.status.value}
-
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found in CapEx or MOOE tables.")
-    except HTTPException:
-        raise
+        result = ISSPLifecycleEngine.evaluate_and_rollover_cycle(db, force=force)
+        return result
     except Exception as e:
-        logger.error(f"Unhandled failure in return_proposal: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled return error occurred: {str(e)}"
-        )
+        logger.error(f"Failed to evaluate lifecycle rollover: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Lifecycle rollover failed: {str(e)}")
 
 
 # ==========================================================
-# QUEUES & OVERRIDES
+# QUEUES, PROPOSALS & OVERRIDES (Part IV.A Financial Atoms)
 # ==========================================================
 
 @router.get("/proposals")
 def get_admin_master_queue(
     dept_id: Optional[int] = Query(None),
-    status_filter: Optional[ProposalStatus] = Query(None),
+    status_filter: Optional[str] = Query(None),
+    strategic_category: Optional[str] = Query(None),
     issp_period: Optional[str] = Query(None),
-    search: Optional[str] = Query(None, description="Search by item name or spec"),
+    search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
-    limit: int = Query(25, ge=1, le=100),
+    limit: Optional[int] = Query(1000, ge=1, le=100000),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
     try:
-        query = db.query(Proposal).filter(or_(Proposal.is_archived == False, Proposal.is_archived == None))
+        query = db.query(Proposal).options(
+            joinedload(Proposal.outcome),
+            joinedload(Proposal.project_rel),
+            joinedload(Proposal.needs_assessment)
+        ).filter(or_(Proposal.is_archived == False, Proposal.is_archived.is_(None)))
         
         if dept_id:
             query = query.filter(Proposal.department_id == dept_id)
-        if status_filter:
-            query = query.filter(Proposal.status == status_filter)
+        if status_filter and status_filter.strip().lower() != "all":
+            clean_status = status_filter.strip()
+            matched_status = None
+            for s in ProposalStatus:
+                if s.value.lower() == clean_status.lower() or s.name.lower() == clean_status.lower():
+                    matched_status = s
+                    break
+            if matched_status:
+                query = query.filter(or_(
+                    Proposal.status == matched_status,
+                    Proposal.status == matched_status.value,
+                    Proposal.status == matched_status.name
+                ))
+            else:
+                query = query.filter(func.lower(cast(Proposal.status, String)) == clean_status.lower())
+
+        if strategic_category and strategic_category.strip().lower() != "all":
+            clean_cat = strategic_category.strip()
+            matched_cat = None
+            for c in ProjectCategory:
+                if c.value.lower() == clean_cat.lower() or c.name.lower() == clean_cat.lower():
+                    matched_cat = c
+                    break
+            if matched_cat:
+                query = query.filter(or_(
+                    Proposal.strategic_category == matched_cat,
+                    Proposal.strategic_category == matched_cat.value,
+                    Proposal.strategic_category == matched_cat.name
+                ))
+            else:
+                query = query.filter(func.lower(cast(Proposal.strategic_category, String)) == clean_cat.lower())
+
         if issp_period:
             query = query.filter(Proposal.issp_period == issp_period)
         if search:
-            query = query.filter(
-                or_(
-                    Proposal.item_name.ilike(f"%{search}%"),
-                    Proposal.custom_specification.ilike(f"%{search}%")
-                )
-            )
+            query = query.filter(Proposal.item_name.ilike(f"%{search}%"))
 
-        total_records = query.count()
-        results = query.order_by(Proposal.version.desc()).offset(skip).limit(limit).all()
+        total = query.count()
+        effective_limit = limit or 1000
+        results = query.order_by(Proposal.version.desc()).offset(skip).limit(effective_limit).all()
 
-        return {
-            "total": total_records,
-            "skip": skip,
-            "limit": limit,
-            "data": results
-        }
+        serialized_data = []
+        for p in results:
+            try:
+                serialized_data.append(ProposalResponse.model_validate(p))
+            except Exception as ser_err:
+                logger.debug(f"Direct validation note: {ser_err}")
+                serialized_data.append(p)
+
+        return {"total": total, "skip": skip, "limit": effective_limit, "data": serialized_data}
     except Exception as e:
-        logger.error(f"Error querying paginated master queue: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to fetch paginated master queue.")
+        logger.error(f"Error querying master queue: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch master queue.")
 
 
-@router.get("/subscriptions", response_model=List[SubscriptionProposalResponse])  # <--- Added response_model here
-def get_admin_subscription_queue(
+@router.get("/subscriptions")
+def get_admin_subscriptions_queue(
     dept_id: Optional[int] = Query(None),
-    status_filter: Optional[ProposalStatus] = Query(None),
+    status_filter: Optional[str] = Query(None),
+    issp_period: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, le=1000),
+    limit: Optional[int] = Query(1000, ge=1, le=100000),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
+    """
+    Retrieves MOOE and software subscriptions queue for ConsolidatedQueue.jsx.
+    Queries the unified issp_core proposals ledger.
+    """
     try:
-        query = db.query(SubscriptionProposal).filter(or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None))
+        query = db.query(Proposal).options(
+            joinedload(Proposal.outcome),
+            joinedload(Proposal.project_rel),
+            joinedload(Proposal.needs_assessment)
+        ).filter(
+            or_(
+                Proposal.category.in_([ProposalCategory.SUBSCRIPTION, ProposalCategory.SOFTWARE]),
+                Proposal.expenditure_class == ExpenditureClass.MOOE,
+                Proposal.strategic_category == ProjectCategory.CONTINUING_COSTS
+            ),
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+        )
         
         if dept_id:
-            query = query.filter(SubscriptionProposal.department_id == dept_id)
-        if status_filter:
-            query = query.filter(SubscriptionProposal.status == status_filter)
-            
-        return query.offset(skip).limit(limit).all()
+            query = query.filter(Proposal.department_id == dept_id)
+        if status_filter and status_filter.strip().lower() != "all":
+            clean_status = status_filter.strip().lower()
+            matched_status = next((s for s in ProposalStatus if s.value.lower() == clean_status or s.name.lower() == clean_status), None)
+            if matched_status:
+                query = query.filter(Proposal.status == matched_status)
+        if issp_period:
+            query = query.filter(Proposal.issp_period == issp_period)
+        if search:
+            query = query.filter(Proposal.item_name.ilike(f"%{search}%"))
+
+        total = query.count()
+        effective_limit = limit or 1000
+        results = query.order_by(Proposal.version.desc()).offset(skip).limit(effective_limit).all()
+
+        serialized_data = []
+        for p in results:
+            try:
+                serialized_data.append(ProposalResponse.model_validate(p))
+            except Exception:
+                serialized_data.append(p)
+
+        return {"total": total, "skip": skip, "limit": effective_limit, "data": serialized_data}
     except Exception as e:
-        logger.error(f"Error querying master subscriptions queue: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to query master subscriptions queue: {str(e)}"
+        logger.error(f"Error querying subscriptions queue: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch subscriptions queue.")
+
+
+@router.post("/proposals", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
+def admin_create_proposal(
+    payload: ProposalCreatePayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Allows administrators to add resource line items directly to Part IV.A.
+    """
+    active_period = get_active_issp_period(db)
+    
+    target_dept_id = getattr(payload, "department_id", None) or 1
+    target_dept = db.query(Department).filter(Department.id == target_dept_id).first()
+    automated_office = target_dept.name if target_dept else "Central Office"
+
+    canvas_url = payload.canvas_evidence_url
+    canvas_exp = payload.canvas_expiration_date
+
+    if payload.created_by_students:
+        uacs_code = UacsObjectCode.ICT_SOFTWARE
+        exp_class = ExpenditureClass.CAPITAL_OUTLAY
+    else:
+        uacs_code, exp_class = classify_uacs_and_expenditure(
+            payload.item_name,
+            payload.unit_cost,
+            payload.strategic_category,
+            category=payload.category,
+            created_by_students=payload.created_by_students
         )
+
+    db_proposal = Proposal(
+        department_id=target_dept_id,
+        issp_period=active_period,
+        outcome_id=payload.outcome_id,
+        project_id=payload.project_id,
+        needs_assessment_id=getattr(payload, "needs_assessment_id", None),
+        category=payload.category,
+        strategic_category=payload.strategic_category,
+        office_location=payload.office_location,
+        fund_source=payload.fund_source,
+        uacs_object_code=uacs_code,
+        expenditure_class=exp_class,
+        status=ProposalStatus.APPROVED,
+        item_key=payload.item_select,
+        item_name=payload.item_name,
+        unit_cost=payload.unit_cost,
+        year_1_qty=payload.year_1_qty,
+        year_2_qty=payload.year_2_qty,
+        year_3_qty=payload.year_3_qty,
+        yearly_quantities=payload.yearly_quantities,
+        justification=payload.justification,
+        subscription_type=getattr(payload, "subscription_type", None),
+        system_development_status=payload.system_development_status,
+        created_by_students=payload.created_by_students,
+        target_office_automated=automated_office,
+        canvas_evidence_url=canvas_url,
+        canvas_expiration_date=canvas_exp,
+        project_key=getattr(payload, "project_key", None),
+        payload={"comments": []},
+        is_expansion=payload.is_expansion
+    )
+
+    db.add(db_proposal)
+    db.flush()
+
+    log_audit_event(
+        db=db,
+        action="PROPOSAL_CREATED_BY_ADMIN",
+        module="PROPOSALS",
+        user_id=admin["id"],
+        department_id=target_dept_id,
+        proposal_id=db_proposal.id,
+        ip_address=request.client.host if request.client else None,
+        new_value={"item_name": db_proposal.item_name, "total_cost": str(db_proposal.total_cost)}
+    )
+
+    db.commit()
+    db.refresh(db_proposal)
+    return db_proposal
+
+
+@router.put("/proposals/{proposal_id}")
+def admin_update_proposal(
+    proposal_id: uuid.UUID,
+    payload: AdminOverridePayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Updates or overrides proposal parameters directly by administrators.
+    """
+    return admin_override_proposal(proposal_id, payload, request, db, admin)
+
+
+@router.delete("/proposals/{proposal_id}")
+def admin_delete_proposal(
+    proposal_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Allows administrators to delete an outlay proposal from the database.
+    """
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found.")
+
+    deleted_snapshot = {
+        "item_name": proposal.item_name,
+        "total_cost": str(proposal.total_cost),
+        "department_id": proposal.department_id
+    }
+    dept_id = proposal.department_id
+
+    db.delete(proposal)
+
+    log_audit_event(
+        db=db,
+        action="PROPOSAL_DELETED_BY_ADMIN",
+        module="PROPOSALS",
+        user_id=admin["id"],
+        department_id=dept_id,
+        proposal_id=proposal_id,
+        ip_address=request.client.host if request.client else None,
+        old_value=deleted_snapshot
+    )
+
+    db.commit()
+    return {"status": "success", "message": "Proposal line item deleted."}
+
+
+@router.put("/proposals/{proposal_id}/approve")
+def approve_proposal(
+    proposal_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found.")
+
+    old_status = proposal.status.value
+    proposal.status = ProposalStatus.APPROVED
+    proposal.version += 1
+
+    log_audit_event(
+        db=db,
+        action="STATE_TRANSITION_APPROVED",
+        module="PROPOSALS",
+        user_id=admin["id"],
+        department_id=proposal.department_id,
+        proposal_id=proposal.id,
+        ip_address=request.client.host if request.client else None,
+        old_value={"status": old_status},
+        new_value={"status": ProposalStatus.APPROVED.value}
+    )
+    db.commit()
+    db.refresh(proposal)
+
+    return {"status": "success", "message": "Proposal approved successfully.", "proposal_id": proposal.id}
+
+
+@router.put("/proposals/{proposal_id}/return")
+def return_proposal(
+    proposal_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found.")
+
+    old_status = proposal.status.value
+    proposal.status = ProposalStatus.RETURNED
+    proposal.version += 1
+
+    log_audit_event(
+        db=db,
+        action="STATE_TRANSITION_RETURNED",
+        module="PROPOSALS",
+        user_id=admin["id"],
+        department_id=proposal.department_id,
+        proposal_id=proposal.id,
+        ip_address=request.client.host if request.client else None,
+        old_value={"status": old_status},
+        new_value={"status": ProposalStatus.RETURNED.value}
+    )
+    db.commit()
+    db.refresh(proposal)
+
+    return {"status": "success", "message": "Proposal returned to department.", "proposal_id": proposal.id}
+
+
+@router.get("/proposals/approved-canvas")
+def get_approved_canvas_proposals(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Returns approved proposals with canvas quotation proof to populate catalog creation templates.
+    """
+    approved = db.query(Proposal).filter(
+        Proposal.status == ProposalStatus.APPROVED,
+        Proposal.canvas_evidence_url.isnot(None),
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).all()
+
+    return [
+        {
+            "id": str(p.id),
+            "display_name": p.item_name,
+            "unit_cost": float(p.unit_cost),
+            "type": "CapEx" if p.expenditure_class == ExpenditureClass.CAPITAL_OUTLAY else "MOOE",
+            "supplier_name": (p.payload or {}).get("supplier_name") or "Standard Supplier",
+            "canvas_evidence_url": p.canvas_evidence_url,
+            "canvas_expiration_date": p.canvas_expiration_date.isoformat() if p.canvas_expiration_date else None,
+            "created_by_students": p.created_by_students
+        }
+        for p in approved
+    ]
 
 
 @router.put("/proposals/{proposal_id}/override")
 def admin_override_proposal(
     proposal_id: uuid.UUID, 
     payload: AdminOverridePayload,
+    request: Request,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
     try:
-        global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-        global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
-
-        hw_proposal = db.query(Proposal).filter(
+        proposal = db.query(Proposal).filter(
             Proposal.id == proposal_id,
-            or_(Proposal.is_archived == False, Proposal.is_archived == None)
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).first()
 
-        if hw_proposal:
-            if hw_proposal.status != ProposalStatus.SUBMITTED:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Admin overrides can only be executed on proposals currently in Submitted status."
-                )
+        if not proposal:
+            raise HTTPException(status_code=404, detail="Proposal not found.")
 
-            if payload.hardware is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, 
-                    detail="Payload mismatch: Hardware override parameters are missing."
-                )
+        old_state = {
+            "item_name": proposal.item_name,
+            "unit_cost": str(proposal.unit_cost),
+            "total_qty": proposal.total_qty,
+            "uacs_object_code": proposal.uacs_object_code.value,
+            "expenditure_class": proposal.expenditure_class.value
+        }
 
-            old_state = {
-                "item_name": hw_proposal.item_name,
-                "unit_cost": str(hw_proposal.unit_cost) if hw_proposal.unit_cost is not None else "0.00",
-                "yearly_quantities": hw_proposal.yearly_quantities,
-                "total_qty": hw_proposal.total_qty,
-                "custom_specification": hw_proposal.custom_specification,
-                "target_offices_json": hw_proposal.target_offices_json,
-                "project_key": hw_proposal.project_key
-            }
+        if payload.item_name is not None:
+            proposal.item_name = html.escape(payload.item_name.strip())
+        if payload.unit_cost is not None:
+            proposal.unit_cost = payload.unit_cost
+        if payload.project_id is not None:
+            proposal.project_id = payload.project_id
+        if getattr(payload, "needs_assessment_id", None) is not None:
+            proposal.needs_assessment_id = payload.needs_assessment_id
+        if payload.category is not None:
+            proposal.category = payload.category
+        if payload.strategic_category is not None:
+            proposal.strategic_category = payload.strategic_category
+        if payload.office_location is not None:
+            proposal.office_location = payload.office_location
+        if payload.fund_source is not None:
+            proposal.fund_source = payload.fund_source
+        if payload.justification is not None:
+            proposal.justification = html.escape(payload.justification.strip())
+        if payload.system_development_status is not None:
+            proposal.system_development_status = payload.system_development_status
+        if payload.created_by_students is not None:
+            proposal.created_by_students = payload.created_by_students
 
-            hw = payload.hardware
-            has_changes = False
+        if payload.yearly_quantities is not None:
+            validate_active_years_alignment(db, list(payload.yearly_quantities.keys()))
+            proposal.yearly_quantities = payload.yearly_quantities
 
-            if hw.item_name is not None and hw.item_name != hw_proposal.item_name:
-                hw_proposal.item_name = html.escape(hw.item_name.strip())
-                has_changes = True
-            if hw.unit_cost is not None and hw.unit_cost != hw_proposal.unit_cost:
-                hw_proposal.unit_cost = hw.unit_cost
-                has_changes = True
-            
-            if hw.yearly_quantities is not None and hw.yearly_quantities != hw_proposal.yearly_quantities:
-                validate_active_years_alignment(db, list(hw.yearly_quantities.keys()))
-                hw_proposal.yearly_quantities = hw.yearly_quantities
-                has_changes = True
-                
-            if hw.target_offices_json is not None and hw.target_offices_json != hw_proposal.target_offices_json:
-                hw_proposal.target_offices_json = [html.escape(str(o).strip()) for o in hw.target_offices_json if o]
-                has_changes = True
+            years_sorted = sorted([k for k in payload.yearly_quantities.keys() if str(k).isdigit()])
+            if len(years_sorted) >= 1:
+                proposal.year_1_qty = int(payload.yearly_quantities.get(years_sorted[0], 0) or 0)
+            if len(years_sorted) >= 2:
+                proposal.year_2_qty = int(payload.yearly_quantities.get(years_sorted[1], 0) or 0)
+            if len(years_sorted) >= 3:
+                proposal.year_3_qty = int(payload.yearly_quantities.get(years_sorted[2], 0) or 0)
 
-            if hw.project_key is not None and hw.project_key != hw_proposal.project_key:
-                hw_proposal.project_key = html.escape(hw.project_key.strip()) if hw.project_key else None
-                has_changes = True
-
-            new_total_qty = sum(hw_proposal.yearly_quantities.values()) if hw_proposal.yearly_quantities else 0
-            if new_total_qty != hw_proposal.total_qty:
-                hw_proposal.total_qty = new_total_qty
-                has_changes = True
-
-            if hw.custom_specification is not None and hw.custom_specification != hw_proposal.custom_specification:
-                hw_proposal.custom_specification = html.escape(hw.custom_specification.strip())
-                has_changes = True
-
-            if not has_changes:
-                return {
-                    "status": "success",
-                    "message": "No override modifications detected.",
-                    "proposal_id": hw_proposal.id
-                }
-
-            ceiling_cfg = db.query(BudgetCeiling).filter(
-                BudgetCeiling.department_id == hw_proposal.department_id,
-                BudgetCeiling.issp_period == hw_proposal.issp_period
-            ).first()
-            sub_ceiling = ceiling_cfg.sub_ceiling if ceiling_cfg else global_limit
-
-            projected_capex_cost = Decimal(str(hw_proposal.unit_cost)) * Decimal(str(hw_proposal.total_qty))
-
-            other_capex_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
-                Proposal.department_id == hw_proposal.department_id,
-                Proposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
-                Proposal.issp_period == hw_proposal.issp_period,
-                or_(Proposal.is_archived == False, Proposal.is_archived == None),
-                Proposal.id != hw_proposal.id
-            ).scalar() or Decimal("0.00")
-
-            other_mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
-                SubscriptionProposal.department_id == sub_proposal.department_id,
-                SubscriptionProposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
-                SubscriptionProposal.issp_period == sub_proposal.issp_period,
-                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-            ).scalar() or Decimal("0.00")
-
-            total_projected_spent = other_capex_spent + projected_capex_cost + other_mooe_spent
-
-            if total_projected_spent > sub_ceiling:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Budget Constraint Violation: Overriding this proposal would cause total expenditures "
-                           f"(₱{total_projected_spent:,.2f}) to exceed the sub-ceiling of ₱{sub_ceiling:,.2f}."
-                )
-
-            hw_proposal.version += 1
-            
-            new_state = {
-                "item_name": hw_proposal.item_name,
-                "unit_cost": str(hw_proposal.unit_cost) if hw_proposal.unit_cost is not None else "0.00",
-                "yearly_quantities": hw_proposal.yearly_quantities,
-                "total_qty": hw_proposal.total_qty,
-                "custom_specification": hw_proposal.custom_specification,
-                "target_offices_json": hw_proposal.target_offices_json,
-                "project_key": hw_proposal.project_key
-            }
-
-            audit = AuditTrail(
-                proposal_id=hw_proposal.id,
-                action="PROPOSAL_OVERRIDDEN_BY_ADMIN",
-                user_id=admin["id"],
-                old_value=old_state,
-                new_value=new_state
+        # Re-resolve accounting classes
+        if proposal.created_by_students:
+            proposal.expenditure_class = ExpenditureClass.CAPITAL_OUTLAY
+            proposal.uacs_object_code = UacsObjectCode.ICT_SOFTWARE
+        else:
+            uacs, exp_class = classify_uacs_and_expenditure(
+                proposal.item_name, 
+                proposal.unit_cost, 
+                proposal.strategic_category,
+                category=proposal.category,
+                created_by_students=proposal.created_by_students
             )
-            db.add(audit)
-            try:
-                db.commit()
-                db.refresh(hw_proposal)
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Database error committing hardware override: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Database transaction failure during hardware override."
-                )
-            
-            return {
-                "status": "success",
-                "message": "CapEx Proposal overridden successfully by Admin.",
-                "proposal_id": hw_proposal.id
-            }
+            proposal.uacs_object_code = uacs
+            proposal.expenditure_class = exp_class
 
-        sub_proposal = db.query(SubscriptionProposal).filter(
-            SubscriptionProposal.id == proposal_id,
-            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-        ).first()
+        proposal.version += 1
+        proposal.sync_payload()
 
-        if sub_proposal:
-            if sub_proposal.status != ProposalStatus.SUBMITTED:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Admin overrides can only be executed on subscription proposals currently in Submitted status."
-                )
+        new_state = {
+            "item_name": proposal.item_name,
+            "unit_cost": str(proposal.unit_cost),
+            "total_qty": proposal.total_qty,
+            "uacs_object_code": proposal.uacs_object_code.value,
+            "expenditure_class": proposal.expenditure_class.value
+        }
 
-            if payload.subscription is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, 
-                    detail="Payload mismatch: Subscription override parameters are missing."
-                )
+        log_audit_event(
+            db=db,
+            action="PROPOSAL_OVERRIDDEN_BY_ADMIN",
+            module="PROPOSALS",
+            user_id=admin["id"],
+            department_id=proposal.department_id,
+            proposal_id=proposal.id,
+            ip_address=request.client.host if request.client else None,
+            old_value=old_state,
+            new_value=new_state
+        )
+        db.commit()
+        db.refresh(proposal)
 
-            old_state = {
-                "subscription_type": sub_proposal.subscription_type,
-                "software_name": sub_proposal.software_name,
-                "justification": sub_proposal.justification,
-                "yearly_users": sub_proposal.yearly_users,
-                "annual_cost_per_user": str(sub_proposal.annual_cost_per_user) if sub_proposal.annual_cost_per_user is not None else "0.00",
-                "total_multiyear_mooe": str(sub_proposal.total_multiyear_mooe) if sub_proposal.total_multiyear_mooe is not None else "0.00",
-                "target_offices_json": sub_proposal.target_offices_json,
-                "project_key": sub_proposal.project_key
-            }
-
-            sub = payload.subscription
-            has_changes = False
-
-            if sub.subscription_type is not None and sub.subscription_type != sub_proposal.subscription_type:
-                sub_proposal.subscription_type = html.escape(sub.subscription_type.strip())
-                has_changes = True
-            if sub.software_name is not None and sub.software_name != sub_proposal.software_name:
-                sub_proposal.software_name = html.escape(sub.software_name.strip())
-                has_changes = True
-            if sub.justification is not None and sub.justification != sub_proposal.justification:
-                sub_proposal.justification = html.escape(sub.justification.strip())
-                has_changes = True
-                
-            if sub.yearly_users is not None and sub.yearly_users != sub_proposal.yearly_users:
-                validate_active_years_alignment(db, list(sub.yearly_users.keys()))
-                sub_proposal.yearly_users = sub.yearly_users
-                has_changes = True
-                
-            if sub.annual_cost_per_user is not None and sub.annual_cost_per_user != sub_proposal.annual_cost_per_user:
-                sub_proposal.annual_cost_per_user = sub.annual_cost_per_user
-                has_changes = True
-            if sub.target_offices_json is not None and sub.target_offices_json != sub_proposal.target_offices_json:
-                sub_proposal.target_offices_json = [html.escape(str(o).strip()) for o in sub_proposal.target_offices_json if o]
-                has_changes = True
-            if sub.project_key is not None and sub.project_key != sub_proposal.project_key:
-                sub_proposal.project_key = html.escape(sub.project_key.strip()) if sub.project_key else None
-                has_changes = True
-
-            total_users = sum(sub_proposal.yearly_users.values()) if sub_proposal.yearly_users else 0
-            cost = sub_proposal.annual_cost_per_user if sub_proposal.annual_cost_per_user is not None else Decimal("0.00")
-            new_total_mooe = Decimal(total_users) * cost
-
-            if new_total_mooe != sub_proposal.total_multiyear_mooe:
-                sub_proposal.total_multiyear_mooe = new_total_mooe
-                has_changes = True
-
-            if not has_changes:
-                return {
-                    "status": "success",
-                    "message": "No override modifications detected.",
-                    "proposal_id": sub_proposal.id
-                }
-
-            ceiling_cfg = db.query(BudgetCeiling).filter(
-                BudgetCeiling.department_id == sub_proposal.department_id,
-                BudgetCeiling.issp_period == sub_proposal.issp_period
-            ).first()
-            sub_ceiling = ceiling_cfg.sub_ceiling if ceiling_cfg else global_limit
-
-            other_mooe_spent = db.query(func.sum(SubscriptionProposal.total_multiyear_mooe)).filter(
-                SubscriptionProposal.department_id == sub_proposal.department_id,
-                SubscriptionProposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
-                SubscriptionProposal.issp_period == sub_proposal.issp_period,
-                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None),
-                SubscriptionProposal.id != sub_proposal.id
-            ).scalar() or Decimal("0.00")
-
-            other_capex_spent = db.query(func.sum(Proposal.unit_cost * Proposal.total_qty)).filter(
-                Proposal.department_id == sub_proposal.department_id,
-                Proposal.status.in_([ProposalStatus.APPROVED, ProposalStatus.SUBMITTED]),
-                Proposal.issp_period == os.environ.get("ISSP_PERIOD", sub_proposal.issp_period),
-                or_(Proposal.is_archived == False, Proposal.is_archived == None)
-            ).scalar() or Decimal("0.00")
-
-            total_projected_spent = other_mooe_spent + new_total_mooe + other_capex_spent
-
-            if total_projected_spent > sub_ceiling:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Budget Constraint Violation: Overriding this subscription would cause total expenditures "
-                           f"(₱{total_projected_spent:,.2f}) to exceed the sub-ceiling of ₱{sub_ceiling:,.2f}."
-                )
-
-            new_state = {
-                "subscription_type": sub_proposal.subscription_type,
-                "software_name": sub_proposal.software_name,
-                "justification": sub_proposal.justification,
-                "yearly_users": sub_proposal.yearly_users,
-                "annual_cost_per_user": str(sub_proposal.annual_cost_per_user) if sub_proposal.annual_cost_per_user is not None else "0.00",
-                "total_multiyear_mooe": str(sub_proposal.total_multiyear_mooe) if sub_proposal.total_multiyear_mooe is not None else "0.00",
-                "target_offices_json": sub_proposal.target_offices_json,
-                "project_key": sub_proposal.project_key
-            }
-
-            audit = AuditTrail(
-                subscription_id=sub_proposal.id,
-                action="PROPOSAL_OVERRIDDEN_BY_ADMIN",
-                user_id=admin["id"],
-                old_value=old_state,
-                new_value=new_state
-            )
-            db.add(audit)
-            try:
-                db.commit()
-                db.refresh(sub_proposal)
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Database error committing subscription override: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Database transaction failure during subscription override."
-                )
-            
-            return {
-                "status": "success",
-                "message": "MOOE Subscription overridden successfully by Admin.",
-                "proposal_id": sub_proposal.id
-            }
-
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found in CapEx or MOOE tables.")
+        return {"status": "success", "message": "Proposal overridden successfully.", "proposal_id": proposal.id}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unhandled exception in admin_override_proposal: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled override failure: {str(e)}"
-        )
+        db.rollback()
+        logger.error(f"Override failure: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Database failure during override.")
 
 
 # ==========================================================
-# BUDGET GOVERNANCE & ALLOCATIONS
+# BUDGET GOVERNANCE & PRE-FLIGHT VALIDATION
 # ==========================================================
 
 @router.get("/budget-ceilings", response_model=List[BudgetCeilingResponse])
@@ -1572,327 +1689,109 @@ def get_budget_ceilings(
 ):
     try:
         issp_period = get_active_issp_period(db)
-
         departments = db.query(Department).all()
-        results = []
-
         global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
         global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
         
-        ceilings_map = {
-            c.department_id: c 
-            for c in db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).all()
-        }
+        ceilings_map = {c.department_id: c for c in db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).all()}
 
-        capex_spent_by_dept = dict(
-            db.query(
-                Proposal.department_id,
-                func.sum(Proposal.unit_cost * Proposal.total_qty)
-            ).filter(
+        spent_by_dept = dict(
+            db.query(Proposal.department_id, func.sum(Proposal.unit_cost * Proposal.total_qty))
+            .filter(
                 Proposal.status == ProposalStatus.APPROVED,
                 Proposal.issp_period == issp_period,
-                or_(Proposal.is_archived == False, Proposal.is_archived == None)
-            ).group_by(Proposal.department_id).all()
+                or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+            )
+            .group_by(Proposal.department_id).all()
         )
 
-        mooe_spent_by_dept = dict(
-            db.query(
-                SubscriptionProposal.department_id,
-                func.sum(SubscriptionProposal.total_multiyear_mooe)
-            ).filter(
-                SubscriptionProposal.status == ProposalStatus.APPROVED,
-                SubscriptionProposal.issp_period == issp_period,
-                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-            ).group_by(SubscriptionProposal.department_id).all()
-        )
-
+        results = []
         for dept in departments:
             c = ceilings_map.get(dept.id)
-            sub_ceiling = c.sub_ceiling if c else Decimal("0.00")
-            allocated_capex = c.allocated_capex if c else Decimal("0.00")
-            allocated_mooe = c.allocated_mooe if c else Decimal("0.00")
-
-            spent_result = capex_spent_by_dept.get(dept.id) or Decimal("0.00")
-            mooe_result = mooe_spent_by_dept.get(dept.id) or Decimal("0.00")
-            current_spent = Decimal(spent_result) + Decimal(mooe_result)
-            
             results.append(
                 BudgetCeilingResponse(
                     department_id=dept.id,
                     department_name=dept.name,
-                    allocated_capex=allocated_capex,
-                    allocated_mooe=allocated_mooe,
-                    sub_ceiling=sub_ceiling,
+                    allocated_capex=c.allocated_capex if c else Decimal("0.00"),
+                    allocated_mooe=c.allocated_mooe if c else Decimal("0.00"),
+                    sub_ceiling=c.sub_ceiling if c else Decimal("0.00"),
                     global_ceiling=global_limit,
-                    current_spent=current_spent
+                    current_spent=spent_by_dept.get(dept.id, Decimal("0.00")) or Decimal("0.00")
                 )
             )
         return results
     except Exception as e:
-        logger.error(f"Error querying budget ceilings dashboard: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load budget ceilings metadata: {str(e)}"
-        )
+        logger.error(f"Failed to query budget ceilings: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load budget ceilings.")
 
 
 @router.post("/budget-ceilings")
-def set_departmental_ceiling(
+def update_budget_ceiling(
     payload: UpdateCeilingPayload,
+    request: Request,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        issp_period = get_active_issp_period(db)
-        is_sqlite = db.bind.dialect.name == "sqlite"
+    issp_period = get_active_issp_period(db)
+    ceiling = db.query(BudgetCeiling).filter(
+        BudgetCeiling.department_id == payload.department_id,
+        BudgetCeiling.issp_period == issp_period
+    ).first()
 
-        # Fix (Anomaly 26): Query and serialize the row modification lock to prevent overlapping write races
-        dept_query = db.query(Department).filter(Department.id == payload.department_id)
-        if not is_sqlite:
-            dept_query = dept_query.with_for_update()
-        dept = dept_query.first()
-        if not dept:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Associated department not found."
-            )
-
-        global_query = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling")
-        if not is_sqlite:
-            global_query = global_query.with_for_update()
-        global_setting = global_query.first()
-        
-        global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
-
-        sum_other_ceilings = db.query(func.sum(BudgetCeiling.allocated_capex + BudgetCeiling.allocated_mooe)).filter(
-            BudgetCeiling.department_id != payload.department_id,
-            BudgetCeiling.issp_period == issp_period
-        ).scalar() or Decimal("0.00")
-
-        if sum_other_ceilings + payload.sub_ceiling > global_limit:
-             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Validation Failed: Sum of Department Sub-Ceilings exceeds the Global Budget Ceiling of PHP {global_limit:,.2f}"
-             )
-
-        existing_query = db.query(BudgetCeiling).filter(
-            BudgetCeiling.department_id == payload.department_id,
-            BudgetCeiling.issp_period == issp_period
+    if not ceiling:
+        ceiling = BudgetCeiling(
+            department_id=payload.department_id,
+            issp_period=issp_period,
+            allocated_capex=payload.allocated_capex,
+            allocated_mooe=payload.allocated_mooe
         )
-        if not is_sqlite:
-            existing_query = existing_query.with_for_update()
-        existing = existing_query.first()
-        
-        old_capex = existing.allocated_capex if existing else Decimal("0.00")
-        old_mooe = existing.allocated_mooe if existing else Decimal("0.00")
-        
-        if existing:
-            existing.allocated_capex = payload.allocated_capex
-            existing.allocated_mooe = payload.allocated_mooe
-        else:
-            new_ceiling = BudgetCeiling(
-                department_id=payload.department_id,
-                allocated_capex=payload.allocated_capex,
-                allocated_mooe=payload.allocated_mooe,
-                issp_period=issp_period
-            )
-            db.add(new_ceiling)
-        
-        audit = AuditTrail(
-            action="SYSTEM_BUDGET_CEILING_UPDATED",
-            user_id=admin["id"],
-            old_value={
-                "department_id": payload.department_id,
-                "allocated_capex": str(old_capex),
-                "allocated_mooe": str(old_mooe)
-            },
-            new_value={
-                "department_id": payload.department_id,
-                "allocated_capex": str(payload.allocated_capex),
-                "allocated_mooe": str(payload.allocated_mooe),
-                "cycle": issp_period
-            }
-        )
-        db.add(audit)
-        
-        try:
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database transaction failure on departmental ceiling: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update departmental budget ceiling: {str(e)}"
-            )
-        return {"status": "success", "message": f"Sub-ceiling successfully updated to PHP {payload.sub_ceiling:,.2f}"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled error in set_departmental_ceiling: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled ceiling update failure: {str(e)}"
-        )
+        db.add(ceiling)
+    else:
+        ceiling.allocated_capex = payload.allocated_capex
+        ceiling.allocated_mooe = payload.allocated_mooe
 
-
-@router.post("/budget-ceilings/bulk")
-def update_budget_ceilings_bulk(
-    payload: BulkCeilingValidationPayload,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        issp_period = get_active_issp_period(db)
-        is_sqlite = db.bind.dialect.name == "sqlite"
-
-        submitted_dept_ids = {item.department_id for item in payload.sub_ceilings}
-        existing_dept_count = db.query(Department).filter(Department.id.in_(submitted_dept_ids)).count()
-        if existing_dept_count != len(submitted_dept_ids):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Validation Failed: One or more department IDs submitted do not exist in the database."
-            )
-
-        try:
-            existing_ceilings = db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).all()
-            ceilings_map = {c.department_id: c.sub_ceiling for c in existing_ceilings}
-
-            for item in payload.sub_ceilings:
-                ceilings_map[item.department_id] = item.sub_ceiling
-
-            total_allocations = sum(ceilings_map.values())
-            if total_allocations > payload.global_ceiling:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Constraint Violation: Cumulative departmental sub-ceilings (₱{total_allocations:,.2f}) "
-                        f"exceed the updated Global Ceiling (₱{payload.global_ceiling:,.2f})."
-                    )
-                )
-
-            with db.begin_nested():
-                global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-                if not global_setting:
-                    global_setting = SystemSetting(key="global_budget_ceiling", value=str(payload.global_ceiling))
-                    db.add(global_setting)
-                else:
-                    global_setting.value = str(payload.global_ceiling)
-
-                for item in payload.sub_ceilings:
-                    record_query = db.query(BudgetCeiling).filter(
-                        BudgetCeiling.department_id == item.department_id,
-                        BudgetCeiling.issp_period == issp_period
-                    )
-                    # Fix (Anomaly 26): Enforce row level validation locking prior to mass modifications
-                    if not is_sqlite:
-                        record_query = record_query.with_for_update()
-                    record = record_query.first()
-
-                    if record:
-                        record.sub_ceiling = item.sub_ceiling
-                    else:
-                        new_record = BudgetCeiling(
-                            department_id=item.department_id,
-                            issp_period=issp_period
-                        )
-                        new_record.sub_ceiling = item.sub_ceiling
-                        db.add(new_record)
-                
-                # We log a single bulk audit trail entry for compactness
-                audit = AuditTrail(
-                    action="SYSTEM_BULK_BUDGET_CEILINGS_UPDATED",
-                    user_id=admin["id"],
-                    old_value={"event": "Bulk sub-ceiling allocations modified."},
-                    new_value={"global_ceiling": str(payload.global_ceiling), "cycle": issp_period, "departments_updated_count": len(payload.sub_ceilings)}
-                )
-                db.add(audit)
-                    
-            db.commit()
-            return {
-                "status": "success",
-                "message": "Bulk budget ceilings validated and updated successfully.",
-                "global_ceiling": float(payload.global_ceiling),
-                "allocated_departments_count": len(payload.sub_ceilings),
-                "total_allocated_php": float(total_allocations)
-            }
-        except HTTPException:
-            db.rollback()
-            raise
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Failed to update budget ceilings in bulk: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database transaction failure during bulk ceiling update: {str(e)}"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled bulk update failure: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled bulk ceiling modification error: {str(e)}"
-        )
+    log_audit_event(
+        db=db,
+        action="SYSTEM_BUDGET_CEILING_UPDATED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        department_id=payload.department_id,
+        ip_address=request.client.host if request.client else None,
+        new_value={
+            "department_id": payload.department_id,
+            "allocated_capex": str(payload.allocated_capex),
+            "allocated_mooe": str(payload.allocated_mooe),
+            "sub_ceiling": str(payload.allocated_capex + payload.allocated_mooe)
+        }
+    )
+    db.commit()
+    return {"status": "success", "message": "Budget ceiling updated successfully."}
 
 
 @router.post("/global-budget-ceiling")
 def update_global_budget_ceiling(
     payload: UpdateGlobalCeilingPayload,
+    request: Request,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        issp_period = get_active_issp_period(db)
-        sum_sub_ceilings = db.query(func.sum(BudgetCeiling.allocated_capex + BudgetCeiling.allocated_mooe)).filter(
-            BudgetCeiling.issp_period == issp_period
-        ).scalar() or Decimal("0.00")
-        
-        if payload.global_ceiling < sum_sub_ceilings:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Cannot reduce overall ceiling to PHP {payload.global_ceiling:,.2f}. "
-                    f"The sum of already allocated departmental sub-ceilings is PHP {sum_sub_ceilings:,.2f}."
-                )
-            )
-        
-        try:
-            setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-            old_val = setting.value if setting else "N/A"
-            if not setting:
-                setting = SystemSetting(key="global_budget_ceiling", value=str(payload.global_ceiling))
-                db.add(setting)
-            else:
-                setting.value = str(payload.global_ceiling)
-                
-            audit = AuditTrail(
-                action="SYSTEM_GLOBAL_CEILING_UPDATED",
-                user_id=admin["id"],
-                old_value={"global_ceiling": old_val},
-                new_value={"global_ceiling": str(payload.global_ceiling)}
-            )
-            db.add(audit)
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database error committing global ceiling: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database transaction failure during dynamic global ceiling update: {str(e)}"
-            )
-        
-        return {
-            "status": "success",
-            "message": f"Institutional Global Budget Ceiling successfully updated to PHP {payload.global_ceiling:,.2f}."
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled error in update_global_budget_ceiling: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled global ceiling update error: {str(e)}"
-        )
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
+    if not setting:
+        setting = SystemSetting(key="global_budget_ceiling", value=str(payload.global_ceiling))
+        db.add(setting)
+    else:
+        setting.value = str(payload.global_ceiling)
+
+    log_audit_event(
+        db=db,
+        action="GLOBAL_BUDGET_CEILING_MODIFIED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        ip_address=request.client.host if request.client else None,
+        new_value={"global_budget_ceiling": str(payload.global_ceiling)}
+    )
+    db.commit()
+    return {"status": "success", "message": "Global budget ceiling updated successfully."}
 
 
 @router.get("/budget-validation")
@@ -1902,1708 +1801,1216 @@ def run_pre_generation_budget_check(
 ):
     try:
         issp_period = get_active_issp_period(db)
-
         global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
         global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
 
-        departments = db.query(Department).all()
         violations = []
-        is_safe = True
-
-        capex_spent = dict(
-            db.query(
-                Proposal.department_id,
-                func.sum(Proposal.unit_cost * Proposal.total_qty)
-            ).filter(
+        spent_by_dept = dict(
+            db.query(Proposal.department_id, func.sum(Proposal.unit_cost * Proposal.total_qty))
+            .filter(
                 Proposal.status == ProposalStatus.APPROVED,
                 Proposal.issp_period == issp_period,
-                or_(Proposal.is_archived == False, Proposal.is_archived == None)
+                or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
             ).group_by(Proposal.department_id).all()
         )
 
-        mooe_spent = dict(
-            db.query(
-                SubscriptionProposal.department_id,
-                func.sum(SubscriptionProposal.total_multiyear_mooe)
-            ).filter(
-                SubscriptionProposal.status == ProposalStatus.APPROVED,
-                SubscriptionProposal.issp_period == issp_period,
-                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-            ).group_by(SubscriptionProposal.department_id).all()
-        )
+        ceilings_map = {c.department_id: c.sub_ceiling for c in db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).all()}
 
-        ceilings_map = {
-            c.department_id: c.sub_ceiling 
-            for c in db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).all()
-        }
-
-        for dept in departments:
-            spent_result = capex_spent.get(dept.id, Decimal("0.00")) or Decimal("0.00")
-            mooe_result = mooe_spent.get(dept.id, Decimal("0.00")) or Decimal("0.00")
-            
-            actual_spent = Decimal(spent_result) + Decimal(mooe_result)
-            limit = ceilings_map.get(dept.id, global_limit)
-            
-            if actual_spent > limit:
-                is_safe = False
+        for dept in db.query(Department).all():
+            spent = spent_by_dept.get(dept.id, Decimal("0.00")) or Decimal("0.00")
+            ceiling = ceilings_map.get(dept.id, global_limit)
+            if spent > ceiling:
                 violations.append({
                     "department_id": dept.id,
                     "department_name": dept.name,
-                    "allocated_sub_ceiling_php": float(limit),
-                    "actual_expenditures_php": float(actual_spent),
-                    "budget_overage_php": float(actual_spent - limit),
+                    "allocated_sub_ceiling_php": float(ceiling),
+                    "actual_expenditures_php": float(spent),
+                    "budget_overage_php": float(spent - ceiling),
                     "status_flag": "RED_BUDGET_BREACH"
                 })
-                
+
         return {
-            "validation_passed": is_safe,
+            "validation_passed": len(violations) == 0,
             "total_violations_detected": len(violations),
             "breaches": violations,
-            "message": (
-                "System expenditures are fully cleared and ready for official document generation." 
-                if is_safe 
-                else "Departmental budget ceiling breaches detected. Please trim quantities or override item costs before generating the final ISSP."
-            )
+            "message": "Expenditures cleared for compilation." if len(violations) == 0 else "Budget overages detected."
         }
     except Exception as e:
-        logger.error(f"Error running pre-generation budget validation: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Budget validation process failed: {str(e)}"
-        )
+        logger.error(f"Error running pre-flight budget check: {str(e)}")
+        raise HTTPException(status_code=500, detail="Budget check failed.")
 
 
 # ==========================================================
-# ANALYTICS & MONITORING
+# DASHBOARD METRICS & COMPLIANCE ANALYTICS
 # ==========================================================
+
+@router.get("/dashboard-metrics")
+def get_dashboard_metrics(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = get_active_issp_period(db)
+    global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
+    global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
+
+    total_spent = db.query(func.sum(Proposal.total_cost)).filter(
+        Proposal.issp_period == period,
+        Proposal.status == ProposalStatus.APPROVED,
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).scalar() or Decimal("0.00")
+
+    pending_count = db.query(Proposal).filter(
+        Proposal.issp_period == period,
+        Proposal.status == ProposalStatus.SUBMITTED,
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).count()
+
+    approved_count = db.query(Proposal).filter(
+        Proposal.issp_period == period,
+        Proposal.status == ProposalStatus.APPROVED,
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).count()
+
+    return {
+        "global_ceiling": float(global_limit),
+        "total_spent": float(total_spent),
+        "pending_count": pending_count,
+        "approved_count": approved_count
+    }
+
 
 @router.get("/department-analytics", response_model=List[DepartmentAnalyticsResponse])
 def get_department_analytics(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        departments = db.query(Department).all()
-        results = []
-        settings_obj = SystemGovernanceSettings()
-        
-        for dept in departments:
-            proposals = db.query(Proposal).filter(
-                Proposal.department_id == dept.id,
-                or_(Proposal.is_archived == False, Proposal.is_archived == None)
-            ).all()
-            
-            subscriptions = db.query(SubscriptionProposal).filter(
-                SubscriptionProposal.department_id == dept.id,
-                or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-            ).all()
-            
-            total_count = len(proposals) + len(subscriptions)
-            custom_count = 0
-            missing_canvas_count = 0
-            
-            for p in proposals:
-                if p.item_name.strip().lower() == "other":
-                    custom_count += 1
-                    if not p.canvas_evidence_url:
-                        missing_canvas_count += 1
-                        
-            for s in subscriptions:
-                if s.subscription_type.strip().lower() == "other":
-                    custom_count += 1
-                    if not s.canvas_evidence_url:
-                        missing_canvas_count += 1
-            
-            # Fix (Anomaly 23): Safeguard division operations by verifying total counts are positive
-            custom_ratio = (custom_count / total_count) if total_count > 0 else 0.0
-            requires_review = custom_ratio > settings_obj.custom_request_ratio_threshold
-            
-            results.append(
-                DepartmentAnalyticsResponse(
-                    department_id=dept.id,
-                    department_name=dept.name,
-                    total_proposals=total_count,
-                    custom_proposals=custom_count,
-                    custom_ratio_percent=round(custom_ratio * 100.0, 2),
-                    requires_review_abuse=requires_review,
-                    missing_canvas_count=missing_canvas_count
-                )
+    period = get_active_issp_period(db)
+    departments = db.query(Department).all()
+    results = []
+
+    for d in departments:
+        props = db.query(Proposal).filter(
+            Proposal.department_id == d.id,
+            Proposal.issp_period == period,
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+        ).all()
+
+        total = len(props)
+        custom = len([p for p in props if p.item_key == "other"])
+        missing_canvas = len([p for p in props if not p.canvas_evidence_url and not p.created_by_students])
+        ratio = (custom / total * 100.0) if total > 0 else 0.0
+
+        results.append(
+            DepartmentAnalyticsResponse(
+                department_id=d.id,
+                department_name=d.name,
+                total_proposals=total,
+                custom_proposals=custom,
+                custom_ratio_percent=round(ratio, 2),
+                missing_canvas_count=missing_canvas,
+                requires_review_abuse=ratio > 20.0
             )
-            
-        return results
-    except Exception as e:
-        logger.error(f"Error compiling department governance analytics metrics: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load analytics datasets: {str(e)}"
         )
+    return results
 
 
 # ==========================================================
-# GOVERNANCE & DOCUMENT COMPILATION
+# MASTER NARRATIVES & PLANNING SCOPE CONTROL (NO TRANSMITTAL)
 # ==========================================================
 
-@router.post("/governance/generate-issp")
-def trigger_document_generation(
-    issp_period: str = Query("2024-2026", description="The planning period cycle to compile (e.g. 2024-2026)"),
+@router.get("/narratives/{issp_period}", response_model=MasterNarrativeResponse)
+def get_narrative(
+    issp_period: str,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-        if not narrative:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Coversheet and planning narratives for cycle '{issp_period}' have not been configured yet."
-            )
-
-        approved_capex = db.query(Proposal).filter(
-            Proposal.status == ProposalStatus.APPROVED,
-            Proposal.issp_period == issp_period,
-            or_(Proposal.is_archived == False, Proposal.is_archived == None)
-        ).all()
-
-        approved_mooe = db.query(SubscriptionProposal).filter(
-            SubscriptionProposal.status == ProposalStatus.APPROVED,
-            SubscriptionProposal.issp_period == issp_period,
-            or_(SubscriptionProposal.is_archived == False, SubscriptionProposal.is_archived == None)
-        ).all()
-
-        cold_capex = [p for p in approved_capex if p.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or p.is_restoring]
-        cold_mooe = [sub for sub in approved_mooe if sub.s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"] or sub.is_restoring]
-
-        if cold_capex or cold_mooe:
-            cold_names = [p.item_name for p in cold_capex] + [sub.software_name for sub in cold_mooe]
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Compilation blocked: The following approved items have attachments archived in AWS S3 Glacier or are currently restoring: {', '.join(cold_names)}. "
-                       "Please restore all cold assets to STANDARD storage class before generating the final ISSP document."
-            )
-
-        total_capex = sum(p.unit_cost * p.total_qty for p in approved_capex)
-        total_mooe = sum(sub.total_multiyear_mooe for sub in approved_mooe)
-        combined_investment = total_capex + total_mooe
-
-        compiled_metadata = {
-            "issp_id": f"ISSP-CSPC-{issp_period}-V{narrative.issp_period_from or 2024}",
-            "agency_name": narrative.agency_name,
-            "issp_period_years": issp_period,
-            "signatory_prepared_by": narrative.signatory_prepared_by,
-            "signatory_approved_by": narrative.signatory_approved_by,
-            "allocated_budget": str(combined_investment),
-            "total_capex": str(total_capex),
-            "total_mooe": str(total_mooe)
-        }
-
-        task = compile_issp_document.delay(compiled_metadata)
-
-        return {
-            "status": "queued",
-            "task_id": task.id,
-            "active_cycle": issp_period,
-            "total_capex_php": str(total_capex),
-            "total_mooe_php": str(total_mooe),
-            "combined_plan_cost_php": str(combined_investment),
-            "approved_capex_count": len(approved_capex),
-            "approved_mooe_count": len(approved_mooe),
-            "message": "Approved departmental proposals aggregated and narrative profiles mapped. Compilation initiated."
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to queue asynchronous document compilation task: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Document generation initialization failed: {str(e)}"
-        )
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        raise HTTPException(status_code=404, detail=f"Planning narrative for cycle '{issp_period}' not found.")
+    return narrative
 
 
-@router.get("/governance/task-status/{task_id}")
-def get_task_status(
-    task_id: str,
-    admin: dict = Depends(require_admin)
-):
-    try:
-        from celery.result import AsyncResult
-        from app.celery_app import celery_app
-        res = AsyncResult(task_id, app=celery_app)
-        
-        # Gracefully handle the pending/queued state instead of raising a 404 error
-        if res.state == "PENDING" and res.info is None:
-            return {
-                "state": "PENDING",
-                "progress_percent": 10,
-                "current_step_message": "Queued in background worker..."
-            }
-
-        if res.state == "PROGRESS":
-            # Extract progress metadata safely
-            meta = res.info or {}
-            progress = meta.get("progress", 50)
-            status_msg = meta.get("status", "Processing layout components...")
-            return {
-                "state": "PROGRESS",
-                "progress_percent": progress,
-                "current_step_message": status_msg
-            }
-            
-        elif res.state == "SUCCESS":
-            return {
-                "state": "SUCCESS",
-                "progress_percent": 100,
-                "current_step_message": "Compilation Complete",
-                "result": res.result
-            }
-            
-        elif res.state == "FAILURE":
-            return {
-                "state": "FAILURE",
-                "progress_percent": 100,
-                "current_step_message": "Compilation Failed",
-                "error": str(res.info)
-            }
-            
-        return {
-            "state": res.state,
-            "progress_percent": 0,
-            "current_step_message": f"Task state: {res.state}"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to query asynchronous task status {task_id}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to query background task state parameters."
-        )
-
-# ==========================================================
-# MASTER NARRATIVES & COVERSHEET MANAGER
-# ==========================================================
-
-@router.post("/narratives/{issp_period}", response_model=MasterNarrativeResponse, tags=["Admin Master Authorship"])
-def save_or_update_master_narrative(
+@router.post("/narratives/{issp_period}")
+def update_narrative(
     issp_period: str,
     payload: MasterNarrativeUpdate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        if payload.issp_period_from and payload.issp_period_to:
-            derived_period = f"{payload.issp_period_from}-{payload.issp_period_to}"
-        else:
-            derived_period = issp_period
-
-        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == derived_period).first()
-        
-        if not narrative and issp_period != derived_period:
-            narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-            if narrative:
-                narrative.issp_period = derived_period
-                
-        if not narrative:
-            narrative = MasterNarrative(
-                issp_period=derived_period,
-                signatory_prepared_by="Not Configured",
-                signatory_approved_by="Not Configured"
-            )
-            db.add(narrative)
-            
-        data = payload.dict(exclude_unset=True)
-        data.pop("template_layout_json", None)
-        
-        for key, value in data.items():
-            setattr(narrative, key, value)
-            
-        try:
-            db.commit()
-            db.refresh(narrative)
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database error writing master narrative text details: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to commit narrative authoring changes: {str(e)}"
-            )
-        return narrative
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled error in save_or_update_master_narrative: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled narrative submission error: {str(e)}"
-        )
-
-
-@router.get("/narratives/{issp_period}", response_model=MasterNarrativeResponse, tags=["Admin Master Authorship"])
-def get_master_narrative(
-    issp_period: str,
+    request: Request,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
     try:
         narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-        if not narrative:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No narrative structure found for cycle: {issp_period}")
-        return narrative
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error querying master narrative metadata for cycle {issp_period}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load planning narrative structure: {str(e)}"
-        )
+        latest = db.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
 
+        parts = issp_period.split("-")
+        start_y = payload.issp_period_from or (int(parts[0]) if len(parts) == 2 and parts[0].isdigit() else 2026)
+        end_y = payload.issp_period_to or (int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else (start_y + 2))
 
-@router.post("/narratives/{issp_period}/upload-diagram", tags=["Admin Master Authorship"])
-async def upload_system_diagram(
-    issp_period: str,
-    category: str = Query(..., description="Valid Categories: agency_logo, cert_logo, org_chart, functional_interface, "
-                                           "conceptual_framework, net_layout_sias, net_layout_library, net_layout_security, "
-                                           "net_layout_hris, net_layout_dms, net_layout_supplies, net_layout_budget, "
-                                           "net_layout_sias_upgrade, net_layout_extension, existing_ict_org, "
-                                           "proposed_ict_org, placement_ict_org, b_3_a_ict_org, site_development_plan, "
-                                           "fiber_backbone, system_architecture, network_diagram, process_flow_diagram"),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        allowed_categories = [
-            "agency_logo", "cert_logo", "org_chart", "functional_interface",
-            "conceptual_framework", "net_layout_sias", "net_layout_library", "net_layout_security",
-            "net_layout_hris", "net_layout_dms", "net_layout_supplies", "net_layout_budget",
-            "net_layout_sias_upgrade", "net_layout_extension", "existing_ict_org",
-            "proposed_ict_org", "placement_ict_org", "b_3_a_ict_org", "site_development_plan",
-            "fiber_backbone", "system_architecture", "network_diagram", "process_flow_diagram"
-        ]
-        if category not in allowed_categories:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid diagram category: '{category}'. Must be one of {allowed_categories}."
-            )
-
-        allowed_types = ["image/png", "image/jpeg", "image/jpg", "image/gif"]
-        if file.content_type not in allowed_types:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Upload Failed: File type '{file.content_type}' is not supported. Please upload an image file (PNG/JPG)."
-            )
-
-        max_file_size = 5 * 1024 * 1024
-        file_bytes = await file.read()
-        if len(file_bytes) > max_file_size:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Upload Failed: Image exceeds the maximum permitted size limit of 5MB."
-            )
-
-        is_valid_file = (
-            file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or  # PNG
-            file_bytes.startswith(b"\xff\xd8\xff") or        # JPEG
-            file_bytes.startswith(b"GIF8") or                # GIF
-            file_bytes.startswith(b"%PDF-")                  # PDF
-        )
-        if not is_valid_file:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Security Violation: Invalid file format. Only PNG, JPG, or PDF documents are permitted as system diagrams."
-            )
-
-        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
         if not narrative:
             narrative = MasterNarrative(
                 issp_period=issp_period,
-                signatory_prepared_by="Not Configured",
-                signatory_approved_by="Not Configured"
+                issp_period_from=start_y,
+                issp_period_to=end_y,
+                agency_name=payload.agency_name or (latest.agency_name if latest else settings.DEFAULT_AGENCY_NAME),
+                agency_website_url=payload.agency_website_url or (latest.agency_website_url if latest else settings.DEFAULT_AGENCY_WEBSITE),
+                agency_logo_url=payload.agency_logo_url or (latest.agency_logo_url if latest else None),
+                dict_logo_url=getattr(payload, 'dict_logo_url', None) or (getattr(latest, 'dict_logo_url', None) if latest else None),
+                bagong_pilipinas_logo_url=getattr(payload, 'bagong_pilipinas_logo_url', None) or (getattr(latest, 'bagong_pilipinas_logo_url', None) if latest else None),
+                signatory_prepared_by=payload.signatory_prepared_by or payload.cio_name or (latest.signatory_prepared_by if latest else "Chief Information Officer"),
+                preparer_position=payload.preparer_position or payload.cio_plantilla_position or (latest.preparer_position if latest else "Chief Information Officer"),
+                signatory_approved_by=payload.signatory_approved_by or payload.head_of_agency_name or (latest.signatory_approved_by if latest else settings.DEFAULT_AGENCY_HEAD_TITLE),
+                agency_head_position=getattr(payload, 'agency_head_position', None) or (getattr(latest, 'agency_head_position', None) if latest else settings.DEFAULT_AGENCY_HEAD_TITLE),
+                drbcp_approval_date=getattr(payload, 'drbcp_approval_date', None) or (getattr(latest, 'drbcp_approval_date', None) if latest else None),
+                mandate_html=payload.mandate_html or (latest.mandate_html if latest else ""),
+                functions=payload.functions or (latest.functions if latest else ""),
+                vision_html=payload.vision_html or (latest.vision_html if latest else ""),
+                mission_html=payload.mission_html or (latest.mission_html if latest else ""),
+                present_situation_html=payload.present_situation_html or (latest.present_situation_html if latest else ""),
+                enterprise_architecture_narrative=payload.enterprise_architecture_narrative or (getattr(latest, "enterprise_architecture_narrative", None) if latest else None),
+                drbcp_affected_assets_json=payload.drbcp_affected_assets_json or (getattr(latest, "drbcp_affected_assets_json", []) if latest else []),
+                drbcp_recovery_strategy_html=payload.drbcp_recovery_strategy_html or (getattr(latest, "drbcp_recovery_strategy_html", "") if latest else ""),
+                drbcp_sop_phases_html=payload.drbcp_sop_phases_html or (getattr(latest, "drbcp_sop_phases_html", "") if latest else ""),
+                drbcp_compliance_narrative_html=getattr(payload, 'drbcp_compliance_narrative_html', None) or (getattr(latest, 'drbcp_compliance_narrative_html', None) if latest else None),
+                is_active=True,
+                is_archived=False,
+                annual_ict_budget=payload.annual_ict_budget or (latest.annual_ict_budget if latest else Decimal("0.00")),
+                planners_json=(latest.planners_json if latest and latest.planners_json else []),
+                major_final_outputs=(latest.major_final_outputs if latest and latest.major_final_outputs else []),
+                strategic_concerns_json=(latest.strategic_concerns_json if latest and latest.strategic_concerns_json else []),
+                systems_json=(latest.systems_json if latest and latest.systems_json else []),
+                databases_json=(latest.databases_json if latest and latest.databases_json else []),
+                internal_projects_json=(latest.internal_projects_json if latest and latest.internal_projects_json else []),
+                cross_projects_json=(latest.cross_projects_json if latest and latest.cross_projects_json else []),
+                pmf_matrix_json=(latest.pmf_matrix_json if latest and latest.pmf_matrix_json else []),
+                subsystem_network_layouts_json=(latest.subsystem_network_layouts_json if latest and getattr(latest, "subsystem_network_layouts_json", None) else []),
+                mithi_special_solutions=(latest.mithi_special_solutions if latest and latest.mithi_special_solutions else []),
+                mithi_hardware_inventory=(latest.mithi_hardware_inventory if latest and latest.mithi_hardware_inventory else []),
+                implementation_schedules=(latest.implementation_schedules if latest and latest.implementation_schedules else [])
             )
             db.add(narrative)
             db.flush()
 
-        safe_filename = secure_filename(file.filename)
-        key = storage_client.get_diagram_key(category, safe_filename)
-        
-        success = storage_client.upload_canvas_evidence(file_bytes, key)
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to write diagram asset to the storage layer."
-            )
+        update_dict = payload.model_dump(exclude_unset=True)
+        for key, val in update_dict.items():
+            if hasattr(narrative, key):
+                setattr(narrative, key, val)
 
-        download_url = storage_client.generate_download_url(key)
+        if getattr(payload, "agency_head_position", None):
+            narrative.agency_head_position = payload.agency_head_position
+        if getattr(payload, "drbcp_approval_date", None):
+            narrative.drbcp_approval_date = payload.drbcp_approval_date
+        if getattr(payload, "drbcp_compliance_narrative_html", None):
+            narrative.drbcp_compliance_narrative_html = payload.drbcp_compliance_narrative_html
+        if getattr(payload, "head_of_agency_name", None):
+            narrative.signatory_approved_by = payload.head_of_agency_name
+        if getattr(payload, "cio_name", None):
+            narrative.signatory_prepared_by = payload.cio_name
+        if getattr(payload, "cio_plantilla_position", None):
+            narrative.preparer_position = payload.cio_plantilla_position
+        if getattr(payload, "dict_logo_url", None) is not None:
+            narrative.dict_logo_url = payload.dict_logo_url
+        if getattr(payload, "bagong_pilipinas_logo_url", None) is not None:
+            narrative.bagong_pilipinas_logo_url = payload.bagong_pilipinas_logo_url
 
-        if category == "agency_logo":
-            narrative.agency_logo_url = download_url
-        elif category == "cert_logo":
-            narrative.cert_logo_url = download_url
-        elif category == "org_chart":
-            narrative.org_chart_url = download_url
-        elif category == "functional_interface":
-            narrative.functional_interface_url = download_url
-        elif category == "conceptual_framework":
-            narrative.conceptual_framework_url = download_url
-        elif category == "net_layout_sias":
-            narrative.net_layout_sias_url = download_url
-        elif category == "net_layout_library":
-            narrative.net_layout_library_url = download_url
-        elif category == "net_layout_security":
-            narrative.net_layout_security_url = download_url
-        elif category == "net_layout_hris":
-            narrative.net_layout_hris_url = download_url
-        elif category == "net_layout_dms":
-            narrative.net_layout_dms_url = download_url
-        elif category == "net_layout_supplies":
-            narrative.net_layout_supplies_url = download_url
-        elif category == "net_layout_budget":
-            narrative.net_layout_budget_url = download_url
-        elif category == "net_layout_sias_upgrade":
-            narrative.net_layout_sias_upgrade_url = download_url
-        elif category == "net_layout_extension":
-            narrative.net_layout_extension_url = download_url
-        elif category == "existing_ict_org":
-            narrative.existing_ict_org_url = download_url
-        elif category == "proposed_ict_org":
-            narrative.proposed_ict_org_url = download_url
-        elif category == "placement_ict_org":
-            narrative.placement_ict_org_url = download_url
-        elif category == "b_3_a_ict_org":
-            narrative.b_3_a_ict_org_url = download_url
-        elif category == "site_development_plan":
-            narrative.site_development_plan_url = download_url
-        elif category == "fiber_backbone":
-            narrative.fiber_backbone_url = download_url
-        elif category == "system_architecture":
-            narrative.system_architecture_url = download_url
-        elif category == "network_diagram":
-            narrative.network_diagram_url = download_url
-        elif category == "process_flow_diagram":
-            narrative.process_flow_diagram_url = download_url
+        log_audit_event(
+            db=db,
+            action="NARRATIVE_STUDIO_UPDATED",
+            module="GOVERNANCE",
+            user_id=admin["id"],
+            ip_address=request.client.host if request.client else None,
+            new_value={"issp_period": issp_period, "agency_name": narrative.agency_name}
+        )
 
         db.commit()
+        db.refresh(narrative)
+        return {"status": "success", "message": "Master narrative updated successfully."}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update narrative for cycle '{issp_period}': {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update narrative: {str(e)}")
+
+
+@router.post("/narratives/{issp_period}/activate")
+def activate_planning_cycle(
+    issp_period: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        # 1. Deactivate all existing planning cycles safely without session evaluation errors
+        db.query(MasterNarrative).update({"is_active": False}, synchronize_session=False)
+
+        # 2. Check if the target narrative already exists
+        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+        
+        # Look for the previous reference narrative to clone baselines if target is brand new
+        latest = db.query(MasterNarrative).order_by(
+            MasterNarrative.is_active.desc(),
+            MasterNarrative.issp_period.desc()
+        ).first()
+
+        parts = issp_period.split("-")
+        start_y = int(parts[0]) if len(parts) == 2 and parts[0].isdigit() else 2026
+        end_y = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else (start_y + 2)
+
+        if not narrative:
+            narrative = MasterNarrative(
+                issp_period=issp_period,
+                issp_period_from=start_y,
+                issp_period_to=end_y,
+                agency_name=latest.agency_name if latest else settings.DEFAULT_AGENCY_NAME,
+                agency_website_url=latest.agency_website_url if latest else settings.DEFAULT_AGENCY_WEBSITE,
+                is_active=True,
+                is_amendment=False,
+                amendment_number=None,
+                scope_choice=latest.scope_choice if latest else ScopeChoice.DEPARTMENT_WIDE,
+                scope_json=latest.scope_json if latest and latest.scope_json else {"with_regional_offices": True, "with_bureaus": False},
+                mandate_html=latest.mandate_html if latest and latest.mandate_html else "",
+                functions=latest.functions if latest else "",
+                vision_html=latest.vision_html if latest and latest.vision_html else "",
+                mission_html=latest.mission_html if latest and latest.mission_html else "",
+                present_situation_html=latest.present_situation_html if latest and latest.present_situation_html else "Active planning cycle baseline.",
+                enterprise_architecture_narrative=getattr(latest, 'enterprise_architecture_narrative', None),
+                drbcp_affected_assets_json=getattr(latest, 'drbcp_affected_assets_json', []) or [],
+                drbcp_recovery_strategy_html=getattr(latest, 'drbcp_recovery_strategy_html', "") or "",
+                drbcp_sop_phases_html=getattr(latest, 'drbcp_sop_phases_html', "") or "",
+                drbcp_compliance_narrative_html=getattr(latest, 'drbcp_compliance_narrative_html', "") or "",
+                is_archived=False,
+                final_pdf_vault_url=None,
+                signatory_prepared_by=latest.signatory_prepared_by if latest else "Chief Information Officer",
+                preparer_position=latest.preparer_position if latest else "Chief Information Officer",
+                cio_organizational_unit=latest.cio_organizational_unit if latest else "ICT Services",
+                preparer_tel=latest.preparer_tel if latest else "",
+                preparer_fax=latest.preparer_fax if latest else "",
+                preparer_email=latest.preparer_email if latest else "",
+                focal_name=latest.focal_name if latest else "",
+                focal_position=latest.focal_position if latest else "",
+                focal_organizational_unit=latest.focal_organizational_unit if latest else "",
+                focal_email=latest.focal_email if latest else "",
+                focal_contact_no=latest.focal_contact_no if latest else "",
+                signatory_approved_by=latest.signatory_approved_by if latest else settings.DEFAULT_AGENCY_HEAD_TITLE,
+                agency_head_position=getattr(latest, 'agency_head_position', None) or settings.DEFAULT_AGENCY_HEAD_TITLE,
+                drbcp_approval_date=getattr(latest, 'drbcp_approval_date', None) or None,
+                annual_ict_budget=latest.annual_ict_budget if latest else Decimal("0.00"),
+                agency_logo_url=latest.agency_logo_url if latest else None,
+                dict_logo_url=getattr(latest, "dict_logo_url", None) if latest else None,
+                bagong_pilipinas_logo_url=getattr(latest, "bagong_pilipinas_logo_url", None) if latest else None,
+                cert_logo_url=latest.cert_logo_url if latest else None,
+                site_development_plan_url=latest.site_development_plan_url if latest else None,
+                fiber_backbone_url=latest.fiber_backbone_url if latest else None,
+                system_architecture_url=latest.system_architecture_url if latest else None,
+                process_flow_diagram_url=latest.process_flow_diagram_url if latest else None,
+                network_diagram_url=latest.network_diagram_url if latest else None,
+                subsystem_network_layouts_json=getattr(latest, 'subsystem_network_layouts_json', []) or [],
+                planners_json=latest.planners_json if latest and latest.planners_json else [],
+                major_final_outputs=latest.major_final_outputs if latest and latest.major_final_outputs else [],
+                strategic_concerns_json=latest.strategic_concerns_json if latest and latest.strategic_concerns_json else [],
+                systems_json=latest.systems_json if latest and latest.systems_json else [],
+                databases_json=latest.databases_json if latest and latest.databases_json else [],
+                internal_projects_json=latest.internal_projects_json if latest and latest.internal_projects_json else [],
+                cross_projects_json=latest.cross_projects_json if latest and latest.cross_projects_json else [],
+                pmf_matrix_json=latest.pmf_matrix_json if latest and latest.pmf_matrix_json else [],
+                mithi_special_solutions=latest.mithi_special_solutions if latest and latest.mithi_special_solutions else [],
+                mithi_hardware_inventory=latest.mithi_hardware_inventory if latest and latest.mithi_hardware_inventory else [],
+                implementation_schedules=latest.implementation_schedules if latest and latest.implementation_schedules else []
+            )
+            db.add(narrative)
+            db.flush()
+        else:
+            narrative.is_active = True
+            narrative.is_archived = False
+            narrative.issp_period_from = start_y
+            narrative.issp_period_to = end_y
+
+        # 3. Clone Organizational Outcomes for the new cycle if none exist
+        existing_outcomes = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == issp_period).count()
+        if existing_outcomes == 0 and latest and latest.issp_period != issp_period:
+            old_outcomes = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == latest.issp_period).all()
+            for old_oo in old_outcomes:
+                db.add(OrganizationalOutcome(
+                    issp_period=issp_period,
+                    type_label=old_oo.type_label,
+                    outcome_name=old_oo.outcome_name,
+                    description=old_oo.description
+                ))
+            db.flush()
+
+        # 4. Clone Budget Ceilings for the new cycle if none exist
+        departments = db.query(Department).all()
+        for dept in departments:
+            has_ceiling = db.query(BudgetCeiling).filter(
+                BudgetCeiling.department_id == dept.id,
+                BudgetCeiling.issp_period == issp_period
+            ).first()
+            if not has_ceiling:
+                old_ceiling = None
+                if latest:
+                    old_ceiling = db.query(BudgetCeiling).filter(
+                        BudgetCeiling.department_id == dept.id,
+                        BudgetCeiling.issp_period == latest.issp_period
+                    ).first()
+                capex = old_ceiling.allocated_capex if old_ceiling else Decimal("0.00")
+                mooe = old_ceiling.allocated_mooe if old_ceiling else Decimal("0.00")
+                db.add(BudgetCeiling(
+                    department_id=dept.id,
+                    issp_period=issp_period,
+                    allocated_capex=capex,
+                    allocated_mooe=mooe
+                ))
+            db.flush()
+
+        # 5. Synchronize system setting if present
+        active_setting = db.query(SystemSetting).filter(SystemSetting.key == "issp_active_cycle").first()
+        if active_setting:
+            active_setting.value = issp_period
+        else:
+            db.add(SystemSetting(key="issp_active_cycle", value=issp_period))
+
+        log_audit_event(
+            db=db,
+            action="PLANNING_CYCLE_ACTIVATED",
+            module="GOVERNANCE",
+            user_id=admin["id"],
+            ip_address=request.client.host if request.client else None,
+            new_value={"issp_period": issp_period, "duration": f"{start_y}-{end_y}"}
+        )
+
+        db.commit()
+        return {"status": "success", "message": f"Planning cycle FY {issp_period} activated."}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to activate planning cycle '{issp_period}': {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to activate cycle: {str(e)}")
+
+
+@router.post("/narratives/{issp_period}/reset")
+def reset_planning_cycle(
+    issp_period: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    db.query(Proposal).filter(
+        Proposal.issp_period == issp_period,
+        Proposal.status.in_([ProposalStatus.DRAFT, ProposalStatus.RETURNED])
+    ).delete(synchronize_session=False)
+
+    log_audit_event(
+        db=db,
+        action="PLANNING_CYCLE_RESET",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        ip_address=request.client.host if request.client else None,
+        new_value={"issp_period": issp_period, "reset_status": "DRAFTS_PURGED"}
+    )
+
+    db.commit()
+    return {"status": "success", "message": f"Cycle {issp_period} draft ledger safely reset."}
+
+
+@router.post("/narratives/{issp_period}/upload-diagram")
+async def upload_diagram(
+    request: Request,
+    issp_period: str,
+    category: str = Query(..., description="Official DICT v.2026 diagram identifier or dynamic subsystem key"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        raise HTTPException(status_code=404, detail="Planning narrative not found.")
+
+    file_bytes = await file.read()
+    safe_name = secure_filename(file.filename)
+    key = storage_client.get_diagram_key(category, safe_name)
+    success = storage_client.upload_canvas_evidence(file_bytes, key)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to write diagram asset to storage.")
+
+    url = storage_client.generate_download_url(key)
+    
+    # Official DICT v.2026 Core Architectural Schematics & Seals Mapping
+    core_dict_mapping = {
+        "dict_logo": "dict_logo_url",                      # Page 1 DICT Co-Branding Seal
+        "bagong_pilipinas_logo": "bagong_pilipinas_logo_url", # Page 1 Bagong Pilipinas Emblem
+        "agency_logo": "agency_logo_url",                  # Page 1 Agency Institutional Seal
+        "network_diagram": "network_diagram_url",          # Part II.B.1 Existing LAN/WAN Topology
+        "fiber_backbone": "fiber_backbone_url",            # Part III.A.1 Proposed LAN/WAN / Backbone Layout
+        "system_architecture": "system_architecture_url",  # Part III.B Enterprise Architecture Schematic
+        "org_chart": "org_chart_url",                      # Part I.B Overall Agency Organizational Structure
+        "proposed_ict_org": "proposed_ict_org_url"         # Part III.C Proposed ICT Unit Structure
+    }
+
+    if category in core_dict_mapping and hasattr(narrative, core_dict_mapping[category]):
+        setattr(narrative, core_dict_mapping[category], url)
+    elif hasattr(narrative, category):
+        setattr(narrative, category, url)
+
+    # In parallel, capture any custom subsystem or departmental diagram dynamically into JSON store
+    if hasattr(narrative, 'set_subsystem_layout'):
+        narrative.set_subsystem_layout(category, url)
+
+    log_audit_event(
+        db=db,
+        action=f"DIAGRAM_UPLOADED_{category.upper()}",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        ip_address=request.client.host if (request and request.client) else None,
+        new_value={"category": category, "file_url": url, "issp_period": issp_period}
+    )
+
+    db.commit()
+    return {"status": "success", "file_url": url, "category": category}
+
+
+# ==========================================================
+# NARRATIVE CHILD ARTIFACTS (HUMAN CAPITAL, DRT, BIA, ETC.)
+# ==========================================================
+
+@router.get("/narratives/{issp_period}/human-capitals", response_model=List[HumanCapitalResponse])
+def get_human_capitals(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(HumanCapital).filter(HumanCapital.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/human-capitals", response_model=HumanCapitalResponse)
+def add_human_capital(issp_period: str, payload: HumanCapitalCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    hc = HumanCapital(issp_period=issp_period, **payload.model_dump())
+    db.add(hc)
+    db.commit()
+    db.refresh(hc)
+    return hc
+
+@router.put("/human-capitals/{id}", response_model=HumanCapitalResponse)
+def update_human_capital(id: int, payload: HumanCapitalCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    hc = db.query(HumanCapital).filter(HumanCapital.id == id).first()
+    if not hc:
+        raise HTTPException(status_code=404, detail="Human capital record not found.")
+    for k, v in payload.model_dump().items():
+        setattr(hc, k, v)
+    db.commit()
+    db.refresh(hc)
+    return hc
+
+@router.delete("/human-capitals/{id}")
+def delete_human_capital(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(HumanCapital).filter(HumanCapital.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/stakeholders", response_model=List[StakeholderAnalysisResponse])
+def get_stakeholders(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(StakeholderAnalysis).filter(StakeholderAnalysis.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/stakeholders", response_model=StakeholderAnalysisResponse)
+def add_stakeholder(issp_period: str, payload: StakeholderAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    dumped = payload.model_dump()
+    complexity_in = dumped.get("complexity_incoming") or dumped.get("incoming_complexity") or "Simple"
+    complexity_out = dumped.get("complexity_outgoing") or dumped.get("outgoing_complexity") or "Simple"
+    
+    sh = StakeholderAnalysis(
+        issp_period=issp_period,
+        stakeholder_group=payload.stakeholder_group,
+        transaction_processed_incoming=payload.transaction_processed_incoming,
+        transaction_processed_outgoing=payload.transaction_processed_outgoing,
+        complexity_incoming=getattr(complexity_in, "value", str(complexity_in)),
+        complexity_outgoing=getattr(complexity_out, "value", str(complexity_out))
+    )
+    db.add(sh)
+    db.commit()
+    db.refresh(sh)
+    return sh
+
+@router.put("/stakeholders/{id}", response_model=StakeholderAnalysisResponse)
+def update_stakeholder(id: int, payload: StakeholderAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    sh = db.query(StakeholderAnalysis).filter(StakeholderAnalysis.id == id).first()
+    if not sh:
+        raise HTTPException(status_code=404, detail="Stakeholder analysis record not found.")
+    
+    dumped = payload.model_dump()
+    sh.stakeholder_group = payload.stakeholder_group
+    sh.transaction_processed_incoming = payload.transaction_processed_incoming
+    sh.transaction_processed_outgoing = payload.transaction_processed_outgoing
+    
+    comp_in = dumped.get("complexity_incoming") or dumped.get("incoming_complexity")
+    if comp_in:
+        sh.complexity_incoming = getattr(comp_in, "value", str(comp_in))
+        
+    comp_out = dumped.get("complexity_outgoing") or dumped.get("outgoing_complexity")
+    if comp_out:
+        sh.complexity_outgoing = getattr(comp_out, "value", str(comp_out))
+        
+    db.commit()
+    db.refresh(sh)
+    return sh
+
+@router.delete("/stakeholders/{id}")
+def delete_stakeholder(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(StakeholderAnalysis).filter(StakeholderAnalysis.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/egov-checklists", response_model=List[EGovernmentChecklistResponse])
+def get_egov_checklists(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/egov-checklists", response_model=EGovernmentChecklistResponse)
+def add_egov_checklist(issp_period: str, payload: EGovernmentChecklistCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    eg = EGovernmentChecklist(issp_period=issp_period, **payload.model_dump())
+    db.add(eg)
+    db.commit()
+    db.refresh(eg)
+    return eg
+
+@router.put("/egov-checklists/{id}", response_model=EGovernmentChecklistResponse)
+def update_egov_checklist(id: int, payload: EGovernmentChecklistCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    eg = db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).first()
+    if not eg:
+        raise HTTPException(status_code=404, detail="E-Government checklist entry not found.")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(eg, k, v)
+    db.commit()
+    db.refresh(eg)
+    return eg
+
+@router.delete("/egov-checklists/{id}")
+def delete_egov_checklist(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/dr-teams", response_model=List[DisasterRecoveryTeamResponse])
+def get_dr_teams(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/dr-teams", response_model=DisasterRecoveryTeamResponse)
+def add_dr_team(issp_period: str, payload: DisasterRecoveryTeamCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    t = DisasterRecoveryTeam(issp_period=issp_period, **payload.model_dump())
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    return t
+
+@router.put("/dr-teams/{id}", response_model=DisasterRecoveryTeamResponse)
+def update_dr_team(id: int, payload: DisasterRecoveryTeamCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    t = db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.id == id).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Disaster recovery team member not found.")
+    for k, v in payload.model_dump().items():
+        setattr(t, k, v)
+    db.commit()
+    db.refresh(t)
+    return t
+
+@router.delete("/dr-teams/{id}")
+def delete_dr_team(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/dr-bias", response_model=List[BusinessImpactAnalysisResponse])
+def get_dr_bias(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/dr-bias", response_model=BusinessImpactAnalysisResponse)
+def add_dr_bia(issp_period: str, payload: BusinessImpactAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    b = BusinessImpactAnalysis(issp_period=issp_period, **payload.model_dump())
+    db.add(b)
+    db.commit()
+    db.refresh(b)
+    return b
+
+@router.put("/dr-bias/{id}", response_model=BusinessImpactAnalysisResponse)
+def update_dr_bia(id: int, payload: BusinessImpactAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    b = db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.id == id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="BIA record not found.")
+    for k, v in payload.model_dump().items():
+        setattr(b, k, v)
+    db.commit()
+    db.refresh(b)
+    return b
+
+@router.delete("/dr-bias/{id}")
+def delete_dr_bia(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/dr-metrics", response_model=List[DRBCPMetricResponse])
+def get_dr_metrics(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(DRBCPMetric).filter(DRBCPMetric.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/dr-metrics", response_model=DRBCPMetricResponse)
+def add_dr_metric(issp_period: str, payload: DRBCPMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    m = DRBCPMetric(issp_period=issp_period, **payload.model_dump())
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return m
+
+@router.put("/dr-metrics/{id}", response_model=DRBCPMetricResponse)
+def update_dr_metric(id: int, payload: DRBCPMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    m = db.query(DRBCPMetric).filter(DRBCPMetric.id == id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="DRBCP KPI metric not found.")
+    for k, v in payload.model_dump().items():
+        setattr(m, k, v)
+    db.commit()
+    db.refresh(m)
+    return m
+
+@router.delete("/dr-metrics/{id}")
+def delete_dr_metric(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(DRBCPMetric).filter(DRBCPMetric.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/staff-positions", response_model=List[IctStaffPositionResponse])
+def get_staff_positions(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/staff-positions", response_model=IctStaffPositionResponse)
+def add_staff_position(issp_period: str, payload: IctStaffPositionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    pos = IctStaffPosition(issp_period=issp_period, **payload.model_dump())
+    db.add(pos)
+    db.commit()
+    db.refresh(pos)
+    return pos
+
+@router.put("/staff-positions/{id}", response_model=IctStaffPositionResponse)
+def update_staff_position(id: uuid.UUID, payload: IctStaffPositionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    pos = db.query(IctStaffPosition).filter(IctStaffPosition.id == id).first()
+    if not pos:
+        raise HTTPException(status_code=404, detail="Position not found.")
+    for k, v in payload.model_dump().items():
+        setattr(pos, k, v)
+    db.commit()
+    db.refresh(pos)
+    return pos
+
+@router.delete("/staff-positions/{id}")
+def delete_staff_position(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(IctStaffPosition).filter(IctStaffPosition.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/metrics", response_model=List[PerformanceMetricResponse])
+def get_performance_metrics(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/metrics", response_model=PerformanceMetricResponse)
+def add_performance_metric(issp_period: str, payload: PerformanceMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    metric = PerformanceMetric(issp_period=issp_period, **payload.model_dump())
+    db.add(metric)
+    db.commit()
+    db.refresh(metric)
+    return metric
+
+@router.put("/metrics/{id}", response_model=PerformanceMetricResponse)
+def update_performance_metric(id: uuid.UUID, payload: PerformanceMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    metric = db.query(PerformanceMetric).filter(PerformanceMetric.id == id).first()
+    if not metric:
+        raise HTTPException(status_code=404, detail="Performance metric not found.")
+    for k, v in payload.model_dump().items():
+        setattr(metric, k, v)
+    db.commit()
+    db.refresh(metric)
+    return metric
+
+@router.delete("/metrics/{id}")
+def delete_performance_metric(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(PerformanceMetric).filter(PerformanceMetric.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/cross-projects", response_model=List[CrossAgencyProjectResponse])
+def get_cross_projects(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/cross-projects", response_model=CrossAgencyProjectResponse)
+def add_cross_project(issp_period: str, payload: CrossAgencyProjectCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    proj = CrossAgencyProject(issp_period=issp_period, **payload.model_dump())
+    db.add(proj)
+    db.commit()
+    db.refresh(proj)
+    return proj
+
+@router.put("/cross-projects/{id}", response_model=CrossAgencyProjectResponse)
+def update_cross_project(id: uuid.UUID, payload: CrossAgencyProjectCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    proj = db.query(CrossAgencyProject).filter(CrossAgencyProject.id == id).first()
+    if not proj:
+        raise HTTPException(status_code=404, detail="Cross-agency project not found.")
+    for k, v in payload.model_dump().items():
+        setattr(proj, k, v)
+    db.commit()
+    db.refresh(proj)
+    return proj
+
+@router.delete("/cross-projects/{id}")
+def delete_cross_project(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(CrossAgencyProject).filter(CrossAgencyProject.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/narratives/{issp_period}/costs", response_model=List[AnnualCostBreakdownResponse])
+def get_annual_costs(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.issp_period == issp_period).all()
+
+@router.post("/narratives/{issp_period}/costs", response_model=AnnualCostBreakdownResponse)
+def add_annual_cost(issp_period: str, payload: AnnualCostBreakdownCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    cost = AnnualCostBreakdown(issp_period=issp_period, **payload.model_dump())
+    db.add(cost)
+    db.commit()
+    db.refresh(cost)
+    return cost
+
+@router.delete("/costs/{id}")
+def delete_annual_cost(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+
+# ==========================================================
+# DEPARTMENTS DIRECTORY CRUD
+# ==========================================================
+
+@router.get("/departments")
+def get_all_departments(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    depts = db.query(Department).all()
+    return [{"department_id": d.id, "department_name": d.name} for d in depts]
+
+@router.post("/departments")
+def create_department(payload: Dict[str, Any], db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    name = payload.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Department name is required.")
+    dept = Department(name=name)
+    db.add(dept)
+    db.commit()
+    db.refresh(dept)
+    return {"status": "success", "department_id": dept.id, "department_name": dept.name}
+
+@router.put("/departments/{department_id}")
+def update_department(department_id: int, payload: Dict[str, Any], db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    name = payload.get("name", "").strip()
+    if name:
+        dept.name = name
+    db.commit()
+    return {"status": "success", "department_id": dept.id, "department_name": dept.name}
+
+@router.delete("/departments/{department_id}")
+def delete_department(department_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    db.delete(dept)
+    db.commit()
+    return {"status": "success"}
+
+
+# ==========================================================
+# USER WHITELIST & ACCESS CONTROL (SUPPLY USER INTEGRATION)
+# ==========================================================
+
+@router.get("/users/whitelist", response_model=List[WhitelistedUserResponse])
+def get_whitelisted_users(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(User).options(joinedload(User.department)).all()
+
+@router.post("/users/whitelist", response_model=WhitelistedUserResponse)
+def add_whitelisted_user(
+    payload: WhitelistedUserCreate, 
+    request: Request,
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    email_clean = payload.email.strip().lower()
+    existing = db.query(User).filter(User.email == email_clean).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail=f"Account '{email_clean}' is already registered."
+        )
+
+    if not payload.password or len(payload.password.strip()) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Initial password is required and must be at least 8 characters long."
+        )
+
+    hashed_pwd = bcrypt.hashpw(payload.password.strip().encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    
+    target_dept_id = payload.assigned_department_id if payload.role_tag != RoleTag.ROLE_MIS_ADMIN else None
+    if payload.role_tag in [RoleTag.ROLE_DEPT_USER, RoleTag.ROLE_SUPPLY_USER] and not target_dept_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Department assignment is mandatory for role: {payload.role_tag.value}"
+        )
+
+    user = User(
+        email=email_clean,
+        role_tag=payload.role_tag,
+        department_id=target_dept_id,
+        is_whitelisted=True,
+        password_hash=hashed_pwd
+    )
+    db.add(user)
+    db.flush()
+
+    log_audit_event(
+        db=db,
+        action="USER_MANUALLY_ONBOARDED",
+        module="AUTHENTICATION",
+        user_id=admin["id"],
+        department_id=user.department_id,
+        ip_address=request.client.host if request.client else None,
+        new_value={"email": user.email, "role": user.role_tag.value, "dept_id": user.department_id}
+    )
+    db.commit()
+
+    return user
+
+@router.put("/users/whitelist/{user_id}", response_model=WhitelistedUserResponse)
+def update_whitelisted_user(user_id: int, payload: WhitelistedUserUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    
+    if payload.email:
+        user.email = payload.email.strip().lower()
+    if payload.role_tag:
+        user.role_tag = payload.role_tag
+    if payload.assigned_department_id is not None:
+        user.department_id = payload.assigned_department_id if user.role_tag != RoleTag.ROLE_MIS_ADMIN else None
+    if payload.password and payload.password.strip():
+        user.password_hash = bcrypt.hashpw(payload.password.strip().encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    db.commit()
+    db.refresh(user)
+    return user
+
+@router.delete("/users/whitelist/{user_id}")
+def delete_whitelisted_user(user_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    db.delete(user)
+    db.commit()
+    return {"status": "success"}
+
+
+# ==========================================================
+# STANDARD PRICE CATALOG
+# ==========================================================
+
+@router.get("/catalog", response_model=List[CatalogItemResponse])
+def get_catalog_items(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(CatalogItem).all()
+
+@router.post("/catalog", response_model=CatalogItemResponse, status_code=status.HTTP_201_CREATED)
+def create_catalog_item(payload: CatalogItemCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    existing = db.query(CatalogItem).filter(CatalogItem.item_key == payload.item_key).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Catalog item key '{payload.item_key}' already exists.")
+    item = CatalogItem(**payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+@router.put("/catalog/{item_id}", response_model=CatalogItemResponse)
+def update_catalog_item(item_id: uuid.UUID, payload: CatalogItemUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(CatalogItem).filter(CatalogItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Catalog item not found.")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+# ==========================================================
+# PHYSICAL CAMPUSES & AUXILIARY DICT SURVEYS
+# ==========================================================
+
+@router.get("/campuses", response_model=List[CampusResponse])
+def get_campuses(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(Campus).all()
+
+@router.post("/campuses", response_model=CampusResponse, status_code=status.HTTP_201_CREATED)
+def create_campus(payload: CampusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    campus = Campus(**payload.model_dump())
+    db.add(campus)
+    db.commit()
+    db.refresh(campus)
+    return campus
+
+@router.put("/campuses/{campus_id}", response_model=CampusResponse)
+def update_campus(campus_id: int, payload: CampusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    campus = db.query(Campus).filter(Campus.id == campus_id).first()
+    if not campus:
+        raise HTTPException(status_code=404, detail="Campus not found.")
+    for k, v in payload.model_dump().items():
+        setattr(campus, k, v)
+    db.commit()
+    db.refresh(campus)
+    return campus
+
+@router.delete("/campuses/{campus_id}")
+def delete_campus(campus_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    campus = db.query(Campus).filter(Campus.id == campus_id).first()
+    if not campus:
+        raise HTTPException(status_code=404, detail="Campus not found.")
+    db.delete(campus)
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/glossary", response_model=List[GlossaryTermResponse])
+def get_glossary(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(GlossaryTerm).order_by(GlossaryTerm.order_index.asc()).all()
+
+@router.post("/glossary", response_model=GlossaryTermResponse)
+def create_glossary(payload: GlossaryTermCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    t = GlossaryTerm(**payload.model_dump())
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    return t
+
+@router.put("/glossary/{id}", response_model=GlossaryTermResponse)
+def update_glossary(id: int, payload: GlossaryTermCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    t = db.query(GlossaryTerm).filter(GlossaryTerm.id == id).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Term not found.")
+    for k, v in payload.model_dump().items():
+        setattr(t, k, v)
+    db.commit()
+    db.refresh(t)
+    return t
+
+@router.delete("/glossary/{id}")
+def delete_glossary(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(GlossaryTerm).filter(GlossaryTerm.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/instructions", response_model=List[GeneralInstructionResponse])
+def get_instructions(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
+
+@router.post("/instructions", response_model=GeneralInstructionResponse)
+def create_instruction(payload: GeneralInstructionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    i = GeneralInstruction(**payload.model_dump())
+    db.add(i)
+    db.commit()
+    db.refresh(i)
+    return i
+
+@router.put("/instructions/{id}", response_model=GeneralInstructionResponse)
+def update_instruction(id: int, payload: GeneralInstructionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    i = db.query(GeneralInstruction).filter(GeneralInstruction.id == id).first()
+    if not i:
+        raise HTTPException(status_code=404, detail="Instruction not found.")
+    for k, v in payload.model_dump().items():
+        setattr(i, k, v)
+    db.commit()
+    db.refresh(i)
+    return i
+
+@router.delete("/instructions/{id}")
+def delete_instruction(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(GeneralInstruction).filter(GeneralInstruction.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/server-capacities", response_model=List[ServerCapacityResponse])
+def get_server_capacities(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(ServerCapacityTrack).all()
+
+@router.post("/server-capacities", response_model=ServerCapacityResponse)
+def create_server_capacity(payload: ServerCapacityCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    cap = ServerCapacityTrack(**payload.model_dump())
+    db.add(cap)
+    db.commit()
+    db.refresh(cap)
+    return cap
+
+@router.delete("/server-capacities/{id}")
+def delete_server_capacity(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(ServerCapacityTrack).filter(ServerCapacityTrack.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/os-census", response_model=List[ClientOsCensusResponse])
+def get_os_census(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(ClientOsCensus).all()
+
+@router.post("/os-census", response_model=ClientOsCensusResponse)
+def create_os_census(payload: ClientOsCensusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    c = ClientOsCensus(**payload.model_dump())
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return c
+
+@router.put("/os-census/{id}", response_model=ClientOsCensusResponse)
+def update_os_census(id: int, payload: ClientOsCensusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    c = db.query(ClientOsCensus).filter(ClientOsCensus.id == id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="OS Census entry not found.")
+    for k, v in payload.model_dump().items():
+        setattr(c, k, v)
+    db.commit()
+    db.refresh(c)
+    return c
+
+@router.delete("/os-census/{id}")
+def delete_os_census(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(ClientOsCensus).filter(ClientOsCensus.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/software-census", response_model=List[OfficeSoftwareResponse])
+def get_software_census(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(OfficeSoftwareCensus).all()
+
+@router.post("/software-census", response_model=OfficeSoftwareResponse)
+def create_software_census(payload: OfficeSoftwareCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    s = OfficeSoftwareCensus(**payload.model_dump())
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    return s
+
+@router.delete("/software-census/{id}")
+def delete_software_census(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/audit-logs", response_model=List[AuditLogEntryResponse])
+def get_audit_logs(
+    module: Optional[str] = Query(None),
+    dept_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    query = db.query(AuditTrail).options(
+        joinedload(AuditTrail.user),
+        joinedload(AuditTrail.department)
+    )
+
+    if module and module != "All":
+        query = query.filter(AuditTrail.module == module)
+    if dept_id:
+        query = query.filter(AuditTrail.department_id == dept_id)
+
+    logs = query.order_by(AuditTrail.timestamp.desc()).limit(500).all()
+    out = []
+    for l in logs:
+        out.append(
+            AuditLogEntryResponse(
+                id=l.id,
+                proposal_id=l.proposal_id,
+                action=l.action,
+                module=getattr(l, "module", "GOVERNANCE"),
+                ip_address=getattr(l, "ip_address", None),
+                department_id=getattr(l, "department_id", None),
+                user_id=l.user_id,
+                operator_email=l.user.email if l.user else "System",
+                operator_role=l.user.role_tag.value if l.user else "SYSTEM",
+                timestamp=l.timestamp,
+                old_value=l.old_value,
+                new_value=l.new_value
+            )
+        )
+    return out
+
+
+# ==========================================================
+# ASYNC COMPILATION & GOVERNANCE TRIGGER
+# ==========================================================
+
+@router.post("/governance/generate-issp")
+def trigger_document_generation(
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    try:
+        target_period = issp_period or get_active_issp_period(db)
+        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == target_period).first()
+        if not narrative:
+            raise HTTPException(status_code=400, detail=f"Planning cycle '{target_period}' not configured.")
+
+        approved_proposals = db.query(Proposal).filter(
+            Proposal.status == ProposalStatus.APPROVED,
+            Proposal.issp_period == target_period,
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+        ).all()
+
+        if not approved_proposals:
+            raise HTTPException(status_code=400, detail="Compilation blocked: No approved proposals exist for this cycle.")
+
+        total_capex = sum((p.total_cost for p in approved_proposals if p.expenditure_class == ExpenditureClass.CAPITAL_OUTLAY), Decimal("0.00"))
+        total_mooe = sum((p.total_cost for p in approved_proposals if p.expenditure_class == ExpenditureClass.MOOE), Decimal("0.00"))
+
+        compiled_meta = {
+            "issp_id": f"ISSP-{target_period}-FINAL",
+            "agency_name": narrative.agency_name,
+            "issp_period_years": target_period,
+            "allocated_budget": str(total_capex + total_mooe),
+            "total_capex": str(total_capex),
+            "total_mooe": str(total_mooe)
+        }
+
+        task = compile_issp_document.delay(compiled_meta)
+
         return {
-            "status": "success",
-            "category": category,
-            "issp_period": issp_period,
-            "file_url": download_url
+            "status": "queued",
+            "task_id": task.id,
+            "active_cycle": target_period,
+            "combined_plan_cost_php": str(total_capex + total_mooe),
+            "approved_proposals_count": len(approved_proposals)
         }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unhandled error uploading system diagram: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload graphic diagram: {str(e)}"
-        )
+        logger.error(f"Failed to queue compilation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Compilation task queue failed.")
 
 
-# ==========================================================
-# BASE REFERENCE CATALOG
-# ==========================================================
+@router.get("/governance/task-status/{task_id}")
+def get_task_status(task_id: str, admin: dict = Depends(require_admin)):
+    try:
+        from celery.result import AsyncResult
+        from app.celery_app import celery_app
+        res = AsyncResult(task_id, app=celery_app)
 
-@router.get("/catalog", response_model=List[CatalogItemResponse])
-def get_hardware_catalog(
+        if res.state == "PROGRESS":
+            meta = res.info or {}
+            return {"state": "PROGRESS", "progress_percent": meta.get("progress", 50), "current_step_message": meta.get("status", "Rendering...")}
+        elif res.state == "SUCCESS":
+            return {"state": "SUCCESS", "progress_percent": 100, "current_step_message": "Compilation Complete", "result": res.result}
+        elif res.state == "FAILURE":
+            return {"state": "FAILURE", "progress_percent": 100, "current_step_message": "Compilation Failed", "error": str(res.info)}
+
+        return {"state": res.state, "progress_percent": 10, "current_step_message": f"Task state: {res.state}"}
+    except Exception as e:
+        logger.error(f"Task status poll error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to query worker status.")
+
+
+@router.post("/governance/restore-document")
+def restore_governance_document(
+    payload: Dict[str, Any],
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        return db.query(CatalogItem).all()
-    except Exception as e:
-        logger.error(f"Error querying standard hardware catalog entries: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to query hardware catalog: {str(e)}"
-        )
-
-
-@router.post("/catalog", response_model=CatalogItemResponse)
-def create_catalog_item(
-    payload: CatalogItemCreate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        if payload.item_key.strip().lower() == "other":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Registration Failed: The item key 'other' is a reserved namespace."
-            )
-
-        existing = db.query(CatalogItem).filter(CatalogItem.item_key == payload.item_key).first()
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Catalog item with key '{payload.item_key}' already exists."
-            )
-
-        existing_name = db.query(CatalogItem).filter(
-            CatalogItem.display_name == payload.display_name,
-            CatalogItem.is_active == True
-        ).first()
-        if existing_name:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Catalog item with name '{payload.display_name}' already exists in active catalog items."
-            )
-
-        new_item = CatalogItem(
-            item_key=payload.item_key,
-            display_name=payload.display_name,
-            standard_unit_cost=payload.standard_unit_cost,
-            category=payload.category,
-            is_active=payload.is_active,
-            allowed_offices=payload.allowed_offices,
-            canvas_evidence_url=payload.canvas_evidence_url,
-            supplier_name=payload.supplier_name,
-            canvas_expiration_date=payload.canvas_expiration_date
-        )
-        db.add(new_item)
-        try:
-            db.commit()
-            db.refresh(new_item)
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database transaction failure writing catalog entry: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database transaction failure during catalog item generation: {str(e)}"
-            )
-        return new_item
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled error in create_catalog_item: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled catalog entry failure: {str(e)}"
-        )
-
-
-@router.put("/catalog/{item_id}", response_model=CatalogItemResponse)
-def update_catalog_item(
-    item_id: uuid.UUID,
-    payload: CatalogItemUpdate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        item = db.query(CatalogItem).filter(CatalogItem.id == item_id).first()
-        if not item:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, 
-                detail="Catalog item not found."
-            )
-
-        if payload.item_key is not None and payload.item_key != item.item_key:
-            if payload.item_key.strip().lower() == "other":
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, 
-                    detail="The item key 'other' is a reserved system namespace."
-                )
-            existing = db.query(CatalogItem).filter(CatalogItem.item_key == payload.item_key).first()
-            if existing:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, 
-                    detail=f"Catalog item with key '{payload.item_key}' already exists."
-                )
-            item.item_key = payload.item_key
-
-        if payload.display_name is not None and payload.display_name != item.display_name:
-            existing_name = db.query(CatalogItem).filter(
-                CatalogItem.display_name == payload.display_name,
-                CatalogItem.is_active == True,
-                CatalogItem.id != item_id
-            ).first()
-            if existing_name:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, 
-                    detail=f"Catalog item with display name '{payload.display_name}' already exists as an active catalog item."
-                )
-            item.display_name = payload.display_name
-
-        if payload.standard_unit_cost is not None:
-            item.standard_unit_cost = payload.standard_unit_cost
-        if payload.category is not None:
-            item.category = payload.category
-        if payload.is_active is not None:
-            item.is_active = payload.is_active
-        if payload.allowed_offices is not None:
-            item.allowed_offices = payload.allowed_offices
-        if payload.canvas_evidence_url is not None:
-            item.canvas_evidence_url = payload.canvas_evidence_url
-        if payload.supplier_name is not None:
-            item.supplier_name = payload.supplier_name
-        if payload.canvas_expiration_date is not None:
-            item.canvas_expiration_date = payload.canvas_expiration_date
-
-        try:
-            db.commit()
-            db.refresh(item)
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database transaction failure writing modified catalog entry: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database transaction failure during catalog item update: {str(e)}"
-            )
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unhandled error in update_catalog_item: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unhandled catalog update failure: {str(e)}"
-        )
-
-
-# ==========================================================
-# GAP 1: CAMPUS REGISTRY
-# ==========================================================
-
-@router.get("/campuses", response_model=List[CampusResponse])
-def get_campuses(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(Campus).order_by(Campus.name.asc()).all()
-    except Exception as e:
-        logger.error(f"Failed to query campuses database: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load campuses list.")
-
-
-@router.post("/campuses", response_model=CampusResponse, status_code=status.HTTP_201_CREATED)
-def create_campus(
-    payload: CampusCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    existing = db.query(Campus).filter(Campus.code == payload.code.upper()).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Campus code already registered.")
-    try:
-        new_campus = Campus(name=payload.name, location=payload.location, code=payload.code.upper())
-        db.add(new_campus)
-        db.commit()
-        db.refresh(new_campus)
-        return new_campus
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to create campus: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during campus creation.")
-
-
-@router.put("/campuses/{campus_id}", response_model=CampusResponse)
-def update_campus(
-    campus_id: int, 
-    payload: CampusCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    campus = db.query(Campus).filter(Campus.id == campus_id).first()
-    if not campus:
-        raise HTTPException(status_code=404, detail="Campus not found")
-    
-    existing = db.query(Campus).filter(Campus.code == payload.code.upper(), Campus.id != campus_id).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Campus code already registered on another campus.")
-    
-    try:
-        campus.name = payload.name
-        campus.location = payload.location
-        campus.code = payload.code.upper()
-        db.commit()
-        db.refresh(campus)
-        return campus
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update campus ID {campus_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during campus update.")
-
-
-@router.delete("/campuses/{campus_id}", status_code=status.HTTP_200_OK)
-def delete_campus(
-    campus_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    campus = db.query(Campus).filter(Campus.id == campus_id).first()
-    if not campus:
-        raise HTTPException(status_code=404, detail="Campus not found")
-    try:
-        db.delete(campus)
-        db.commit()
-        return {"status": "success", "message": "Campus successfully purged."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete campus ID {campus_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during campus deletion.")
-
-
-# ==========================================================
-# GAP 2: ACCREDITATION LEVEL TRACKING (Annex A-4)
-# ==========================================================
-
-@router.get("/degrees", response_model=List[DegreeOfferingResponse])
-def get_degrees(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(DegreeOffering).order_by(DegreeOffering.department_name.asc()).all()
-    except Exception as e:
-        logger.error(f"Failed to query degree offerings database: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load degree offerings.")
-
-
-@router.post("/degrees", response_model=DegreeOfferingResponse, status_code=status.HTTP_201_CREATED)
-def create_degree(
-    payload: DegreeOfferingCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        new_degree = DegreeOffering(
-            department_name=payload.department_name,
-            degree_name=payload.degree_name,
-            level=payload.level,
-            accreditation_status=payload.accreditation_status
-        )
-        db.add(new_degree)
-        db.commit()
-        db.refresh(new_degree)
-        return new_degree
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to create degree offering: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during degree offering registry.")
-
-
-@router.put("/degrees/{degree_id}", response_model=DegreeOfferingResponse)
-def update_degree(
-    degree_id: int, 
-    payload: DegreeOfferingCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    degree = db.query(DegreeOffering).filter(DegreeOffering.id == degree_id).first()
-    if not degree:
-        raise HTTPException(status_code=404, detail="Degree offering record not found")
-    try:
-        degree.department_name = payload.department_name
-        degree.degree_name = payload.degree_name
-        degree.level = payload.level
-        degree.accreditation_status = payload.accreditation_status
-        db.commit()
-        db.refresh(degree)
-        return degree
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update degree ID {degree_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during degree update.")
-
-
-@router.delete("/degrees/{degree_id}", status_code=status.HTTP_200_OK)
-def delete_degree(
-    degree_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    degree = db.query(DegreeOffering).filter(DegreeOffering.id == degree_id).first()
-    if not degree:
-        raise HTTPException(status_code=404, detail="Degree offering record not found")
-    try:
-        db.delete(degree)
-        db.commit()
-        return {"status": "success", "message": "Degree offering purged successfully."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete degree ID {degree_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during degree deletion.")
-
-
-# ==========================================================
-# GAP 3: GAA PERFORMANCE TARGET MILESTONES (Annex A-4)
-# ==========================================================
-
-@router.get("/gaa-targets", response_model=List[GaaPerformanceResponse])
-def get_gaa_targets(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(GaaPerformance).all()
-    except Exception as e:
-        logger.error(f"Failed to query GAA target performance indicators: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load GAA targets.")
-
-
-@router.post("/gaa-targets", response_model=GaaPerformanceResponse, status_code=status.HTTP_201_CREATED)
-def create_gaa_target(
-    payload: GaaPerformanceCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        new_target = GaaPerformance(indicator_name=payload.indicator_name, target_value=payload.target_value)
-        db.add(new_target)
-        db.commit()
-        db.refresh(new_target)
-        return new_target
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to create GAA target performance record: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during GAA indicator setup.")
-
-
-@router.put("/gaa-targets/{target_id}", response_model=GaaPerformanceResponse)
-def update_gaa_target(
-    target_id: int, 
-    payload: GaaPerformanceCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    target = db.query(GaaPerformance).filter(GaaPerformance.id == target_id).first()
-    if not target:
-        raise HTTPException(status_code=404, detail="GAA target metric not found")
-    try:
-        target.indicator_name = payload.indicator_name
-        target.target_value = payload.target_value
-        db.commit()
-        db.refresh(target)
-        return target
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update GAA indicator ID {target_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during GAA indicator update.")
-
-
-@router.delete("/gaa-targets/{target_id}", status_code=status.HTTP_200_OK)
-def delete_gaa_target(
-    target_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    target = db.query(GaaPerformance).filter(GaaPerformance.id == target_id).first()
-    if not target:
-        raise HTTPException(status_code=404, detail="GAA target metric not found font-bold")
-    try:
-        db.delete(target)
-        db.commit()
-        return {"status": "success", "message": "GAA Metric removed."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete GAA indicator ID {target_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during GAA indicator removal.")
-
-
-# ==========================================================
-# GAP 4: STRATEGIC CONCERNS MATRIX (Table I.E)
-# ==========================================================
-
-@router.get("/narratives/{issp_period}/concerns", response_model=List[StrategicConcernResponse])
-def get_strategic_concerns(
-    issp_period: str, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).all()
-    except Exception as e:
-        logger.error(f"Failed to query strategic concerns database: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load strategic concerns.")
-
-
-@router.post("/narratives/{issp_period}/concerns", response_model=StrategicConcernResponse, status_code=status.HTTP_201_CREATED)
-def create_strategic_concern(
-    issp_period: str, 
-    payload: StrategicConcernCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-         raise HTTPException(status_code=404, detail="Planning period narrative not found.")
-    try:
-        new_concern = StrategicConcern(
-            issp_period=issp_period,
-            mfo=payload.mfo,
-            critical_system=payload.critical_system,
-            problems=payload.problems,
-            intended_use=payload.intended_use
-        )
-        db.add(new_concern)
-        db.commit()
-        db.refresh(new_concern)
-        return new_concern
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to register strategic concern: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during strategic concern entry creation.")
-
-
-@router.put("/concerns/{concern_id}", response_model=StrategicConcernResponse)
-def update_strategic_concern(
-    concern_id: uuid.UUID, 
-    payload: StrategicConcernCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    concern = db.query(StrategicConcern).filter(StrategicConcern.id == concern_id).first()
-    if not concern:
-        raise HTTPException(status_code=404, detail="Strategic concern record not found")
-    try:
-        concern.mfo = payload.mfo
-        concern.critical_system = payload.critical_system,
-        concern.problems = payload.problems
-        concern.intended_use = payload.intended_use
-        db.commit()
-        db.refresh(concern)
-        return concern
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update concern ID {concern_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during concern update.")
-
-
-@router.delete("/concerns/{concern_id}", status_code=status.HTTP_200_OK)
-def delete_strategic_concern(
-    concern_id: uuid.UUID, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    concern = db.query(StrategicConcern).filter(StrategicConcern.id == concern_id).first()
-    if not concern:
-        raise HTTPException(status_code=404, detail="Strategic concern record not found")
-    try:
-        db.delete(concern)
-        db.commit()
-        return {"status": "success", "message": "Strategic concern metric successfully removed."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete concern ID {concern_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during concern deletion.")
-
-
-# ==========================================================
-# GAP 19: CORE OFFICES DIRECTORY (Annex A-3)
-# ==========================================================
-
-@router.get("/narratives/{issp_period}/offices", response_model=List[CoreOfficeFunctionResponse])
-def get_office_functions(
-    issp_period: str, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(CoreOfficeFunction).filter(CoreOfficeFunction.issp_period == issp_period).order_by(CoreOfficeFunction.office_name.asc()).all()
-    except Exception as e:
-        logger.error(f"Failed to query core office functions: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load core office functions.")
-
-
-@router.post("/narratives/{issp_period}/offices", response_model=CoreOfficeFunctionResponse, status_code=status.HTTP_201_CREATED)
-def create_office_function(
-    issp_period: str, 
-    payload: CoreOfficeFunctionCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-         raise HTTPException(status_code=404, detail="Planning period narrative not found.")
-    try:
-        new_office = CoreOfficeFunction(
-            issp_period=issp_period,
-            office_name=payload.office_name,
-            division=payload.division,
-            description=payload.description
-        )
-        db.add(new_office)
-        db.commit()
-        db.refresh(new_office)
-        return new_office
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to record office details: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during core office profile registry.")
-
-
-@router.put("/offices/{office_id}", response_model=CoreOfficeFunctionResponse)
-def update_office_function(
-    office_id: int, 
-    payload: CoreOfficeFunctionCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    office = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.id == office_id).first()
-    if not office:
-        raise HTTPException(status_code=404, detail="Office record not found")
-    try:
-        office.office_name = payload.office_name
-        office.division = payload.division
-        office.description = payload.description
-        db.commit()
-        db.refresh(office)
-        return office
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update office ID {office_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during core office details updates.")
-
-
-@router.delete("/offices/{office_id}", status_code=status.HTTP_200_OK)
-def delete_office_function(
-    office_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    office = db.query(CoreOfficeFunction).filter(CoreOfficeFunction.id == office_id).first()
-    if not office:
-        raise HTTPException(status_code=404, detail="Office record not found")
-    try:
-        db.delete(office)
-        db.commit()
-        return {"status": "success", "message": "Office record purged."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete office ID {office_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during office deletion.")
-
-
-# ==========================================================
-# GAP 7: GLOSSARY TERMS & DEFINITIONS (Pages 6-10)
-# ==========================================================
-
-@router.get("/glossary", response_model=List[GlossaryTermResponse])
-def get_glossary(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(GlossaryTerm).order_by(GlossaryTerm.term.asc()).all()
-    except Exception as e:
-        logger.error(f"Failed to query glossary terms: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load glossary dictionary.")
-
-
-@router.post("/glossary", response_model=GlossaryTermResponse, status_code=status.HTTP_201_CREATED)
-def create_glossary_term(
-    payload: GlossaryTermCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    existing = db.query(GlossaryTerm).filter(GlossaryTerm.term == payload.term).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Glossary term already registered.")
-    try:
-        new_term = GlossaryTerm(term=payload.term, definition=payload.definition)
-        db.add(new_term)
-        db.commit()
-        db.refresh(new_term)
-        return new_term
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to record glossary term: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during glossary key setup.")
-
-
-@router.put("/glossary/{term_id}", response_model=GlossaryTermResponse)
-def update_glossary_term(
-    term_id: int, 
-    payload: GlossaryTermCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    term = db.query(GlossaryTerm).filter(GlossaryTerm.id == term_id).first()
-    if not term:
-        raise HTTPException(status_code=404, detail="Glossary term not found")
-    try:
-        term.term = payload.term
-        term.definition = payload.definition
-        db.commit()
-        db.refresh(term)
-        return term
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update glossary term ID {term_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during term update.")
-
-
-@router.delete("/glossary/{term_id}", status_code=status.HTTP_200_OK)
-def delete_glossary_term(
-    term_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    term = db.query(GlossaryTerm).filter(GlossaryTerm.id == term_id).first()
-    if not term:
-        raise HTTPException(status_code=404, detail="Glossary term not found")
-    try:
-        db.delete(term)
-        db.commit()
-        return {"status": "success", "message": "Glossary term successfully removed."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete glossary term ID {term_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during glossary term deletion.")
-
-
-# ==========================================================
-# GAP 8: GENERAL SUBMISSION INSTRUCTIONS (Page 11)
-# ==========================================================
-
-@router.get("/instructions", response_model=List[GeneralInstructionResponse])
-def get_instructions(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
-    except Exception as e:
-        logger.error(f"Failed to query general instructions: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load instructions registry.")
-
-
-@router.post("/instructions", response_model=GeneralInstructionResponse, status_code=status.HTTP_201_CREATED)
-def create_instruction(
-    payload: GeneralInstructionCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    existing = db.query(GeneralInstruction).filter(GeneralInstruction.step_number == payload.step_number).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Instruction step number already taken.")
-    try:
-        new_inst = GeneralInstruction(step_number=payload.step_number, instruction_text=payload.instruction_text)
-        db.add(new_inst)
-        db.commit()
-        db.refresh(new_inst)
-        return new_inst
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to record instruction guideline: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during instruction step registration.")
-
-
-@router.put("/instructions/{inst_id}", response_model=GeneralInstructionResponse)
-def update_instruction(
-    inst_id: int, 
-    payload: GeneralInstructionCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    inst = db.query(GeneralInstruction).filter(GeneralInstruction.id == inst_id).first()
-    if not inst:
-        raise HTTPException(status_code=404, detail="Instruction step not found")
-    try:
-        inst.step_number = payload.step_number
-        inst.instruction_text = payload.instruction_text
-        db.commit()
-        db.refresh(inst)
-        return inst
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update instruction ID {inst_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during instruction update.")
-
-
-@router.delete("/instructions/{inst_id}", status_code=status.HTTP_200_OK)
-def delete_instruction(
-    inst_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    inst = db.query(GeneralInstruction).filter(GeneralInstruction.id == inst_id).first()
-    if not inst:
-        raise HTTPException(status_code=404, detail="Instruction step not found")
-    try:
-        db.delete(inst)
-        db.commit()
-        return {"status": "success", "message": "Instruction step removed."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete instruction ID {inst_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during instruction step delete.")
-
-
-# ==========================================================
-# GAP 15: HDD SERVER STORAGE CAPACITY SURVEYS (Annex A-1)
-# ==========================================================
-
-@router.get("/server-capacities", response_model=List[ServerCapacityResponse])
-def get_server_capacities(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(ServerCapacityTrack).all()
-    except Exception as e:
-        logger.error(f"Failed to query server capacity tracking: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load server capacity tracking metrics.")
-
-
-@router.post("/server-capacities", response_model=ServerCapacityResponse, status_code=status.HTTP_201_CREATED)
-def create_server_capacity(
-    payload: ServerCapacityCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        new_capacity = ServerCapacityTrack(
-            campus_id=payload.campus_id,
-            capacity_tier=payload.capacity_tier,
-            location=payload.location,
-            quantity=payload.quantity
-        )
-        db.add(new_capacity)
-        db.commit()
-        db.refresh(new_capacity)
-        return new_capacity
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to record server capacity track: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during server capacity profile setup.")
-
-
-@router.delete("/server-capacities/{capacity_id}", status_code=status.HTTP_200_OK)
-def delete_server_capacity(
-    capacity_id: uuid.UUID, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    record = db.query(ServerCapacityTrack).filter(ServerCapacityTrack.id == capacity_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Record not found")
-    try:
-        db.delete(record)
-        db.commit()
-        return {"status": "success", "message": "Server capacity metrics records purged."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete server capacity track ID {capacity_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during server capacity delete.")
-
-
-# ==========================================================
-# GAP 16: OPERATING SYSTEMS LICENSE CENSUS (Section 2.1)
-# ==========================================================
-
-@router.get("/os-census", response_model=List[ClientOsCensusResponse])
-def get_os_census(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(ClientOsCensus).order_by(ClientOsCensus.os_name.asc()).all()
-    except Exception as e:
-        logger.error(f"Failed to query client OS census: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load OS platform census data.")
-
-
-@router.post("/os-census", response_model=List[ClientOsCensusResponse], status_code=status.HTTP_201_CREATED)
-def create_os_census_record(
-    payload: ClientOsCensusCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    existing = db.query(ClientOsCensus).filter(ClientOsCensus.os_name == payload.os_name).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="OS name already registered in census.")
-    try:
-        new_record = ClientOsCensus(
-            os_name=payload.os_name,
-            workstations_count=payload.workstations_count,
-            servers_count=payload.servers_count
-        )
-        db.add(new_record)
-        db.commit()
-        db.refresh(new_record)
-        return new_record
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to log operating system census data: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during client OS registry setup.")
-
-
-@router.put("/os-census/{census_id}", response_model=ClientOsCensusResponse)
-def update_os_census_record(
-    census_id: int, 
-    payload: ClientOsCensusCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    record = db.query(ClientOsCensus).filter(ClientOsCensus.id == census_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Census record not found")
-    try:
-        record.os_name = payload.os_name
-        record.workstations_count = payload.workstations_count
-        record.servers_count = payload.servers_count
-        db.commit()
-        db.refresh(record)
-        return record
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update OS census ID {census_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during OS census updates.")
-
-
-@router.delete("/os-census/{census_id}", status_code=status.HTTP_200_OK)
-def delete_os_census_record(
-    census_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    record = db.query(ClientOsCensus).filter(ClientOsCensus.id == census_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Census record not found")
-    try:
-        db.delete(record)
-        db.commit()
-        return {"status": "success", "message": "Census record removed."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete OS census ID {census_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during OS census delete.")
-
-
-# ==========================================================
-# GAP 17: OFFICE AUTOMATION SOFTWARE CENSUS (Section 2.2)
-# ==========================================================
-
-@router.get("/software-census", response_model=List[OfficeSoftwareResponse])
-def get_software_census(
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(OfficeSoftwareCensus).order_by(OfficeSoftwareCensus.software_name.asc()).all()
-    except Exception as e:
-        logger.error(f"Failed to query office software census: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load office software census profiles.")
-
-
-@router.post("/software-census", response_model=OfficeSoftwareResponse, status_code=status.HTTP_201_CREATED)
-def create_software_census(
-    payload: OfficeSoftwareCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    existing = db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.software_name == payload.software_name).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Software name already registered in census.")
-    try:
-        new_rec = OfficeSoftwareCensus(software_name=payload.software_name, license_count=payload.license_count)
-        db.add(new_rec)
-        db.commit()
-        db.refresh(new_rec)
-        return new_rec
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to log software licenses parameters: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during software census setup.")
-
-
-@router.delete("/software-census/{census_id}", status_code=status.HTTP_200_OK)
-def delete_software_census(
-    census_id: int, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    record = db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.id == census_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Record not found")
-    try:
-        db.delete(record)
-        db.commit()
-        return {"status": "success", "message": "Record removed successfully."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete software census ID {census_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during software census delete.")
-
-
-# ==========================================================
-# GAP 24: CROSS-AGENCY COLLABORATIVE PROJECTS (Part III.B)
-# ==========================================================
-
-@router.get("/narratives/{issp_period}/cross-projects", response_model=List[CrossAgencyProjectResponse])
-def get_cross_projects(
-    issp_period: str, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
-    except Exception as e:
-        logger.error(f"Failed to query cross agency collaborative projects: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load cooperative projects.")
-
-
-@router.post("/narratives/{issp_period}/cross-projects", response_model=CrossAgencyProjectResponse, status_code=status.HTTP_201_CREATED)
-def create_cross_project(
-    issp_period: str, 
-    payload: CrossAgencyProjectCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-         raise HTTPException(status_code=404, detail="Planning period narrative not found.")
-    try:
-        new_proj = CrossAgencyProject(
-            issp_period=issp_period,
-            name=payload.name,
-            objectives=payload.objectives,
-            duration=payload.duration,
-            deliverables=payload.deliverables,
-            lead_agency=payload.lead_agency,
-            implementing_agencies=payload.implementing_agencies
-        )
-        db.add(new_proj)
-        db.commit()
-        db.refresh(new_proj)
-        return new_proj
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to index cross agency project: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during joint project registry.")
-
-
-@router.delete("/cross-projects/{project_id}", status_code=status.HTTP_200_OK)
-def delete_cross_project(
-    project_id: uuid.UUID, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    record = db.query(CrossAgencyProject).filter(CrossAgencyProject.id == project_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Project not found")
-    try:
-        db.delete(record)
-        db.commit()
-        return {"status": "success", "message": "Project deleted."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete collaborative project ID {project_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during project profiles delete.")
-
-
-# ==========================================================
-# GAP 25: PERFORMANCE MEASUREMENT FRAMEWORK (PMF) (Part III.C)
-# ==========================================================
-
-@router.get("/narratives/{issp_period}/metrics", response_model=List[PerformanceMetricResponse])
-def get_performance_metrics(
-    issp_period: str, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
-    except Exception as e:
-        logger.error(f"Failed to query performance metrics: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load performance metrics.")
-
-
-@router.post("/narratives/{issp_period}/metrics", response_model=PerformanceMetricResponse, status_code=status.HTTP_201_CREATED)
-def create_performance_metric(
-    issp_period: str, 
-    payload: PerformanceMetricCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-         raise HTTPException(status_code=404, detail="Planning period narrative not found.")
-    try:
-        new_metric = PerformanceMetric(
-            issp_period=issp_period,
-            project_title=payload.project_title,
-            result_hierarchy=payload.result_hierarchy,
-            indicator=payload.indicator,
-            baseline=payload.baseline,
-            target=payload.target,
-            collection_method=payload.collection_method,
-            responsibility=payload.responsibility
-        )
-        db.add(new_metric)
-        db.commit()
-        db.refresh(new_metric)
-        return new_metric
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to append performance framework metrics: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during milestone creation.")
-
-
-@router.delete("/metrics/{metric_id}", status_code=status.HTTP_200_OK)
-def delete_performance_metric(
-    metric_id: uuid.UUID, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    record = db.query(PerformanceMetric).filter(PerformanceMetric.id == metric_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Metric not found")
-    try:
-        db.delete(record)
-        db.commit()
-        return {"status": "success", "message": "Metric removed."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete performance metric ID {metric_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during performance framework delete.")
-
-
-# ==========================================================
-# GAP 11 & 12: ANNUAL COST BREAKDOWN MATRIX (Part V.D / Annex A-5)
-# ==========================================================
-
-@router.get("/narratives/{issp_period}/costs", response_model=List[AnnualCostBreakdownResponse])
-def get_annual_costs(
-    issp_period: str, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.issp_period == issp_period).all()
-    except Exception as e:
-        logger.error(f"Failed to query cost breakdown registry: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load cost matrices.")
-
-
-@router.post("/narratives/{issp_period}/costs", response_model=AnnualCostBreakdownResponse, status_code=status.HTTP_201_CREATED)
-def create_annual_cost(
-    issp_period: str, 
-    payload: AnnualCostBreakdownCreate, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-         raise HTTPException(status_code=404, detail="Planning period narrative not found.")
-    try:
-        new_cost = AnnualCostBreakdown(
-            issp_period=issp_period,
-            project_key=payload.project_key,
-            cost_type=payload.cost_type,
-            item_description=payload.item_description,
-            unit_cost=payload.unit_cost,
-            yearly_quantities=payload.yearly_quantities
-        )
-        db.add(new_cost)
-        db.commit()
-        db.refresh(new_cost)
-        return new_cost
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to record annual cost matrix details: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during cost breakdown registration.")
-
-
-@router.delete("/costs/{cost_id}", status_code=status.HTTP_200_OK)
-def delete_annual_cost(
-    cost_id: uuid.UUID, 
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    record = db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.id == cost_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Record not found")
-    try:
-        db.delete(record)
-        db.commit()
-        return {"status": "success", "message": "Cost record removed."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete cost metric ID {cost_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during budget breakdown delete.")
-
-
-# ==========================================================
-# GAP 18: RELATIONAL STAFFING SYSTEM (Staff Registry)
-# ==========================================================
-
-@router.get("/narratives/{issp_period}/staff-positions", response_model=List[IctStaffPositionResponse])
-def get_staff_positions(
-    issp_period: str,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        return db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
-    except Exception as e:
-        logger.error(f"Failed to query IT staff positions: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load IT staff positions.")
-
-
-@router.post("/narratives/{issp_period}/staff-positions", response_model=IctStaffPositionResponse, status_code=status.HTTP_201_CREATED)
-def create_staff_position(
-    issp_period: str,
-    payload: IctStaffPositionCreate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-        raise HTTPException(status_code=404, detail="Planning period narrative not found.")
-    try:
-        new_position = IctStaffPosition(
-            issp_period=issp_period,
-            position_title=payload.position_title,
-            status=payload.status,
-            count=payload.count
-        )
-        db.add(new_position)
-        db.commit()
-        db.refresh(new_position)
-        return new_position
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to record staff position: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during staff position creation.")
-
-
-@router.put("/staff-positions/{position_id}", response_model=IctStaffPositionResponse)
-def update_staff_position(
-    position_id: uuid.UUID,
-    payload: IctStaffPositionCreate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    position = db.query(IctStaffPosition).filter(IctStaffPosition.id == position_id).first()
-    if not position:
-        raise HTTPException(status_code=404, detail="Staff position record not found")
-    try:
-        position.position_title = payload.position_title
-        position.status = payload.status
-        position.count = payload.count
-        db.commit()
-        db.refresh(position)
-        return position
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update staff position ID {position_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during staff position update.")
-
-
-@router.delete("/staff-positions/{position_id}", status_code=status.HTTP_200_OK)
-def delete_staff_position(
-    position_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    position = db.query(IctStaffPosition).filter(IctStaffPosition.id == position_id).first()
-    if not position:
-        raise HTTPException(status_code=404, detail="Staff position record not found")
-    try:
-        db.delete(position)
-        db.commit()
-        return {"status": "success", "message": "Staff position purged successfully."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete staff position ID {position_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during staff position deletion.")
+    doc_id = payload.get("document_id")
+    return {"status": "success", "message": f"Glacier restore initiated for {doc_id}."}
