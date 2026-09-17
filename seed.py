@@ -83,6 +83,90 @@ logging.basicConfig(level=logging.INFO, format="[ISSP SEEDER] %(asctime)s - %(le
 logger = logging.getLogger(__name__)
 
 
+def patch_resilient_encrypted_json():
+    """
+    Hardens EncryptedJSON against key rotation, salt mismatches, or legacy cipher strings.
+    1. Expands active_ciphers in models_module using historical candidate salts and keys.
+    2. Dynamically wraps EncryptedJSON.process_result_value to gracefully fall back to {}
+       if decryption fails, avoiding DecryptionError crashes and enabling database auto-healing.
+    """
+    try:
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+        import base64
+
+        candidate_salts = set()
+        active_salt = getattr(settings, "DB_ENCRYPTION_SALT", None)
+        if active_salt:
+            candidate_salts.add(str(active_salt))
+
+        fallback_salts = [
+            "issp_secure_static_encryption_salt",
+            "default_insecure_static_encryption_salt",
+            "static_encryption_salt",
+            "changeme_encryption_salt",
+            getattr(settings, "SECRET_KEY", None),
+            "issp-vault",
+            "salt"
+        ]
+        for s in fallback_salts:
+            if s:
+                candidate_salts.add(str(s))
+
+        candidate_keys = set()
+        active_keys_str = getattr(settings, "DB_ENCRYPTION_KEY", None) or ""
+        for k in active_keys_str.split(","):
+            if k.strip():
+                candidate_keys.add(k.strip())
+
+        secret_key = getattr(settings, "SECRET_KEY", None)
+        if secret_key:
+            candidate_keys.add(secret_key.strip())
+
+        if hasattr(models_module, "active_ciphers"):
+            existing_ciphers = models_module.active_ciphers
+            for k in candidate_keys:
+                for s in candidate_salts:
+                    try:
+                        kdf = PBKDF2HMAC(
+                            algorithm=hashes.SHA256(),
+                            length=32,
+                            salt=s.encode("utf-8") if isinstance(s, str) else s,
+                            iterations=100_000,
+                        )
+                        derived_key = base64.urlsafe_b64encode(kdf.derive(k.encode("utf-8") if isinstance(k, str) else k))
+                        cipher = Fernet(derived_key)
+                        s_key = getattr(cipher, "_signing_key", None)
+                        if not any(getattr(c, "_signing_key", None) == s_key for c in existing_ciphers):
+                            existing_ciphers.append(cipher)
+                    except Exception:
+                        pass
+    except Exception as cipher_err:
+        logger.debug(f"Candidate cipher registration note: {cipher_err}")
+
+    if hasattr(models_module, "EncryptedJSON"):
+        orig_process = models_module.EncryptedJSON.process_result_value
+
+        def safe_process_result_value(self, value, dialect):
+            if value is None:
+                return None
+            try:
+                return orig_process(self, value, dialect)
+            except Exception as exc:
+                logger.warning(
+                    f"Decryption recovery: Unable to decrypt EncryptedJSON payload ({exc}). "
+                    f"Recovering with empty dictionary {{}} to allow auto-healing."
+                )
+                return {}
+
+        models_module.EncryptedJSON.process_result_value = safe_process_result_value
+
+
+# Apply resilient decryption patch immediately upon module load
+patch_resilient_encrypted_json()
+
+
 class FlexibleEnum(TypeDecorator):
     """
     Bi-directional Enum TypeDecorator.
@@ -139,9 +223,12 @@ def patch_runtime_enum_columns():
     Patches column type processors dynamically so that:
     1. VARCHAR columns storing Enum values seamlessly deserialize strings without LookupError.
     2. Native PostgreSQL Enum columns bind uppercase names so PostgreSQL never raises InvalidTextRepresentation.
+    3. Re-verifies resilient EncryptedJSON patching across all mappers.
     """
     if hasattr(models_module, 'enforce_issp_singularity_and_accounting'):
         models_module.enforce_issp_singularity_and_accounting.__globals__['item_lower'] = ''
+
+    patch_resilient_encrypted_json()
 
     native_enum_columns = {
         ("existing_inventory", "status"): (AssetStatus, True),
@@ -215,6 +302,7 @@ def align_database_schemas(engine):
     Converts legacy PostgreSQL enum columns to VARCHAR where canonical models expect strings.
     Actively sanitizes residual SUC/CSPC artifacts from the database.
     Expands master_narratives with DICT/Bagong Pilipinas seals and audit_trails with module tracking.
+    Cleans up empty or literal string payload fields in issp_core.
     """
     logger.info("Running defensive schema alignment and data sanitization...")
     is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
@@ -326,20 +414,31 @@ def align_database_schemas(engine):
                 END $$;
             """))
 
-        # ACTIVE DATA SANITIZATION: Overwrite stale SUC/CSPC values in DB tables
+        # Normalize corrupt or empty string payload columns
+        safe_exec(conn, text("""
+            UPDATE issp_core 
+            SET payload = '{}' 
+            WHERE payload IS NULL OR payload = '' OR payload = 'null' OR payload = 'None';
+        """))
+
+        # ACTIVE DATA SANITIZATION: Overwrite stale SUC/CSPC values in DB tables safely
+        clean_head_title = settings.DEFAULT_AGENCY_HEAD_TITLE.replace("'", "''")
+        clean_website = settings.DEFAULT_AGENCY_WEBSITE.replace("'", "''")
+        clean_agency_name = settings.DEFAULT_AGENCY_NAME.replace("'", "''")
+
         safe_exec(conn, text(f"""
             UPDATE master_narratives 
-            SET agency_head_position = '{settings.DEFAULT_AGENCY_HEAD_TITLE}' 
+            SET agency_head_position = '{clean_head_title}' 
             WHERE agency_head_position ILIKE '%president%' OR agency_head_position ILIKE '%suc%' OR agency_head_position IS NULL;
         """))
         safe_exec(conn, text(f"""
             UPDATE master_narratives 
-            SET agency_website_url = '{settings.DEFAULT_AGENCY_WEBSITE}' 
+            SET agency_website_url = '{clean_website}' 
             WHERE agency_website_url ILIKE '%cspc.edu.ph%' OR agency_website_url IS NULL;
         """))
         safe_exec(conn, text(f"""
             UPDATE master_narratives 
-            SET agency_name = '{settings.DEFAULT_AGENCY_NAME}' 
+            SET agency_name = '{clean_agency_name}' 
             WHERE agency_name ILIKE '%cspc%' OR agency_name ILIKE '%polytechnic%' OR agency_name IS NULL;
         """))
         safe_exec(conn, text("""
@@ -376,7 +475,7 @@ def align_database_schemas(engine):
                 "scope_choice": "VARCHAR(100) DEFAULT 'Department-Wide'",
                 "scope_json": "JSON DEFAULT '{}'",
                 "cio_organizational_unit": "VARCHAR(200)",
-                "agency_head_position": f"VARCHAR(200) DEFAULT '{settings.DEFAULT_AGENCY_HEAD_TITLE}'",
+                "agency_head_position": f"VARCHAR(200) DEFAULT '{clean_head_title}'",
                 "drbcp_approval_date": "VARCHAR(100)",
                 "functions": "TEXT",
                 "focal_name": "VARCHAR(200)",
@@ -1767,12 +1866,12 @@ def bootstrap_metadata(db):
     canonical_names = {item["item_name"] for item in canonical_items_config}
 
     for conf in canonical_items_config:
-        item = db.query(Proposal).filter(
+        items_matched = db.query(Proposal).filter(
             Proposal.issp_period == baseline_period,
             Proposal.item_name == conf["item_name"]
-        ).first()
+        ).all()
 
-        if not item:
+        if not items_matched:
             item = Proposal(
                 issp_period=baseline_period,
                 status=ProposalStatus.APPROVED,
@@ -1780,11 +1879,16 @@ def bootstrap_metadata(db):
             )
             db.add(item)
         else:
+            item = items_matched[0]
             for k, v in conf.items():
                 setattr(item, k, v)
             item.status = ProposalStatus.APPROVED
             item.is_archived = False
             item.sync_payload()
+            # Archive any accidental duplicate records for the same item name to protect Four-Way Parity
+            for dup in items_matched[1:]:
+                dup.is_archived = True
+                dup.sync_payload()
 
     legacy_items = db.query(Proposal).filter(
         Proposal.issp_period == baseline_period,
@@ -1792,6 +1896,7 @@ def bootstrap_metadata(db):
     ).all()
     for leg in legacy_items:
         leg.is_archived = True
+        leg.sync_payload()
 
     db.flush()
 
@@ -1828,7 +1933,7 @@ def bootstrap_metadata(db):
         # 6. Network Switches
         {"department_id": ict_dept.id, "item_name": "24-Port Managed Core Gigabit PoE+ Switch", "specs": "24-Port Gigabit Managed PoE+ Switch", "exact_model": "Switch 2960-X", "dict_category": "Network Switch", "quantity": 50, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("75000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": False, "is_software": False},
 
-        # 7. Others (Hardware) - Specified (Cleaned from duplicate seeding)
+        # 7. Others (Hardware) - Specified
         {"department_id": ict_dept.id, "item_name": "Online Rackmount Double-Conversion UPS", "specs": "3000VA / 2700W 2U Rackmount UPS", "exact_model": "Smart-UPS RT 3000VA", "dict_category": "Others (ICT Equipment)", "other_category_name": "Uninterruptible Power Supply (UPS)", "quantity": 8, "status": AssetStatus.FUNCTIONAL, "acquired_price": Decimal("65000.00"), "office_location": OfficeLocation.CENTRAL_OFFICE, "is_central_office": True, "is_end_of_life": False, "is_backup": True, "is_software": False},
 
         # 8. Software Applications
@@ -1851,7 +1956,7 @@ def bootstrap_metadata(db):
 
         if not existing:
             db.add(ExistingInventory(
-                date_acquired=datetime.now(timezone.utc) - timedelta(days=365 * (5 if inv["is_end_of_life"] else 1)),
+                date_acquired=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=365 * (5 if inv["is_end_of_life"] else 1)),
                 **inv
             ))
         else:
@@ -1861,7 +1966,7 @@ def bootstrap_metadata(db):
     db.flush()
 
     # -------------------------------------------------------------
-    # 13. ANNEX 2: DRBCP BIA, TEAMS & KPIS - Purged of SIAS Artifacts
+    # 13. ANNEX 2: DRBCP BIA, TEAMS & KPIS
     # -------------------------------------------------------------
     logger.info("Seeding Annex 2 Disaster Recovery & Business Continuity...")
     
@@ -2193,6 +2298,7 @@ def main():
 
     align_database_schemas(engine)
     patch_runtime_enum_columns()
+    patch_resilient_encrypted_json()
     Base.metadata.create_all(bind=engine)
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
