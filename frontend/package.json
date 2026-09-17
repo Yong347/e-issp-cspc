@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "predev": "npx kill-port 5173",
-    "dev": "vite"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "oxlint"
   },
   "dependencies": {
     "lucide-react": "^0.344.0",
