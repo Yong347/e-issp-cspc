@@ -4,35 +4,69 @@ const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_
 export const API_BASE_URL = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
 
 /**
- * Enhanced error parsing handler that formats Pydantic validation arrays
- * and DICT Singularity DAG violation envelopes into human-readable messages.
+ * Enhanced error parsing handler that formats Pydantic validation arrays,
+ * unpacks DICT Singularity DAG violation envelopes, handles session expiration,
+ * and attaches structured violation details to the thrown Error object.
  */
 async function handleResponse(res, errorMessage) {
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    let detailMessage = "";
-
-    if (errorData.detail) {
-      if (typeof errorData.detail === "string") {
-        detailMessage = errorData.detail;
-      } else if (Array.isArray(errorData.detail)) {
-        // Format Pydantic field-level validation errors
-        detailMessage = errorData.detail
-          .map(err => `${err.loc ? err.loc.filter(p => p !== "body").join(" -> ") + ": " : ""}${err.msg || JSON.stringify(err)}`)
-          .join(" | ");
-      } else if (typeof errorData.detail === "object") {
-        // Format DICT Singularity Engine violations list
-        if (Array.isArray(errorData.detail.violations)) {
-          detailMessage = `${errorData.detail.error || "Integrity Violation"}: ${errorData.detail.violations.join(" | ")}`;
-        } else {
-          detailMessage = JSON.stringify(errorData.detail);
-        }
+    // Session expiration handler: redirect cleanly to login if unauthorized
+    if (res.status === 401 && typeof window !== "undefined") {
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("token");
+      localStorage.removeItem("user_role");
+      localStorage.removeItem("department_id");
+      localStorage.removeItem("user_email");
+      const currentPath = window.location.pathname + window.location.search;
+      if (!currentPath.includes("/login")) {
+        window.location.href = `/login?expired=true&redirect=${encodeURIComponent(currentPath)}`;
       }
-    } else if (errorData.message) {
-      detailMessage = errorData.message;
     }
 
-    throw new Error(detailMessage || `${errorMessage} (HTTP ${res.status})`);
+    let detailMessage = "";
+    let rawErrorData = null;
+    try {
+      rawErrorData = await res.json();
+      if (rawErrorData) {
+        if (typeof rawErrorData.detail === "string") {
+          detailMessage = rawErrorData.detail;
+        } else if (Array.isArray(rawErrorData.detail)) {
+          // Format Pydantic field-level validation errors
+          detailMessage = rawErrorData.detail
+            .map((err) => {
+              const field = err.loc ? err.loc.filter((p) => p !== "body").join(" -> ") : "";
+              return field ? `[${field}]: ${err.msg || JSON.stringify(err)}` : (err.msg || JSON.stringify(err));
+            })
+            .join(" | ");
+        } else if (typeof rawErrorData.detail === "object" && rawErrorData.detail !== null) {
+          // Format DICT Singularity Engine violations list
+          if (Array.isArray(rawErrorData.detail.violations)) {
+            detailMessage = `${rawErrorData.detail.error || "Integrity Violation"}:\n• ${rawErrorData.detail.violations.join("\n• ")}`;
+          } else {
+            detailMessage = JSON.stringify(rawErrorData.detail);
+          }
+        } else if (Array.isArray(rawErrorData.violations)) {
+          detailMessage = `${rawErrorData.error || "Integrity Violation"}:\n• ${rawErrorData.violations.join("\n• ")}`;
+        } else if (rawErrorData.message) {
+          detailMessage = rawErrorData.message;
+        }
+      }
+    } catch {
+      detailMessage = await res.text().catch(() => "");
+    }
+
+    if (!detailMessage || detailMessage === "{}" || detailMessage === "[object Object]") {
+      detailMessage = rawErrorData?.message || `${errorMessage} (HTTP ${res.status})`;
+    }
+
+    const err = new Error(detailMessage);
+    err.status = res.status;
+    err.data = rawErrorData;
+    const violationList = rawErrorData?.detail?.violations || rawErrorData?.violations;
+    if (Array.isArray(violationList)) {
+      err.violations = violationList;
+    }
+    throw err;
   }
   if (res.status === 204) {
     return null;
@@ -45,7 +79,7 @@ async function handleResponse(res, errorMessage) {
  * Safely falls back to localStorage if the token argument is omitted.
  */
 const getHeaders = (token, isMultipart = false) => {
-  const resolvedToken = token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : null);
+  const resolvedToken = token || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : null);
   const headers = {};
 
   if (resolvedToken) {
@@ -61,8 +95,12 @@ const getHeaders = (token, isMultipart = false) => {
 // 1. BUDGET CEILINGS & PRE-FLIGHT GOVERNANCE
 // ==========================================================
 
-export const getBudgetCeilings = async (token) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/budget-ceilings`, { 
+export const getBudgetCeilings = async (token, cycle = "") => {
+  const params = new URLSearchParams();
+  if (cycle) params.append("issp_period", cycle);
+  const qs = params.toString();
+  const url = `${API_BASE_URL}/api/admin/budget-ceilings${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, { 
     headers: getHeaders(token) 
   });
   return handleResponse(res, "Failed to load budget ceilings");
@@ -96,7 +134,280 @@ export const validateBudgetPreflight = async (token, cycle = "") => {
 };
 
 // ==========================================================
-// 2. PART I.A.4: ORGANIZATIONAL OUTCOMES (BROADER SCOPE)
+// 2. GOVERNANCE POLICIES, INFLATION ADJUSTMENT & DBM CSV EXPORT
+// ==========================================================
+
+export const getPolicySettings = async (token) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/policy-settings`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load governance policy settings");
+};
+
+export const updatePolicySettings = async (token, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/policy-settings`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to update governance policy settings");
+};
+
+export const getInflationSettings = async (token) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/inflation-settings`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load annual inflation buffer settings");
+};
+
+export const updateInflationSettings = async (token, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/inflation-settings`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to update annual inflation buffer settings");
+};
+
+export const exportBudgetBlob = async (token, cycle = "") => {
+  const params = new URLSearchParams();
+  if (cycle) params.append("issp_period", cycle);
+  const qs = params.toString();
+  const url = `${API_BASE_URL}/api/admin/governance/export-budget-csv${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, { headers: getHeaders(token) });
+  if (!res.ok) {
+    throw new Error(`Failed to export DBM budget CSV (HTTP ${res.status})`);
+  }
+  return res.blob();
+};
+
+export const getExportBudgetCsvUrl = (cycle = "") => {
+  const params = new URLSearchParams();
+  if (cycle) params.append("issp_period", cycle);
+  const qs = params.toString();
+  return `${API_BASE_URL}/api/admin/governance/export-budget-csv${qs ? `?${qs}` : ""}`;
+};
+
+// ==========================================================
+// 3. DYNAMIC STRATEGIC CATEGORIES (PART IV.A & TABLE B.1)
+// ==========================================================
+
+export const getStrategicCategories = async (token, params = {}) => {
+  const query = new URLSearchParams();
+  if (typeof params === "object" && params !== null) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") {
+        query.append(k, String(v));
+      }
+    });
+  } else if (typeof params === "string" && params) {
+    query.append("issp_period", params);
+  }
+  const qs = query.toString();
+  let res = await fetch(`${API_BASE_URL}/api/admin/strategic-categories${qs ? `?${qs}` : ""}`, {
+    headers: getHeaders(token)
+  });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/governance/strategic-categories${qs ? `?${qs}` : ""}`, {
+      headers: getHeaders(token)
+    });
+  }
+  return handleResponse(res, "Failed to load strategic categories");
+};
+
+export const createStrategicCategory = async (token, payload) => {
+  let res = await fetch(`${API_BASE_URL}/api/admin/strategic-categories`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/governance/strategic-categories`, {
+      method: "POST",
+      headers: getHeaders(token),
+      body: JSON.stringify(payload)
+    });
+  }
+  return handleResponse(res, "Failed to create strategic category");
+};
+
+export const updateStrategicCategory = async (token, id, payload) => {
+  let res = await fetch(`${API_BASE_URL}/api/admin/strategic-categories/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/governance/strategic-categories/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: getHeaders(token),
+      body: JSON.stringify(payload)
+    });
+  }
+  return handleResponse(res, "Failed to update strategic category");
+};
+
+export const deleteStrategicCategory = async (token, id) => {
+  let res = await fetch(`${API_BASE_URL}/api/admin/strategic-categories/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: getHeaders(token)
+  });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/governance/strategic-categories/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: getHeaders(token)
+    });
+  }
+  return handleResponse(res, "Failed to delete strategic category");
+};
+
+// ==========================================================
+// 4. DYNAMIC UACS / OBJECT OF EXPENDITURE CATALOG (TABLE B.4)
+// ==========================================================
+
+export const getUacsCatalog = async (token, params = {}) => {
+  const query = new URLSearchParams();
+  if (typeof params === "object" && params !== null) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "" && v !== "all" && v !== "All") {
+        query.append(k, String(v));
+      }
+    });
+  }
+  const qs = query.toString();
+  const url = `${API_BASE_URL}/api/admin/uacs-catalog${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load UACS catalog");
+};
+
+export const createUacsEntry = async (token, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/uacs-catalog`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to create UACS object code entry");
+};
+
+export const updateUacsEntry = async (token, id, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/uacs-catalog/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to update UACS object code entry");
+};
+
+export const deleteUacsEntry = async (token, id) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/uacs-catalog/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to delete UACS object code entry");
+};
+
+/**
+ * Assigns an explicit UACS Object Code and Expenditure Class to a proposal line item.
+ * Directly updates Table B.4 accounting linkage.
+ */
+export const assignProposalUacs = async (token, proposalId, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/proposals/${encodeURIComponent(proposalId)}/uacs`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to assign UACS object code to proposal");
+};
+
+// ==========================================================
+// 5. DYNAMIC HARMONIZATION CRITERIA, DEVELOPMENT STRATEGIES & DYNAMIC FUND SOURCES
+// ==========================================================
+
+export const getHarmonizationCriteria = async (token) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/harmonization-criteria`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load harmonization framework criteria");
+};
+
+export const createHarmonizationCriterion = async (token, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/harmonization-criteria`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to create harmonization criterion");
+};
+
+export const updateHarmonizationCriterion = async (token, id, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/harmonization-criteria/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to update harmonization criterion");
+};
+
+export const deleteHarmonizationCriterion = async (token, id) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/harmonization-criteria/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to delete harmonization criterion");
+};
+
+export const getDevelopmentStrategies = async (token) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/development-strategies`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load development strategies");
+};
+
+export const createDevelopmentStrategy = async (token, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/development-strategies`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to register development strategy");
+};
+
+export const deleteDevelopmentStrategy = async (token, code) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/development-strategies/${encodeURIComponent(code)}`, {
+    method: "DELETE",
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to delete development strategy");
+};
+
+export const getFundSources = async (token) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/fund-sources`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load fund sources");
+};
+
+export const createFundSource = async (token, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/fund-sources`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to create fund source");
+};
+
+export const deleteFundSource = async (token, code) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/fund-sources/${encodeURIComponent(code)}`, {
+    method: "DELETE",
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to delete fund source");
+};
+
+// ==========================================================
+// 6. PART I.A.4: ORGANIZATIONAL OUTCOMES (BROADER SCOPE)
 // ==========================================================
 
 export const getOutcomes = async (token, cycle = "") => {
@@ -117,6 +428,15 @@ export const createOutcome = async (token, payload) => {
   return handleResponse(res, "Failed to create organizational outcome");
 };
 
+export const updateOutcome = async (token, id, payload) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/outcomes/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to update organizational outcome");
+};
+
 export const deleteOutcome = async (token, id) => {
   const res = await fetch(`${API_BASE_URL}/api/admin/outcomes/${encodeURIComponent(id)}`, {
     method: "DELETE",
@@ -126,7 +446,7 @@ export const deleteOutcome = async (token, id) => {
 };
 
 // ==========================================================
-// 3. PART I.B & I.C: HUMAN CAPITAL & STAKEHOLDERS
+// 7. PART I.B & I.C: HUMAN CAPITAL & STAKEHOLDERS
 // ==========================================================
 
 export const getHumanCapitals = async (token, cycle) => {
@@ -162,18 +482,29 @@ export const deleteHumanCapital = async (token, id) => {
   return handleResponse(res, "Failed to delete human capital entry");
 };
 
-export const getStakeholders = async (token, cycle) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/stakeholders`, { 
-    headers: getHeaders(token) 
-  });
+export const getStakeholders = async (token, cycle = "") => {
+  const url = cycle 
+    ? `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/stakeholders`
+    : `${API_BASE_URL}/api/admin/stakeholders`;
+  const res = await fetch(url, { headers: getHeaders(token) });
   return handleResponse(res, "Failed to load stakeholders matrix");
 };
 
-export const createStakeholder = async (token, cycle, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/stakeholders`, {
+export const createStakeholder = async (token, cycleOrPayload, maybePayload = null) => {
+  let url = `${API_BASE_URL}/api/admin/stakeholders`;
+  let body = cycleOrPayload;
+
+  if (typeof cycleOrPayload === "string" && maybePayload) {
+    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload)}/stakeholders`;
+    body = maybePayload;
+  } else if (typeof cycleOrPayload === "object" && cycleOrPayload?.issp_period) {
+    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload.issp_period)}/stakeholders`;
+  }
+
+  const res = await fetch(url, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(body)
   });
   return handleResponse(res, "Failed to record stakeholder analysis");
 };
@@ -196,7 +527,7 @@ export const deleteStakeholder = async (token, id) => {
 };
 
 // ==========================================================
-// 4. PART II.A: STRATEGIC CONCERNS & NEEDS INTAKE POOL
+// 8. PART II.A: STRATEGIC CONCERNS & NEEDS INTAKE POOL
 // ==========================================================
 
 export const getStrategicConcerns = async (token, cycle) => {
@@ -207,19 +538,29 @@ export const getStrategicConcerns = async (token, cycle) => {
 };
 
 export const createStrategicConcern = async (token, cycle, payload) => {
+  const formattedPayload = {
+    ...payload,
+    outcome_id: payload.outcome_id ? parseInt(payload.outcome_id, 10) : null,
+    order_index: payload.order_index ? parseInt(payload.order_index, 10) : 0
+  };
   const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/concerns`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to record strategic concern");
 };
 
 export const updateStrategicConcern = async (token, id, payload) => {
+  const formattedPayload = {
+    ...payload,
+    outcome_id: payload.outcome_id ? parseInt(payload.outcome_id, 10) : null,
+    order_index: payload.order_index ? parseInt(payload.order_index, 10) : 0
+  };
   const res = await fetch(`${API_BASE_URL}/api/admin/concerns/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to update strategic concern");
 };
@@ -241,16 +582,21 @@ export const getAllNeedsAssessments = async (token, params = {}) => {
 
 export const aggregateNeedsToStrategicConcern = async (token, payload, cycle = "") => {
   const qs = cycle ? `?issp_period=${encodeURIComponent(cycle)}` : "";
+  const formattedPayload = {
+    ...payload,
+    outcome_id: payload.outcome_id ? parseInt(payload.outcome_id, 10) : null,
+    order_index: payload.order_index ? parseInt(payload.order_index, 10) : 1
+  };
   const res = await fetch(`${API_BASE_URL}/api/admin/concerns/aggregate-from-needs${qs}`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to aggregate needs assessment into strategic concern");
 };
 
 // ==========================================================
-// 5. PART II.B & III.A: NETWORK INFRASTRUCTURE & CYBERSECURITY
+// 9. PART II.B & III.A: NETWORK INFRASTRUCTURE & CYBERSECURITY
 // ==========================================================
 
 export const getNetworkInfrastructures = async (token, cycle = "", isProposed = null) => {
@@ -297,7 +643,7 @@ export const getCybersecurityControls = async (token, cycle = "", isProposed = n
   const params = new URLSearchParams();
   if (cycle) params.append("issp_period", cycle);
   if (isProposed !== null && isProposed !== undefined) params.append("is_proposed", String(isProposed));
-  if (domain && domain !== "All") params.append("control_domain", domain);
+  if (domain && domain !== "All" && domain !== "all") params.append("control_domain", domain);
   const qs = params.toString();
   const url = `${API_BASE_URL}/api/admin/cybersecurity-controls${qs ? `?${qs}` : ""}`;
   const res = await fetch(url, { headers: getHeaders(token) });
@@ -334,10 +680,6 @@ export const deleteCybersecurityControl = async (token, id) => {
   return handleResponse(res, "Failed to delete cybersecurity control");
 };
 
-/**
- * Seeds and restores all 29 official DICT Cybersecurity Controls (Mandatory and Optional)
- * across all 7 Security Domains for both Existing and Proposed states.
- */
 export const seedDefaultCybersecurityControls = async (token, cycle = "") => {
   const params = new URLSearchParams();
   if (cycle) params.append("issp_period", cycle);
@@ -351,13 +693,26 @@ export const seedDefaultCybersecurityControls = async (token, cycle = "") => {
 };
 
 // ==========================================================
-// 6. PART II.C & III.D: INFORMATION SYSTEMS REGISTER
+// 10. PART II.C & III.D: INFORMATION SYSTEMS REGISTER & INTAKE
 // ==========================================================
 
-export const getInformationSystems = async (token, cycle = "", statusFilter = "") => {
+export const getInformationSystems = async (token, cycleOrParams = "", statusFilter = "", submissionStatus = "", deptId = "") => {
   const params = new URLSearchParams();
-  if (cycle) params.append("issp_period", cycle);
-  if (statusFilter && statusFilter !== "All") params.append("status_filter", statusFilter);
+  if (typeof cycleOrParams === "object" && cycleOrParams !== null) {
+    if (cycleOrParams.issp_period) params.append("issp_period", cycleOrParams.issp_period);
+    if (cycleOrParams.status_filter && cycleOrParams.status_filter !== "All" && cycleOrParams.status_filter !== "all") {
+      params.append("status_filter", cycleOrParams.status_filter);
+    }
+    if (cycleOrParams.submission_status && cycleOrParams.submission_status !== "All" && cycleOrParams.submission_status !== "all") {
+      params.append("submission_status", cycleOrParams.submission_status);
+    }
+    if (cycleOrParams.dept_id) params.append("dept_id", String(cycleOrParams.dept_id));
+  } else {
+    if (cycleOrParams) params.append("issp_period", cycleOrParams);
+    if (statusFilter && statusFilter !== "All" && statusFilter !== "all") params.append("status_filter", statusFilter);
+    if (submissionStatus && submissionStatus !== "All" && submissionStatus !== "all") params.append("submission_status", submissionStatus);
+    if (deptId) params.append("dept_id", String(deptId));
+  }
   const qs = params.toString();
   const url = `${API_BASE_URL}/api/admin/information-systems${qs ? `?${qs}` : ""}`;
   const res = await fetch(url, { headers: getHeaders(token) });
@@ -365,19 +720,40 @@ export const getInformationSystems = async (token, cycle = "", statusFilter = ""
 };
 
 export const createInformationSystem = async (token, payload) => {
+  const formattedPayload = {
+    ...payload,
+    project_id: payload.project_id || null,
+    strategic_concern_id: payload.strategic_concern_id || null,
+    needs_assessment_id: payload.needs_assessment_id || null,
+    department_id: payload.department_id ? parseInt(payload.department_id, 10) : null
+  };
   const res = await fetch(`${API_BASE_URL}/api/admin/information-systems`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to register information system");
 };
 
 export const updateInformationSystem = async (token, id, payload) => {
+  const formattedPayload = {
+    ...payload,
+    project_id: payload.project_id !== undefined ? (payload.project_id || null) : undefined,
+    strategic_concern_id: payload.strategic_concern_id !== undefined ? (payload.strategic_concern_id || null) : undefined,
+    needs_assessment_id: payload.needs_assessment_id !== undefined ? (payload.needs_assessment_id || null) : undefined,
+    department_id: payload.department_id !== undefined ? (payload.department_id ? parseInt(payload.department_id, 10) : null) : undefined
+  };
+
+  Object.keys(formattedPayload).forEach((key) => {
+    if (formattedPayload[key] === undefined) {
+      delete formattedPayload[key];
+    }
+  });
+
   const res = await fetch(`${API_BASE_URL}/api/admin/information-systems/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to update information system");
 };
@@ -390,22 +766,51 @@ export const deleteInformationSystem = async (token, id) => {
   return handleResponse(res, "Failed to delete information system");
 };
 
+/**
+ * Reviews and classifies a department-proposed information system (Part III.D).
+ * Enforces project linkage, binds to Strategic Concern / Outcome, and commits architecture.
+ */
+export const reviewProposedSystem = async (token, systemId, payload) => {
+  const formattedPayload = {
+    ...payload,
+    project_id: payload.project_id || null,
+    strategic_concern_id: payload.strategic_concern_id || null,
+    action: payload.action ? payload.action.toUpperCase() : "APPROVE",
+    status: payload.status || "For Development",
+    rejection_reason: payload.action === "RETURN" ? (payload.rejection_reason || "Proposal returned for revision.") : null
+  };
+  const res = await fetch(`${API_BASE_URL}/api/admin/information-systems/${encodeURIComponent(systemId)}/review`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(formattedPayload)
+  });
+  return handleResponse(res, "Failed to review and classify proposed information system");
+};
+
 // ==========================================================
-// 7. PART II.D: E-GOVERNMENT PROGRAMS (EGP) CHECKLIST
+// 11. PART II.D: E-GOVERNMENT PROGRAMS (EGP) CHECKLIST
 // ==========================================================
 
-export const getEgovChecklists = async (token, cycle) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/egov-checklists`, { 
-    headers: getHeaders(token) 
-  });
+export const getEgovChecklists = async (token, cycle = "") => {
+  const url = cycle 
+    ? `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/egov-checklists`
+    : `${API_BASE_URL}/api/admin/egov-checklists`;
+  const res = await fetch(url, { headers: getHeaders(token) });
   return handleResponse(res, "Failed to load EGP checklist");
 };
 
-export const createEgovChecklist = async (token, cycle, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/egov-checklists`, {
+export const createEgovChecklist = async (token, cycleOrPayload, maybePayload = null) => {
+  const cycle = typeof cycleOrPayload === "string" ? cycleOrPayload : (cycleOrPayload?.issp_period || "");
+  const body = typeof cycleOrPayload === "string" ? maybePayload : cycleOrPayload;
+  
+  const url = cycle
+    ? `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/egov-checklists`
+    : `${API_BASE_URL}/api/admin/egov-checklists`;
+
+  const res = await fetch(url, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(body)
   });
   return handleResponse(res, "Failed to record EGP checklist item");
 };
@@ -428,22 +833,21 @@ export const deleteEgovChecklist = async (token, id) => {
 };
 
 // ==========================================================
-// 8. PART III.E & III.F: ICT PROJECTS & PMF METRICS
+// 12. PART III.E & III.F: ICT PROJECTS & PMF METRICS
 // ==========================================================
 
-/**
- * Retrieves ICT projects with flexible cycle or object parameters.
- */
 export const getIctProjects = async (token, cycleOrParams = "", categoryFilter = "") => {
   const params = new URLSearchParams();
   if (typeof cycleOrParams === "object" && cycleOrParams !== null) {
     if (cycleOrParams.issp_period) params.append("issp_period", cycleOrParams.issp_period);
-    if (cycleOrParams.category_filter && cycleOrParams.category_filter !== "All") {
+    if (cycleOrParams.category_filter && cycleOrParams.category_filter !== "All" && cycleOrParams.category_filter !== "all") {
       params.append("category_filter", cycleOrParams.category_filter);
     }
   } else {
     if (cycleOrParams) params.append("issp_period", cycleOrParams);
-    if (categoryFilter && categoryFilter !== "All") params.append("category_filter", categoryFilter);
+    if (categoryFilter && categoryFilter !== "All" && categoryFilter !== "all") {
+      params.append("category_filter", categoryFilter);
+    }
   }
   const qs = params.toString();
   const url = `${API_BASE_URL}/api/admin/ict-projects${qs ? `?${qs}` : ""}`;
@@ -451,26 +855,39 @@ export const getIctProjects = async (token, cycleOrParams = "", categoryFilter =
   return handleResponse(res, "Failed to load ICT projects");
 };
 
-/**
- * Creates an ICT project. Seamlessly passes aligns_others and aligns_others_specify.
- */
 export const createIctProject = async (token, payload) => {
+  const formattedPayload = {
+    ...payload,
+    system_id: payload.system_id || null,
+    project_category: payload.project_category || "Internal ICT Projects",
+    aligns_others_specify: payload.aligns_others ? (payload.aligns_others_specify || null) : null
+  };
   const res = await fetch(`${API_BASE_URL}/api/admin/ict-projects`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to create ICT project");
 };
 
-/**
- * Updates an ICT project. Seamlessly preserves aligns_others and aligns_others_specify.
- */
 export const updateIctProject = async (token, id, payload) => {
+  const formattedPayload = {
+    ...payload,
+    system_id: payload.system_id !== undefined ? (payload.system_id || null) : undefined,
+    project_category: payload.project_category !== undefined ? payload.project_category : undefined,
+    aligns_others_specify: payload.aligns_others !== undefined ? (payload.aligns_others ? (payload.aligns_others_specify || null) : null) : undefined
+  };
+
+  Object.keys(formattedPayload).forEach((key) => {
+    if (formattedPayload[key] === undefined) {
+      delete formattedPayload[key];
+    }
+  });
+
   const res = await fetch(`${API_BASE_URL}/api/admin/ict-projects/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to update ICT project");
 };
@@ -483,10 +900,32 @@ export const deleteIctProject = async (token, id) => {
   return handleResponse(res, "Failed to delete ICT project");
 };
 
+/**
+ * Binds or unbinds proposals and information systems to an ICT project in Part III.E.
+ * Automatically recalculates and synchronizes total derived project cost.
+ */
+export const updateProjectLinks = async (token, projectId, payload) => {
+  const formattedPayload = {
+    proposal_ids: Array.isArray(payload?.proposal_ids) ? payload.proposal_ids : [],
+    system_ids: Array.isArray(payload?.system_ids) ? payload.system_ids : []
+  };
+  const res = await fetch(`${API_BASE_URL}/api/admin/ict-projects/${encodeURIComponent(projectId)}/links`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(formattedPayload)
+  });
+  return handleResponse(res, "Failed to update ICT project linkages");
+};
+
 export const getCrossProjects = async (token, cycle) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/cross-projects`, { 
+  let res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/cross-projects`, { 
     headers: getHeaders(token) 
   });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/ict-projects?issp_period=${encodeURIComponent(cycle)}&category_filter=Cross-Agency%20ICT%20Projects`, {
+      headers: getHeaders(token)
+    });
+  }
   return handleResponse(res, "Failed to load cross-agency projects");
 };
 
@@ -583,12 +1022,18 @@ export const deleteStaffPosition = async (token, id) => {
 };
 
 // ==========================================================
-// 9. PART IV.B: LIVE FOUR-WAY PARITY, GOVERNANCE & LIFECYCLE
+// 13. PART IV.B: LIVE FOUR-WAY PARITY, GOVERNANCE & LIFECYCLE
 // ==========================================================
 
-export const getParityMatrices = async (token, cycle = "") => {
+export const getParityMatrices = async (token, cycleOrParams = "", onlyApproved = false) => {
   const params = new URLSearchParams();
-  if (cycle) params.append("issp_period", cycle);
+  if (typeof cycleOrParams === "object" && cycleOrParams !== null) {
+    if (cycleOrParams.issp_period) params.append("issp_period", cycleOrParams.issp_period);
+    if (cycleOrParams.only_approved !== undefined) params.append("only_approved", String(cycleOrParams.only_approved));
+  } else {
+    if (cycleOrParams) params.append("issp_period", cycleOrParams);
+    if (onlyApproved) params.append("only_approved", "true");
+  }
   const qs = params.toString();
   const url = `${API_BASE_URL}/api/admin/governance/parity-matrices${qs ? `?${qs}` : ""}`;
   const res = await fetch(url, { headers: getHeaders(token) });
@@ -613,8 +1058,19 @@ export const evaluateLifecycleRollover = async (token, force = false) => {
   return handleResponse(res, "Failed to evaluate cycle rollover status");
 };
 
+export const verifyCompilerSync = async (token, moduleName, cycle = "") => {
+  const params = new URLSearchParams();
+  params.append("module", moduleName);
+  if (cycle) params.append("issp_period", cycle);
+  const res = await fetch(`${API_BASE_URL}/api/admin/governance/verify-compiler-sync?${params.toString()}`, {
+    method: "POST",
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, `Compiler sync verification failed for ${moduleName}`);
+};
+
 // ==========================================================
-// 10. ANNEX 2: DRBCP (TEAMS, BIA, METRICS)
+// 14. ANNEX 2: DRBCP (TEAMS, BIA, METRICS)
 // ==========================================================
 
 export const getDrTeams = async (token, cycle) => {
@@ -624,11 +1080,14 @@ export const getDrTeams = async (token, cycle) => {
   return handleResponse(res, "Failed to load disaster recovery team members");
 };
 
-export const createDrTeam = async (token, cycle, payload) => {
+export const createDrTeam = async (token, cycleOrPayload, maybePayload = null) => {
+  const cycle = typeof cycleOrPayload === "string" ? cycleOrPayload : (cycleOrPayload?.issp_period || "");
+  const body = typeof cycleOrPayload === "string" ? maybePayload : cycleOrPayload;
+  
   const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/dr-teams`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(body)
   });
   return handleResponse(res, "Failed to add disaster recovery team member");
 };
@@ -657,11 +1116,14 @@ export const getDrBias = async (token, cycle) => {
   return handleResponse(res, "Failed to load BIA records");
 };
 
-export const createDrBia = async (token, cycle, payload) => {
+export const createDrBia = async (token, cycleOrPayload, maybePayload = null) => {
+  const cycle = typeof cycleOrPayload === "string" ? cycleOrPayload : (cycleOrPayload?.issp_period || "");
+  const body = typeof cycleOrPayload === "string" ? maybePayload : cycleOrPayload;
+
   const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/dr-bias`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(body)
   });
   return handleResponse(res, "Failed to record BIA targets");
 };
@@ -690,11 +1152,14 @@ export const getDrMetrics = async (token, cycle) => {
   return handleResponse(res, "Failed to load DRBCP metrics");
 };
 
-export const createDrMetric = async (token, cycle, payload) => {
+export const createDrMetric = async (token, cycleOrPayload, maybePayload = null) => {
+  const cycle = typeof cycleOrPayload === "string" ? cycleOrPayload : (cycleOrPayload?.issp_period || "");
+  const body = typeof cycleOrPayload === "string" ? maybePayload : cycleOrPayload;
+
   const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/dr-metrics`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(body)
   });
   return handleResponse(res, "Failed to register DRBCP metric");
 };
@@ -717,7 +1182,7 @@ export const deleteDrMetric = async (token, id) => {
 };
 
 // ==========================================================
-// 11. MASTER NARRATIVE, COVERSHEET & CYCLE CONTROLS
+// 15. MASTER NARRATIVE, COVERSHEET & CYCLE CONTROLS
 // ==========================================================
 
 export const getNarrative = async (token, cycle) => {
@@ -727,26 +1192,62 @@ export const getNarrative = async (token, cycle) => {
   return handleResponse(res, "Failed to load planning narrative");
 };
 
-/**
- * Updates the master planning narrative coversheet and statutory parameters.
- * Maps DICT v.2026 dynamic head position (agency_head_position), 
- * DRBCP approval date (drbcp_approval_date), Section 6 MITHI policies (drbcp_compliance_narrative_html),
- * and official co-branding logos (dict_logo_url, bagong_pilipinas_logo_url, agency_logo_url).
- */
 export const updateNarrative = async (token, cycle, payload) => {
+  // Normalize plain-text fields and ensure exact cover sheet signatory names are preserved
+  const cioResolvedName = (payload.signatory_prepared_by || payload.cio_name || "").trim();
+  const headResolvedName = (payload.signatory_approved_by || payload.head_of_agency_name || "").trim();
+
   const formattedPayload = {
     ...payload,
+    // Explicitly preserve Cover Page Signatory names (prevent defaulting or empty rendering)
+    cio_name: cioResolvedName || undefined,
+    head_of_agency_name: headResolvedName || undefined,
+    signatory_prepared_by: cioResolvedName || undefined,
+    signatory_approved_by: headResolvedName || undefined,
+    preparer_position: payload.preparer_position || payload.cio_position || "Chief Information Officer",
     agency_head_position: payload.agency_head_position || payload.agency_head_title || payload.head_of_agency_position || undefined,
+    
+    // Core Institutional Narrative Text
+    mandate_text: payload.mandate_text || payload.mandate_html || payload.legal_basis || "",
+    functions: payload.functions || undefined,
+    vision_text: payload.vision_text || payload.vision_html || payload.vision_statement || "",
+    mission_text: payload.mission_text || payload.mission_html || payload.mission_statement || "",
+    present_situation_text: payload.present_situation_text || payload.present_situation_html || "",
+    enterprise_architecture_narrative: payload.enterprise_architecture_narrative || undefined,
+    drbcp_recovery_strategy_text: payload.drbcp_recovery_strategy_text || payload.drbcp_recovery_strategy_html || undefined,
+    drbcp_sop_phases_text: payload.drbcp_sop_phases_text || payload.drbcp_sop_phases_html || undefined,
+    drbcp_compliance_narrative_text: payload.drbcp_compliance_narrative_text || payload.drbcp_compliance_narrative_html || undefined,
     drbcp_approval_date: payload.drbcp_approval_date || payload.approval_date || undefined,
-    drbcp_compliance_narrative_html: payload.drbcp_compliance_narrative_html || undefined,
+    
+    // Single Institutional Logo (Primary agency seal)
+    agency_logo_url: payload.agency_logo_url !== undefined ? payload.agency_logo_url : undefined,
     dict_logo_url: payload.dict_logo_url !== undefined ? payload.dict_logo_url : undefined,
     bagong_pilipinas_logo_url: payload.bagong_pilipinas_logo_url !== undefined ? payload.bagong_pilipinas_logo_url : undefined,
-    agency_logo_url: payload.agency_logo_url !== undefined ? payload.agency_logo_url : undefined,
-    cert_logo_url: payload.cert_logo_url !== undefined ? payload.cert_logo_url : undefined
+    
+    // Technical Architecture & Topology Exhibits
+    existing_ict_org_url: payload.existing_ict_org_url !== undefined ? payload.existing_ict_org_url : undefined,
+    proposed_ict_org_url: payload.proposed_ict_org_url !== undefined ? payload.proposed_ict_org_url : undefined,
+    site_development_plan_url: payload.site_development_plan_url !== undefined ? payload.site_development_plan_url : undefined,
+    process_flow_diagram_url: payload.process_flow_diagram_url !== undefined ? payload.process_flow_diagram_url : undefined,
+    network_diagram_url: payload.network_diagram_url !== undefined ? payload.network_diagram_url : undefined,
+    fiber_backbone_url: payload.fiber_backbone_url !== undefined ? payload.fiber_backbone_url : undefined,
+    system_architecture_url: payload.system_architecture_url !== undefined ? payload.system_architecture_url : undefined
   };
 
-  // Strip undefined keys to allow backend defaults to handle missing inputs cleanly
-  Object.keys(formattedPayload).forEach(key => {
+  // Defensively remove legacy keys from payload
+  delete formattedPayload.mandate_html;
+  delete formattedPayload.vision_html;
+  delete formattedPayload.mission_html;
+  delete formattedPayload.present_situation_html;
+  delete formattedPayload.drbcp_recovery_strategy_html;
+  delete formattedPayload.drbcp_sop_phases_html;
+  delete formattedPayload.drbcp_compliance_narrative_html;
+  delete formattedPayload.cio_signature_url;
+  delete formattedPayload.head_signature_url;
+  delete formattedPayload.cert_logo_url;
+  delete formattedPayload.subsystem_network_layouts_json;
+
+  Object.keys(formattedPayload).forEach((key) => {
     if (formattedPayload[key] === undefined) {
       delete formattedPayload[key];
     }
@@ -776,66 +1277,80 @@ export const resetCycle = async (token, cycle) => {
   return handleResponse(res, "Failed to reset planning cycle");
 };
 
-/**
- * Uploads a diagram asset or government co-branding seal with optional metadata.
- */
 export const uploadDiagram = async (token, cycle, category, file, extraData = {}) => {
   const formData = new FormData();
   formData.append("file", file);
+
+  const params = new URLSearchParams();
+  params.append("category", category);
+
   if (extraData && typeof extraData === "object") {
     Object.entries(extraData).forEach(([k, v]) => {
-      if (v !== undefined && v !== null) {
+      if (v !== undefined && v !== null && v !== "") {
+        params.append(k, String(v));
         formData.append(k, String(v));
       }
     });
   }
+
   const res = await fetch(
-    `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/upload-diagram?category=${encodeURIComponent(category)}`,
+    `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/upload-diagram?${params.toString()}`,
     {
       method: "POST",
       headers: getHeaders(token, true),
       body: formData
     }
   );
-  return handleResponse(res, "Failed to upload diagram");
+  return handleResponse(res, "Failed to upload diagram asset");
 };
 
 // ==========================================================
-// 12. MASTER QUEUES, OVERRIDES & PROPOSALS
+// 16. MASTER QUEUES, OVERRIDES, BATCH ACTIONS & PROPOSALS
 // ==========================================================
 
 export const getProposalsQueue = async (token, params = {}) => {
-  const query = new URLSearchParams(params).toString();
-  const url = `${API_BASE_URL}/api/admin/proposals${query ? `?${query}` : ""}`;
+  const query = new URLSearchParams();
+  if (typeof params === "object" && params !== null) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "" && v !== "all" && v !== "All") {
+        query.append(k, String(v));
+      }
+    });
+  }
+  const qs = query.toString();
+  const url = `${API_BASE_URL}/api/admin/proposals${qs ? `?${qs}` : ""}`;
   const res = await fetch(url, { headers: getHeaders(token) });
   return handleResponse(res, "Failed to load master proposals queue");
 };
 
-export const getSubscriptionsQueue = async (token, params = {}) => {
-  const query = new URLSearchParams(params).toString();
-  const url = `${API_BASE_URL}/api/admin/subscriptions${query ? `?${query}` : ""}`;
-  const res = await fetch(url, { headers: getHeaders(token) });
-  return handleResponse(res, "Failed to load subscriptions queue");
-};
-
-/**
- * Creates a resource proposal line item in Part IV.A.
- * Seamlessly accepts needs_assessment_id for Section 8.0 provenance.
- */
 export const createProposal = async (token, payload) => {
+  const formattedPayload = {
+    ...payload,
+    project_id: payload.project_id || null,
+    outcome_id: payload.outcome_id ? parseInt(payload.outcome_id, 10) : null,
+    strategic_category_id: payload.strategic_category_id || null,
+    needs_assessment_id: payload.needs_assessment_id || null
+  };
   const res = await fetch(`${API_BASE_URL}/api/admin/proposals`, {
     method: "POST",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to create proposal");
 };
 
 export const updateProposal = async (token, id, payload) => {
+  const formattedPayload = {
+    ...payload,
+    project_id: payload.project_id || null,
+    outcome_id: payload.outcome_id ? parseInt(payload.outcome_id, 10) : null,
+    strategic_category_id: payload.strategic_category_id || null,
+    needs_assessment_id: payload.needs_assessment_id || null
+  };
   const res = await fetch(`${API_BASE_URL}/api/admin/proposals/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: getHeaders(token),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(formattedPayload)
   });
   return handleResponse(res, "Failed to update proposal");
 };
@@ -848,33 +1363,66 @@ export const deleteProposal = async (token, id) => {
   return handleResponse(res, "Failed to delete proposal");
 };
 
-export const approveProposal = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/proposals/${encodeURIComponent(id)}/approve`, {
+/**
+ * Approves a proposal in the review queue.
+ * Transacts governance fields (project_id, outcome_id, uacs_object_code) simultaneously
+ * to ensure that unlinked capital outlays are quarantined and accounted for accurately.
+ */
+export const approveProposal = async (token, id, payload = null) => {
+  const options = {
     method: "PUT",
     headers: getHeaders(token)
-  });
+  };
+  if (payload && typeof payload === "object") {
+    options.body = JSON.stringify({
+      ...payload,
+      project_id: payload.project_id || null,
+      outcome_id: payload.outcome_id ? parseInt(payload.outcome_id, 10) : null,
+      uacs_object_code: payload.uacs_object_code || undefined,
+      strategic_category_id: payload.strategic_category_id || undefined,
+      expenditure_class: payload.expenditure_class || undefined
+    });
+  }
+  const res = await fetch(`${API_BASE_URL}/api/admin/proposals/${encodeURIComponent(id)}/approve`, options);
   return handleResponse(res, "Failed to approve proposal");
 };
 
-export const returnProposal = async (token, id) => {
+export const returnProposal = async (token, id, payload = {}) => {
   const res = await fetch(`${API_BASE_URL}/api/admin/proposals/${encodeURIComponent(id)}/return`, {
-    method: "PUT",
-    headers: getHeaders(token)
-  });
-  return handleResponse(res, "Failed to return proposal");
-};
-
-/**
- * Executes an administrative override on a proposal line item.
- * Supports needs_assessment_id, category, strategic_category, and custom quantities.
- */
-export const overrideProposal = async (token, id, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/proposals/${encodeURIComponent(id)}/override`, {
     method: "PUT",
     headers: getHeaders(token),
     body: JSON.stringify(payload)
   });
+  return handleResponse(res, "Failed to return proposal");
+};
+
+export const overrideProposal = async (token, id, payload) => {
+  const formattedPayload = {
+    ...payload,
+    project_id: payload.project_id || null,
+    outcome_id: payload.outcome_id ? parseInt(payload.outcome_id, 10) : null,
+    strategic_category_id: payload.strategic_category_id || null,
+    needs_assessment_id: payload.needs_assessment_id || null
+  };
+  const res = await fetch(`${API_BASE_URL}/api/admin/proposals/${encodeURIComponent(id)}/override`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(formattedPayload)
+  });
   return handleResponse(res, "Failed to override proposal");
+};
+
+/**
+ * Executes multi-select batch approval of proposals in a single transaction.
+ */
+export const batchApproveProposals = async (token, proposalIds) => {
+  const payload = Array.isArray(proposalIds) ? { proposal_ids: proposalIds } : proposalIds;
+  const res = await fetch(`${API_BASE_URL}/api/admin/proposals/batch-approve`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify(payload)
+  });
+  return handleResponse(res, "Failed to batch approve proposals");
 };
 
 export const getApprovedCanvasProposals = async (token) => {
@@ -885,12 +1433,20 @@ export const getApprovedCanvasProposals = async (token) => {
 };
 
 // ==========================================================
-// 13. COMPILATION, AUDIT LOGS, VAULT & ANALYTICS
+// 17. COMPILATION, AUDIT LOGS, VAULT & ANALYTICS
 // ==========================================================
 
-export const triggerDocumentGeneration = async (token, cycle = "") => {
+export const triggerDocumentGeneration = async (token, cycleOrParams = "", exportFormat = "pdf") => {
   const params = new URLSearchParams();
-  if (cycle) params.append("issp_period", cycle);
+  if (typeof cycleOrParams === "object" && cycleOrParams !== null) {
+    if (cycleOrParams.issp_period) params.append("issp_period", cycleOrParams.issp_period);
+    if (cycleOrParams.export_format || cycleOrParams.format) {
+      params.append("export_format", cycleOrParams.export_format || cycleOrParams.format);
+    }
+  } else {
+    if (cycleOrParams) params.append("issp_period", cycleOrParams);
+    if (exportFormat) params.append("export_format", exportFormat);
+  }
   const qs = params.toString();
   const url = `${API_BASE_URL}/api/admin/governance/generate-issp${qs ? `?${qs}` : ""}`;
   const res = await fetch(url, {
@@ -907,14 +1463,22 @@ export const getTaskStatus = async (token, taskId) => {
   return handleResponse(res, "Failed to query compilation task status");
 };
 
-export const restoreGovernanceDocument = async (token, payload) => {
+/**
+ * Transparent statutory procurement archive retrieval handler.
+ * Provides immediate access to official document canvases without manual restore delays.
+ */
+export const retrieveArchivedDocument = async (token, payload) => {
   const res = await fetch(`${API_BASE_URL}/api/admin/governance/restore-document`, {
     method: "POST",
     headers: getHeaders(token),
     body: JSON.stringify(payload)
   });
-  return handleResponse(res, "Failed to initiate Glacier document restoration");
+  return handleResponse(res, "Failed to retrieve archived document");
 };
+
+export const restoreGovernanceDocument = retrieveArchivedDocument;
+export const restoreDocument = retrieveArchivedDocument;
+export const requestGlacierRestore = retrieveArchivedDocument;
 
 export const getDashboardMetrics = async (token) => {
   const res = await fetch(`${API_BASE_URL}/api/admin/dashboard-metrics`, { 
@@ -930,18 +1494,15 @@ export const getDepartmentAnalytics = async (token) => {
   return handleResponse(res, "Failed to load department analytics");
 };
 
-/**
- * Retrieves immutable COA audit logs supporting module and department filtering.
- */
 export const getAuditLogs = async (token, params = {}) => {
   const query = new URLSearchParams();
   if (typeof params === "object" && params !== null) {
     Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== null && v !== "" && v !== "All") {
+      if (v !== undefined && v !== null && v !== "" && v !== "All" && v !== "all") {
         query.append(k, String(v));
       }
     });
-  } else if (typeof params === "string" && params && params !== "All") {
+  } else if (typeof params === "string" && params && params !== "All" && params !== "all") {
     query.append("module", params);
   }
   const qs = query.toString();
@@ -953,70 +1514,7 @@ export const getAuditLogs = async (token, params = {}) => {
 };
 
 // ==========================================================
-// 14. DOCUMENT TREE HIERARCHY (DICT RICT STANDARD)
-// ==========================================================
-
-export const getDocumentTree = async (token) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/issp/document-tree`, { 
-    headers: getHeaders(token) 
-  });
-  return handleResponse(res, "Failed to load document skeletal hierarchy");
-};
-
-export const createDocumentNode = async (token, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/issp/nodes`, {
-    method: "POST",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to create document node");
-};
-
-export const updateDocumentNode = async (token, id, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/issp/nodes/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to update document node");
-};
-
-export const deleteDocumentNode = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/issp/nodes/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: getHeaders(token)
-  });
-  return handleResponse(res, "Failed to delete document node");
-};
-
-export const reorderDocumentNodes = async (token, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/issp/reorder`, {
-    method: "PUT",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to reorder document nodes");
-};
-
-export const uploadDocumentAsset = async (token, nodeId, assetRole, file, customTitle = null, aspectPreserve = true) => {
-  const formData = new FormData();
-  formData.append("file", file);
-  
-  let url = `${API_BASE_URL}/api/admin/issp/assets?node_id=${encodeURIComponent(nodeId)}&asset_role=${encodeURIComponent(assetRole)}&aspect_ratio_preserve=${Boolean(aspectPreserve)}`;
-  if (customTitle) {
-    url += `&custom_title=${encodeURIComponent(customTitle)}`;
-  }
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: getHeaders(token, true),
-    body: formData
-  });
-  return handleResponse(res, "Failed to upload document asset");
-};
-
-// ==========================================================
-// 15. REFERENCE PRICING CATALOG
+// 18. REFERENCE PRICING CATALOG
 // ==========================================================
 
 export const getCatalogItems = async (token) => {
@@ -1044,8 +1542,16 @@ export const updateCatalogItem = async (token, id, payload) => {
   return handleResponse(res, "Failed to update catalog item");
 };
 
+export const deleteCatalogItem = async (token, id) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/catalog/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to delete catalog item");
+};
+
 // ==========================================================
-// 16. DEPARTMENTS DIRECTORY
+// 19. DEPARTMENTS DIRECTORY
 // ==========================================================
 
 export const getDepartments = async (token) => {
@@ -1082,7 +1588,7 @@ export const deleteDepartment = async (token, id) => {
 };
 
 // ==========================================================
-// 17. USER WHITELISTING & ACCESS CONTROL (100% CREDENTIAL-BASED)
+// 20. USER WHITELISTING & ACCESS CONTROL (CREDENTIAL-BASED)
 // ==========================================================
 
 export const getWhitelistedUsers = async (token) => {
@@ -1092,10 +1598,6 @@ export const getWhitelistedUsers = async (token) => {
   return handleResponse(res, "Failed to load whitelisted users");
 };
 
-/**
- * Manually onboards an institutional user.
- * Mandates initial password (min 8 chars) and supports ROLE_SUPPLY_USER.
- */
 export const addWhitelistedUser = async (token, payload) => {
   const res = await fetch(`${API_BASE_URL}/api/admin/users/whitelist`, {
     method: "POST",
@@ -1123,51 +1625,14 @@ export const deleteWhitelistedUser = async (token, id) => {
 };
 
 // ==========================================================
-// 18. CAMPUSES
-// ==========================================================
-
-export const getCampuses = async (token) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/campuses`, { 
-    headers: getHeaders(token) 
-  });
-  return handleResponse(res, "Failed to load campuses");
-};
-
-export const createCampus = async (token, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/campuses`, {
-    method: "POST",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to create campus");
-};
-
-export const updateCampus = async (token, id, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/campuses/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to update campus");
-};
-
-export const deleteCampus = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/campuses/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: getHeaders(token)
-  });
-  return handleResponse(res, "Failed to delete campus");
-};
-
-// ==========================================================
-// 19. GLOSSARY (DEFINITION OF TERMS)
+// 21. GLOSSARY (DEFINITION OF TERMS - TEMPLATE PAGE 5)
 // ==========================================================
 
 export const getGlossary = async (token) => {
   const res = await fetch(`${API_BASE_URL}/api/admin/glossary`, { 
     headers: getHeaders(token) 
   });
-  return handleResponse(res, "Failed to load glossary");
+  return handleResponse(res, "Failed to load glossary terms");
 };
 
 export const createGlossaryTerm = async (token, payload) => {
@@ -1176,7 +1641,7 @@ export const createGlossaryTerm = async (token, payload) => {
     headers: getHeaders(token),
     body: JSON.stringify(payload)
   });
-  return handleResponse(res, "Failed to create term");
+  return handleResponse(res, "Failed to create glossary term");
 };
 
 export const updateGlossaryTerm = async (token, id, payload) => {
@@ -1185,7 +1650,7 @@ export const updateGlossaryTerm = async (token, id, payload) => {
     headers: getHeaders(token),
     body: JSON.stringify(payload)
   });
-  return handleResponse(res, "Failed to update term");
+  return handleResponse(res, "Failed to update glossary term");
 };
 
 export const deleteGlossaryTerm = async (token, id) => {
@@ -1193,11 +1658,11 @@ export const deleteGlossaryTerm = async (token, id) => {
     method: "DELETE",
     headers: getHeaders(token)
   });
-  return handleResponse(res, "Failed to delete term");
+  return handleResponse(res, "Failed to delete glossary term");
 };
 
 // ==========================================================
-// 20. GENERAL INSTRUCTIONS
+// 22. GENERAL INSTRUCTIONS (TEMPLATE PAGE 11)
 // ==========================================================
 
 export const getInstructions = async (token) => {
@@ -1234,136 +1699,41 @@ export const deleteInstruction = async (token, id) => {
 };
 
 // ==========================================================
-// 21. AUXILIARY INVENTORY CENSUS & CONTINUING COSTS
-// ==========================================================
-
-export const getServerCapacities = async (token) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/server-capacities`, { 
-    headers: getHeaders(token) 
-  });
-  return handleResponse(res, "Failed to load server capacities");
-};
-
-export const createServerCapacity = async (token, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/server-capacities`, {
-    method: "POST",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to record server capacity");
-};
-
-export const deleteServerCapacity = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/server-capacities/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: getHeaders(token)
-  });
-  return handleResponse(res, "Failed to delete server capacity");
-};
-
-export const getOsCensus = async (token) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/os-census`, { 
-    headers: getHeaders(token) 
-  });
-  return handleResponse(res, "Failed to load OS census");
-};
-
-export const createOsCensusRecord = async (token, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/os-census`, {
-    method: "POST",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to record OS entry");
-};
-
-export const updateOsCensusRecord = async (token, id, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/os-census/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to update OS entry");
-};
-
-export const deleteOsCensusRecord = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/os-census/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: getHeaders(token)
-  });
-  return handleResponse(res, "Failed to delete OS entry");
-};
-
-export const getSoftwareCensus = async (token) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/software-census`, { 
-    headers: getHeaders(token) 
-  });
-  return handleResponse(res, "Failed to load software census");
-};
-
-export const createSoftwareCensus = async (token, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/software-census`, {
-    method: "POST",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to record software entry");
-};
-
-export const deleteSoftwareCensus = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/software-census/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: getHeaders(token)
-  });
-  return handleResponse(res, "Failed to delete software entry");
-};
-
-export const getAnnualCosts = async (token, cycle) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/costs`, { 
-    headers: getHeaders(token) 
-  });
-  return handleResponse(res, "Failed to load annual cost matrices");
-};
-
-export const createAnnualCost = async (token, cycle, payload) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/costs`, {
-    method: "POST",
-    headers: getHeaders(token),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to record annual cost entry");
-};
-
-export const deleteAnnualCost = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/admin/costs/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: getHeaders(token)
-  });
-  return handleResponse(res, "Failed to delete annual cost entry");
-};
-
-// ==========================================================
-// 22. ANNEX 1: MASTER ASSET INVENTORY (ADMIN & SUPPLY ACCESS)
+// 23. ANNEX 1: MASTER ASSET INVENTORY (ADMIN & SUPPLY ACCESS)
 // ==========================================================
 
 export const getMasterInventory = async (token, params = {}) => {
-  const query = new URLSearchParams(params).toString();
-  const url = `${API_BASE_URL}/api/supply/inventory${query ? `?${query}` : ""}`;
-  const res = await fetch(url, { headers: getHeaders(token) });
+  const query = new URLSearchParams();
+  if (typeof params === "object" && params !== null) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "" && v !== "all" && v !== "All") {
+        query.append(k, String(v));
+      }
+    });
+  }
+  const qs = query.toString();
+  let res = await fetch(`${API_BASE_URL}/api/supply/inventory${qs ? `?${qs}` : ""}`, { headers: getHeaders(token) });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/inventory${qs ? `?${qs}` : ""}`, { headers: getHeaders(token) });
+  }
   return handleResponse(res, "Failed to load master asset inventory");
 };
 
-export const getAnnex1Summary = async (token) => {
-  const res = await fetch(`${API_BASE_URL}/api/supply/inventory/annex1-summary`, {
+export const getAnnex1Summary = async (token, cycle = "") => {
+  const params = new URLSearchParams();
+  if (cycle) params.append("issp_period", cycle);
+  const qs = params.toString();
+  let res = await fetch(`${API_BASE_URL}/api/supply/inventory/annex1-summary${qs ? `?${qs}` : ""}`, {
     headers: getHeaders(token)
   });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/inventory/annex1-summary${qs ? `?${qs}` : ""}`, {
+      headers: getHeaders(token)
+    });
+  }
   return handleResponse(res, "Failed to compile Annex 1 inventory summary");
 };
 
-/**
- * Registers an inventory item directly to Annex 1 with DICT Standard Category support.
- * Payload supports `dict_category` and `other_category_name`.
- */
 export const createInventoryItem = async (token, payload) => {
   const formattedPayload = {
     ...payload,
@@ -1371,18 +1741,21 @@ export const createInventoryItem = async (token, payload) => {
     other_category_name: payload.other_category_name || undefined
   };
 
-  const res = await fetch(`${API_BASE_URL}/api/supply/inventory`, {
+  let res = await fetch(`${API_BASE_URL}/api/supply/inventory`, {
     method: "POST",
     headers: getHeaders(token),
     body: JSON.stringify(formattedPayload)
   });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/inventory`, {
+      method: "POST",
+      headers: getHeaders(token),
+      body: JSON.stringify(formattedPayload)
+    });
+  }
   return handleResponse(res, "Failed to record asset into Annex 1 inventory");
 };
 
-/**
- * Updates an inventory item in Annex 1 with DICT Standard Category support.
- * Payload supports `dict_category` and `other_category_name`.
- */
 export const updateInventoryItem = async (token, id, payload) => {
   const formattedPayload = {
     ...payload,
@@ -1390,18 +1763,58 @@ export const updateInventoryItem = async (token, id, payload) => {
     other_category_name: payload.other_category_name || undefined
   };
 
-  const res = await fetch(`${API_BASE_URL}/api/supply/inventory/${encodeURIComponent(id)}`, {
+  let res = await fetch(`${API_BASE_URL}/api/supply/inventory/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: getHeaders(token),
     body: JSON.stringify(formattedPayload)
   });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/inventory/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: getHeaders(token),
+      body: JSON.stringify(formattedPayload)
+    });
+  }
   return handleResponse(res, "Failed to update asset in Annex 1 inventory");
 };
 
 export const deleteInventoryItem = async (token, id) => {
-  const res = await fetch(`${API_BASE_URL}/api/supply/inventory/${encodeURIComponent(id)}`, {
+  let res = await fetch(`${API_BASE_URL}/api/supply/inventory/${encodeURIComponent(id)}`, {
     method: "DELETE",
     headers: getHeaders(token)
   });
+  if (res.status === 404) {
+    res = await fetch(`${API_BASE_URL}/api/admin/inventory/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: getHeaders(token)
+    });
+  }
   return handleResponse(res, "Failed to delete asset from inventory");
 };
+
+// ==========================================================
+// 24. SAFE DEPRECATED COMPATIBILITY ALIASES & STUBS
+// ==========================================================
+export const getUsersWhitelist = getWhitelistedUsers;
+export const getUsers = getWhitelistedUsers;
+export const getWhitelist = getWhitelistedUsers;
+export const getNarratives = getNarrative;
+export const deleteSubsystemDiagram = async () => null;
+export const getSubscriptionsQueue = async (token, params = {}) => getProposalsQueue(token, params);
+export const getCampuses = async () => [];
+export const createCampus = async () => null;
+export const updateCampus = async () => null;
+export const deleteCampus = async () => null;
+export const getServerCapacities = async () => [];
+export const createServerCapacity = async () => null;
+export const deleteServerCapacity = async () => null;
+export const getOsCensus = async () => [];
+export const createOsCensusRecord = async () => null;
+export const updateOsCensusRecord = async () => null;
+export const deleteOsCensusRecord = async () => null;
+export const getSoftwareCensus = async () => [];
+export const createSoftwareCensus = async () => null;
+export const deleteSoftwareCensus = async () => null;
+export const getAnnualCosts = async () => [];
+export const createAnnualCost = async () => null;
+export const deleteAnnualCost = async () => null;

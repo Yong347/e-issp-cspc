@@ -82,8 +82,25 @@ class ISSPStorageClient:
         safe_file = self._sanitize_filename(filename)
         return f"diagrams/{category}/{safe_file}"
 
+    def get_generated_document_key(self, issp_id: str, ext: str = "pdf") -> str:
+        """
+        Generates clean storage keys for compiled documents (PDF, DOCX) without
+        duplicate or mismatched extensions (e.g., prevents .docx.pdf).
+        """
+        clean_id = issp_id.strip()
+        for suffix in [".docx.pdf", ".pdf", ".docx"]:
+            if clean_id.endswith(suffix):
+                clean_id = clean_id[:-len(suffix)]
+                break
+        return f"generated_issps/{clean_id}.{ext}"
+
     def get_generated_pdf_key(self, issp_id: str) -> str:
-        return f"generated_issps/{issp_id}.pdf"
+        """
+        Backward-compatible helper that automatically routes .docx vs .pdf safely.
+        """
+        if str(issp_id).endswith(".docx"):
+            return self.get_generated_document_key(issp_id, ext="docx")
+        return self.get_generated_document_key(issp_id, ext="pdf")
 
     def extract_key_from_url(self, url: str) -> Optional[str]:
         """
@@ -149,7 +166,6 @@ class ISSPStorageClient:
         # External HTTP/HTTPS asset fetch
         if clean_url.startswith(("http://", "https://")) and self.bucket_name not in clean_url:
             try:
-                # Dynamic User-Agent pulled from configured institutional parameters
                 agency_slug = re.sub(r'[^a-zA-Z0-9]', '', getattr(settings, 'DEFAULT_AGENCY_NAME', 'ISSP'))
                 req = urllib.request.Request(
                     object_url, 
@@ -288,19 +304,28 @@ class ISSPStorageClient:
             base_url = settings.API_BASE_URL.rstrip('/')
             return f"{base_url}/static/uploads/{object_key}"
 
-    def upload_compiled_pdf(self, file_data: bytes, issp_id: str) -> bool:
-        key = self.get_generated_pdf_key(issp_id)
+    def upload_compiled_document(self, file_data: bytes, issp_id: str, ext: str = "pdf") -> bool:
+        """
+        Uploads either a PDF or Word (.docx) compiled document to storage with
+        matching MIME types and clean non-duplicated file keys.
+        """
+        key = self.get_generated_document_key(issp_id, ext=ext)
+        content_type = (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            if ext == "docx"
+            else "application/pdf"
+        )
         if self.storage_type == "s3" and self.client:
             try:
                 self.client.put_object(
                     Bucket=self.bucket_name,
                     Key=key,
                     Body=file_data,
-                    ContentType="application/pdf"
+                    ContentType=content_type
                 )
                 return True
             except ClientError as e:
-                logger.error(f"Failed direct upload of compiled PDF {issp_id}: {e}")
+                logger.error(f"Failed direct upload of compiled document {issp_id} ({ext}): {e}")
                 return False
         else:
             try:
@@ -311,8 +336,16 @@ class ISSPStorageClient:
                     f.write(file_data)
                 return True
             except IOError as e:
-                logger.error(f"Failed writing compiled PDF {issp_id} to local disk: {e}")
+                logger.error(f"Failed writing compiled document {issp_id} ({ext}) to local disk: {e}")
                 return False
+
+    def upload_compiled_pdf(self, file_data: bytes, issp_id: str) -> bool:
+        """
+        Backward-compatible upload handler that automatically routes Word .docx
+        or PDF data to the correct document key and MIME type.
+        """
+        ext = "docx" if str(issp_id).endswith(".docx") else "pdf"
+        return self.upload_compiled_document(file_data, issp_id, ext=ext)
 
     def upload_unserviceable_report(self, file_data: bytes, department_id: str, filename: str) -> Optional[str]:
         key = self.get_unserviceable_report_key(department_id, filename)

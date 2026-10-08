@@ -5,7 +5,10 @@ import {
   getCatalogItems, 
   createCatalogItem, 
   updateCatalogItem, 
-  getApprovedCanvasProposals 
+  deleteCatalogItem,
+  getApprovedCanvasProposals,
+  getPolicySettings,
+  getDepartments
 } from "../../../api/admin";
 import { 
   Package, 
@@ -29,7 +32,10 @@ import {
   ExternalLink,
   Info,
   SlidersHorizontal,
-  Building
+  Building,
+  Trash2,
+  AlertTriangle,
+  Check
 } from "lucide-react";
 
 const CATEGORY_OPTIONS = [
@@ -46,6 +52,8 @@ export default function CatalogManager() {
   // Data States
   const [items, setItems] = useState([]);
   const [approvedProposals, setApprovedProposals] = useState([]);
+  const [departments, setDepartments] = useState([]);
+  const [warningDays, setWarningDays] = useState(14);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -54,7 +62,7 @@ export default function CatalogManager() {
   // Search & Filtering States
   const [searchQuery, setSearchQuery] = useState("");
   const [filterCategory, setFilterCategory] = useState("All");
-  const [filterStatus, setFilterStatus] = useState("All"); // All, Active, Expired, Disabled
+  const [filterStatus, setFilterStatus] = useState("All"); // All, Active, ExpiringSoon, Expired, Disabled
 
   // Form State for Creating New Catalog Items
   const initialFormState = {
@@ -86,14 +94,23 @@ export default function CatalogManager() {
     return !isNaN(d.getTime()) && d < new Date();
   };
 
-  const isExpiringSoon = (dateString) => {
+  const isExpiringSoon = useCallback((dateString) => {
     if (!dateString) return false;
     const d = new Date(dateString);
     if (isNaN(d.getTime())) return false;
     const now = new Date();
-    const in14Days = new Date();
-    in14Days.setDate(now.getDate() + 14);
-    return d >= now && d <= in14Days;
+    const boundary = new Date();
+    boundary.setDate(now.getDate() + (warningDays || 14));
+    return d >= now && d <= boundary;
+  }, [warningDays]);
+
+  const getDaysRemaining = (dateString) => {
+    if (!dateString) return null;
+    const d = new Date(dateString);
+    if (isNaN(d.getTime())) return null;
+    const now = new Date();
+    const diffTime = d - now;
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
   };
 
   const fetchCatalogData = useCallback(async () => {
@@ -101,12 +118,20 @@ export default function CatalogManager() {
     setLoading(true);
     setError(null);
     try {
-      const [catalogData, proposalsData] = await Promise.all([
+      const [catalogData, proposalsData, policyData, deptsData] = await Promise.all([
         getCatalogItems(token).catch(() => []),
-        getApprovedCanvasProposals(token).catch(() => [])
+        getApprovedCanvasProposals(token).catch(() => []),
+        getPolicySettings(token).catch(() => null),
+        getDepartments(token).catch(() => [])
       ]);
+
       setItems(Array.isArray(catalogData) ? catalogData : []);
       setApprovedProposals(Array.isArray(proposalsData) ? proposalsData : []);
+      setDepartments(Array.isArray(deptsData) ? deptsData : []);
+
+      if (policyData?.canvas_expiration_warning_days) {
+        setWarningDays(parseInt(policyData.canvas_expiration_warning_days, 10) || 14);
+      }
     } catch (e) {
       setError(e.message || "Failed to load reference catalog data.");
     } finally {
@@ -125,10 +150,15 @@ export default function CatalogManager() {
 
     const selected = approvedProposals.find(item => String(item.id) === String(refId));
     if (selected) {
-      const inferredCategory = 
-        selected.type === "CapEx" 
-          ? (selected.display_name.toLowerCase().includes("switch") || selected.display_name.toLowerCase().includes("router") ? "networking" : "computing_devices")
-          : "software";
+      const nameLower = (selected.display_name || "").toLowerCase();
+      let inferredCategory = "computing_devices";
+      if (selected.type === "MOOE" || nameLower.includes("subscription") || nameLower.includes("license") || nameLower.includes("software")) {
+        inferredCategory = "software";
+      } else if (nameLower.includes("switch") || nameLower.includes("router") || nameLower.includes("access point") || nameLower.includes("network")) {
+        inferredCategory = "networking";
+      } else if (nameLower.includes("printer") || nameLower.includes("scanner") || nameLower.includes("copier")) {
+        inferredCategory = "printers_imaging";
+      }
 
       setForm({
         ...form,
@@ -144,6 +174,23 @@ export default function CatalogManager() {
     }
   };
 
+  // Toggle quick department chip in allowed_offices string
+  const toggleOfficeInForm = (deptName, isEditing = false) => {
+    const targetForm = isEditing ? editForm : form;
+    const setTargetForm = isEditing ? setEditForm : setForm;
+    const currentList = targetForm.allowed_offices
+      ? targetForm.allowed_offices.split(",").map(o => o.trim()).filter(Boolean)
+      : [];
+
+    let nextList;
+    if (currentList.includes(deptName)) {
+      nextList = currentList.filter(o => o !== deptName);
+    } else {
+      nextList = [...currentList, deptName];
+    }
+    setTargetForm({ ...targetForm, allowed_offices: nextList.join(", ") });
+  };
+
   // Submit Handler for Creating a New Catalog Item
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -152,7 +199,7 @@ export default function CatalogManager() {
 
     const keyClean = form.item_key.trim().toLowerCase();
     if (keyClean === "other") {
-      setError("Registration Error: 'other' is a reserved system keyword and cannot be used as an item key.");
+      setError("Registration Error: 'other' is a reserved system namespace and cannot be used as an item key.");
       return;
     }
 
@@ -252,6 +299,23 @@ export default function CatalogManager() {
     }
   };
 
+  // Delete Catalog Item with Confirmation
+  const handleDeleteItem = async (item) => {
+    if (!window.confirm(`Permanently remove catalog reference '${item.display_name}' (${item.item_key})? This cannot be undone.`)) {
+      return;
+    }
+
+    setError(null);
+    setSuccess(null);
+    try {
+      await deleteCatalogItem(token, item.id);
+      setSuccess(`Catalog reference '${item.display_name}' deleted successfully.`);
+      fetchCatalogData();
+    } catch (err) {
+      setError(err.message || "Failed to delete catalog item.");
+    }
+  };
+
   // Toggle Active / Disabled State
   const toggleItemState = async (item) => {
     setError(null);
@@ -269,8 +333,9 @@ export default function CatalogManager() {
 
   // KPI Metrics Calculations
   const totalCount = items.length;
-  const activeCount = items.filter(i => i.is_active).length;
+  const activeCount = items.filter(i => i.is_active && !isExpired(i.canvas_expiration_date)).length;
   const expiredCount = items.filter(i => isExpired(i.canvas_expiration_date)).length;
+  const expiringSoonCount = items.filter(i => isExpiringSoon(i.canvas_expiration_date)).length;
   const uniqueCategoriesCount = new Set(items.map(i => i.category)).size;
 
   // Multi-Condition Filter Pipeline
@@ -279,9 +344,13 @@ export default function CatalogManager() {
       // Category Filter
       if (filterCategory !== "All" && item.category !== filterCategory) return false;
 
+      const expired = isExpired(item.canvas_expiration_date);
+      const expiringSoon = isExpiringSoon(item.canvas_expiration_date);
+
       // Status Filter
-      if (filterStatus === "Active" && (!item.is_active || isExpired(item.canvas_expiration_date))) return false;
-      if (filterStatus === "Expired" && !isExpired(item.canvas_expiration_date)) return false;
+      if (filterStatus === "Active" && (!item.is_active || expired)) return false;
+      if (filterStatus === "ExpiringSoon" && !expiringSoon) return false;
+      if (filterStatus === "Expired" && !expired) return false;
       if (filterStatus === "Disabled" && item.is_active) return false;
 
       // Search Query Filter
@@ -291,11 +360,12 @@ export default function CatalogManager() {
         const key = (item.item_key || "").toLowerCase();
         const cat = (item.category || "").toLowerCase();
         const supp = (item.supplier_name || "").toLowerCase();
-        return name.includes(q) || key.includes(q) || cat.includes(q) || supp.includes(q);
+        const offices = Array.isArray(item.allowed_offices) ? item.allowed_offices.join(" ").toLowerCase() : "";
+        return name.includes(q) || key.includes(q) || cat.includes(q) || supp.includes(q) || offices.includes(q);
       }
       return true;
     });
-  }, [items, filterCategory, filterStatus, searchQuery]);
+  }, [items, filterCategory, filterStatus, searchQuery, isExpiringSoon]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto text-xs text-slate-800 dark:text-slate-100 select-none font-sans">
@@ -303,12 +373,14 @@ export default function CatalogManager() {
       {/* Top Banner Panel */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-xs gap-4">
         <div>
-          <h2 className="text-slate-900 dark:text-white font-serif font-bold text-base flex items-center gap-2">
+          <div className="flex items-center gap-2">
             <Package className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-            <span>Standard Pricing &amp; Reference Catalog Manager</span>
-          </h2>
+            <h2 className="text-slate-900 dark:text-white font-serif font-bold text-base">
+              Price Reference Catalog &amp; Quotation Validity Manager
+            </h2>
+          </div>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
-            Configure pre-approved technical specifications, unit cost ceilings, and quotation expiration dates. Convert approved custom proposals directly into standard references.
+            Maintain institutional standard specifications, approved unit cost ceilings, and market quotation proofs. Department planners selecting items from this active catalog bypass external market canvassing delays.
           </p>
         </div>
         <button
@@ -322,14 +394,14 @@ export default function CatalogManager() {
       </div>
 
       {/* KPI Overview Tiles */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 p-5 rounded-2xl flex items-center gap-3.5 shadow-xs">
           <div className="p-3 bg-blue-50 dark:bg-slate-800 text-blue-600 dark:text-blue-400 rounded-xl shrink-0">
             <Package className="w-5 h-5" />
           </div>
           <div>
-            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Catalog Items</span>
-            <h3 className="text-base font-bold text-slate-900 dark:text-white font-mono mt-0.5">{totalCount} References</h3>
+            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total References</span>
+            <h3 className="text-base font-bold text-slate-900 dark:text-white font-mono mt-0.5">{totalCount} Items</h3>
           </div>
         </div>
 
@@ -339,7 +411,7 @@ export default function CatalogManager() {
           </div>
           <div>
             <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Active &amp; Pre-Approved</span>
-            <h3 className="text-base font-bold text-emerald-600 dark:text-emerald-400 font-mono mt-0.5">{activeCount} Items</h3>
+            <h3 className="text-base font-bold text-emerald-600 dark:text-emerald-400 font-mono mt-0.5">{activeCount} Ready</h3>
           </div>
         </div>
 
@@ -349,20 +421,81 @@ export default function CatalogManager() {
           </div>
           <div>
             <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Category Groups</span>
-            <h3 className="text-base font-bold text-purple-600 dark:text-purple-400 font-mono mt-0.5">{uniqueCategoriesCount} Categories</h3>
+            <h3 className="text-base font-bold text-purple-600 dark:text-purple-400 font-mono mt-0.5">{uniqueCategoriesCount} Groups</h3>
           </div>
         </div>
 
-        <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 p-5 rounded-2xl flex items-center gap-3.5 shadow-xs">
-          <div className="p-3 bg-rose-50 dark:bg-slate-800 text-rose-600 dark:text-rose-400 rounded-xl shrink-0">
-            <Clock className="w-5 h-5" />
+        <div 
+          onClick={() => setFilterStatus("ExpiringSoon")}
+          className={`p-5 rounded-2xl border transition-all cursor-pointer shadow-xs ${
+            filterStatus === "ExpiringSoon"
+              ? "bg-amber-50 dark:bg-amber-955/40 border-amber-400 dark:border-amber-700"
+              : "bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-amber-400"
+          }`}
+        >
+          <div className="flex items-center gap-3.5">
+            <div className={`p-3 rounded-xl shrink-0 ${expiringSoonCount > 0 ? "bg-amber-500 text-white" : "bg-amber-50 dark:bg-slate-800 text-amber-600 dark:text-amber-400"}`}>
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Expiring &le;{warningDays}d</span>
+              <h3 className={`text-base font-bold font-mono mt-0.5 ${expiringSoonCount > 0 ? "text-amber-600 dark:text-amber-400" : "text-slate-900 dark:text-white"}`}>
+                {expiringSoonCount} Alerts
+              </h3>
+            </div>
           </div>
-          <div>
-            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Expired Quotations</span>
-            <h3 className="text-base font-bold text-rose-600 dark:text-rose-400 font-mono mt-0.5">{expiredCount} Items</h3>
+        </div>
+
+        <div 
+          onClick={() => setFilterStatus("Expired")}
+          className={`p-5 rounded-2xl border transition-all cursor-pointer shadow-xs ${
+            filterStatus === "Expired"
+              ? "bg-rose-50 dark:bg-rose-955/40 border-rose-400 dark:border-rose-700"
+              : "bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-rose-400"
+          }`}
+        >
+          <div className="flex items-center gap-3.5">
+            <div className={`p-3 rounded-xl shrink-0 ${expiredCount > 0 ? "bg-rose-600 text-white animate-pulse" : "bg-rose-50 dark:bg-slate-800 text-rose-600 dark:text-rose-400"}`}>
+              <Clock className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Expired Quotations</span>
+              <h3 className={`text-base font-bold font-mono mt-0.5 ${expiredCount > 0 ? "text-rose-600 dark:text-rose-400" : "text-slate-900 dark:text-white"}`}>
+                {expiredCount} Locked
+              </h3>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* Proactive Quotation Expiration Alert Notice */}
+      {(expiredCount > 0 || expiringSoonCount > 0) && (
+        <div className="p-4 bg-amber-50 dark:bg-amber-955/30 border border-amber-300 dark:border-amber-900/60 rounded-2xl flex items-start gap-3 shadow-xs animate-fadeIn">
+          <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+          <div className="space-y-1 text-xs text-amber-950 dark:text-amber-200 leading-relaxed flex-1">
+            <div className="flex justify-between items-center">
+              <h4 className="font-bold text-sm text-amber-900 dark:text-amber-300">
+                Market Quotation Validity Advisory &bull; Rule 7 Safeguard Active
+              </h4>
+              <span className="text-[10px] font-mono font-bold text-amber-700 dark:text-amber-400">
+                Warning Threshold: {warningDays} Calendar Days
+              </span>
+            </div>
+            <p>
+              {expiredCount > 0 ? (
+                <span>
+                  <strong>{expiredCount} reference item(s)</strong> have expired quotation proofs. Under DBM and DICT rules, department users are prevented from selecting items with expired quotations until an updated quotation canvas is attached.
+                </span>
+              ) : null}
+              {expiringSoonCount > 0 ? (
+                <span className={expiredCount > 0 ? " block pt-0.5" : ""}>
+                  <strong>{expiringSoonCount} item(s)</strong> will expire within the next {warningDays} days. Please coordinate with accredited vendors to refresh quotation proofs.
+                </span>
+              ) : null}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Notifications */}
       {error && (
@@ -393,20 +526,23 @@ export default function CatalogManager() {
         
         {/* Left Column: Form Panel */}
         <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 h-fit space-y-4 shadow-xs">
-          <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5">
+          <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5 font-serif">
             <Plus className="w-4 h-4 text-blue-600 dark:text-blue-400" />
             <span>Add Catalog Reference</span>
           </h3>
 
           {/* Reference approved custom proposals dropdown */}
           <div className="space-y-1.5 p-3.5 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl">
-            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
-              <FileSearch className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-              <span>Reference Approved Custom Proposal</span>
+            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400 flex items-center justify-between">
+              <span className="flex items-center gap-1">
+                <FileSearch className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                <span>Reference Approved Custom Proposal</span>
+              </span>
+              <span className="text-[9px] text-blue-600 dark:text-blue-400 font-mono font-bold">1-Click Auto-Fill</span>
             </label>
             <select
               onChange={handleReferenceSelect}
-              className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none text-xs cursor-pointer focus:border-blue-500"
+              className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none text-xs cursor-pointer focus:border-blue-500 font-medium"
             >
               <option value="">-- Choose Approved Proposal --</option>
               {approvedProposals.map((ref) => (
@@ -465,7 +601,7 @@ export default function CatalogManager() {
 
               <div className="space-y-1">
                 <label className="block text-[10px] uppercase font-bold text-slate-500 tracking-wider">
-                  Category
+                  Category Group
                 </label>
                 <select
                   value={form.category}
@@ -479,16 +615,44 @@ export default function CatalogManager() {
               </div>
             </div>
 
-            <div className="space-y-1">
-              <label className="block text-[10px] uppercase font-bold text-slate-500 tracking-wider">
-                Authorized Divisions (Optional, CSV)
-              </label>
+            {/* Authorized Divisions with Quick Department Chips */}
+            <div className="space-y-1.5 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
+              <div className="flex justify-between items-center">
+                <label className="block text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                  Authorized Divisions Scope
+                </label>
+                <span className="text-[9px] text-slate-400 font-mono">Empty = Global Access</span>
+              </div>
+
+              {departments.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {departments.slice(0, 8).map(dept => {
+                    const dName = dept.department_name || dept.name;
+                    const isSelected = form.allowed_offices.split(",").map(o => o.trim()).includes(dName);
+                    return (
+                      <button
+                        key={dept.department_id || dept.id}
+                        type="button"
+                        onClick={() => toggleOfficeInForm(dName, false)}
+                        className={`px-2 py-0.5 rounded text-[9px] transition-all cursor-pointer border ${
+                          isSelected
+                            ? "bg-blue-600 text-white border-blue-600 font-bold"
+                            : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-400"
+                        }`}
+                      >
+                        {isSelected ? `✓ ${dName}` : `+ ${dName}`}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               <input
                 type="text"
                 value={form.allowed_offices}
                 onChange={(e) => setForm({ ...form, allowed_offices: e.target.value })}
-                placeholder="Leave blank for global institutional access"
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none focus:border-blue-500"
+                placeholder="Leave blank for global institutional access (or comma-separated)"
+                className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none focus:border-blue-500 mt-1"
               />
             </div>
 
@@ -496,7 +660,7 @@ export default function CatalogManager() {
             <div className="p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
               <div className="space-y-1">
                 <label className="block text-[10px] uppercase font-bold text-slate-500 tracking-wider flex justify-between items-center">
-                  <span>Authorized Supplier Name</span>
+                  <span>Accredited Supplier Name</span>
                   <span className="text-[9px] text-blue-600 dark:text-blue-400 font-mono">Reference</span>
                 </label>
                 <input
@@ -556,8 +720,8 @@ export default function CatalogManager() {
           {/* Controls Bar */}
           <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
             <div>
-              <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase">
-                Active Standard References ({filteredItems.length})
+              <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase font-serif">
+                Active Reference Items ({filteredItems.length})
               </h3>
               <span className="text-[10px] text-slate-500 font-mono">Pre-approved items available to department planners</span>
             </div>
@@ -583,7 +747,8 @@ export default function CatalogManager() {
               >
                 <option value="All">All Statuses</option>
                 <option value="Active">Active Only</option>
-                <option value="Expired">Expired Proof</option>
+                <option value="ExpiringSoon">Expiring Soon (&le;{warningDays}d)</option>
+                <option value="Expired">Expired Quotation</option>
                 <option value="Disabled">Disabled</option>
               </select>
 
@@ -630,9 +795,19 @@ export default function CatalogManager() {
                   {filteredItems.map((item) => {
                     const expired = isExpired(item.canvas_expiration_date);
                     const expiringSoon = isExpiringSoon(item.canvas_expiration_date);
+                    const daysLeft = getDaysRemaining(item.canvas_expiration_date);
 
                     return (
-                      <tr key={item.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-955/30 transition-colors">
+                      <tr 
+                        key={item.id} 
+                        className={`transition-colors ${
+                          expired 
+                            ? "bg-rose-50/40 dark:bg-rose-955/20 hover:bg-rose-50/70"
+                            : expiringSoon
+                            ? "bg-amber-50/40 dark:bg-amber-955/20 hover:bg-amber-50/70"
+                            : "hover:bg-slate-50/80 dark:hover:bg-slate-955/30"
+                        }`}
+                      >
                         <td className="py-3 px-3">
                           <div className="font-bold text-slate-900 dark:text-white text-xs">{item.display_name}</div>
                           <div className="text-[10px] text-slate-400 font-mono mt-0.5 select-all">{item.item_key}</div>
@@ -665,11 +840,15 @@ export default function CatalogManager() {
                               }>
                                 {new Date(item.canvas_expiration_date).toLocaleDateString()}
                               </span>
-                              {expired && (
+                              {expired ? (
                                 <span className="text-[8px] px-1.5 py-0.2 bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-500/10 dark:text-rose-400 dark:border-rose-500/20 rounded uppercase font-bold font-mono">
                                   Expired
                                 </span>
-                              )}
+                              ) : expiringSoon ? (
+                                <span className="text-[8px] px-1.5 py-0.2 bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20 rounded uppercase font-bold font-mono">
+                                  {daysLeft}d left
+                                </span>
+                              ) : null}
                             </div>
                           ) : (
                             <span className="text-[9.5px] text-slate-400 italic">No expiry date</span>
@@ -701,7 +880,7 @@ export default function CatalogManager() {
                         </td>
 
                         <td className="py-3 px-3 text-right">
-                          <div className="flex items-center justify-end gap-2">
+                          <div className="flex items-center justify-end gap-1.5">
                             <button
                               onClick={() => handleOpenEditModal(item)}
                               className="p-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg transition-colors cursor-pointer"
@@ -711,8 +890,16 @@ export default function CatalogManager() {
                             </button>
 
                             <button
+                              onClick={() => handleDeleteItem(item)}
+                              className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 text-slate-500 rounded-lg transition-colors cursor-pointer"
+                              title="Delete Item"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
                               onClick={() => toggleItemState(item)}
-                              className="hover:scale-105 transition-transform inline-flex items-center gap-1 cursor-pointer align-middle"
+                              className="hover:scale-105 transition-transform inline-flex items-center gap-1 cursor-pointer align-middle ml-1"
                               title={item.is_active ? "Disable Item" : "Activate Item"}
                             >
                               {item.is_active ? (
@@ -747,7 +934,7 @@ export default function CatalogManager() {
       {/* EDIT CATALOG ITEM MODAL */}
       {editingItem && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
               <div>
                 <h3 className="font-bold text-slate-900 dark:text-white text-sm">Edit Catalog Reference</h3>
@@ -783,16 +970,16 @@ export default function CatalogManager() {
                     required
                     value={editForm.standard_unit_cost}
                     onChange={e => setEditForm({ ...editForm, standard_unit_cost: e.target.value })}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono font-bold outline-none focus:border-blue-500"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono font-bold outline-none focus:border-blue-500"
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">Category</label>
+                  <label className="text-[10px] uppercase font-bold text-slate-500">Category Group</label>
                   <select
                     value={editForm.category}
                     onChange={e => setEditForm({ ...editForm, category: e.target.value })}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer font-semibold"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer font-semibold"
                   >
                     {CATEGORY_OPTIONS.map(opt => (
                       <option key={opt.value} value={opt.value}>{opt.label.split(" (")[0]}</option>
@@ -812,12 +999,15 @@ export default function CatalogManager() {
               </div>
 
               <div className="space-y-1">
-                <label className="text-[10px] uppercase font-bold text-slate-500">Quotation Expiration Date</label>
+                <label className="text-[10px] uppercase font-bold text-slate-500 flex items-center justify-between">
+                  <span>Quotation Expiration Date</span>
+                  <span className="text-[9px] text-blue-600 dark:text-blue-400 font-mono">Rule 7 Guard</span>
+                </label>
                 <input
                   type="date"
                   value={editForm.canvas_expiration_date}
                   onChange={e => setEditForm({ ...editForm, canvas_expiration_date: e.target.value })}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none cursor-pointer"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none cursor-pointer"
                 />
               </div>
 
@@ -828,18 +1018,46 @@ export default function CatalogManager() {
                   value={editForm.canvas_evidence_url}
                   onChange={e => setEditForm({ ...editForm, canvas_evidence_url: e.target.value })}
                   placeholder="https://..."
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none text-xs"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-[10px] uppercase font-bold text-slate-500">Division Permissions (CSV)</label>
+              {/* Division Permissions with Quick Chips */}
+              <div className="space-y-1.5 p-3 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
+                <div className="flex justify-between items-center">
+                  <label className="text-[10px] uppercase font-bold text-slate-500">Authorized Divisions</label>
+                  <span className="text-[9px] text-slate-400 font-mono">Empty = Global</span>
+                </div>
+
+                {departments.length > 0 && (
+                  <div className="flex flex-wrap gap-1 pt-0.5">
+                    {departments.slice(0, 6).map(dept => {
+                      const dName = dept.department_name || dept.name;
+                      const isSelected = editForm.allowed_offices.split(",").map(o => o.trim()).includes(dName);
+                      return (
+                        <button
+                          key={dept.department_id || dept.id}
+                          type="button"
+                          onClick={() => toggleOfficeInForm(dName, true)}
+                          className={`px-2 py-0.5 rounded text-[9px] transition-all cursor-pointer border ${
+                            isSelected
+                              ? "bg-blue-600 text-white border-blue-600 font-bold"
+                              : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-400"
+                          }`}
+                        >
+                          {isSelected ? `✓ ${dName}` : `+ ${dName}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <input
                   type="text"
                   value={editForm.allowed_offices}
                   onChange={e => setEditForm({ ...editForm, allowed_offices: e.target.value })}
-                  placeholder="Leave blank for global access"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none"
+                  placeholder="Leave blank for global access (or comma-separated)"
+                  className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none mt-1"
                 />
               </div>
 

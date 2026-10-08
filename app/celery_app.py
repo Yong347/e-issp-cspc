@@ -1,5 +1,6 @@
 # app/celery_app.py
 import os
+import sys
 from celery import Celery
 from app.config import settings
 
@@ -13,8 +14,13 @@ celery_app = Celery(
     backend=redis_url
 )
 
+# Detect Windows runtime environment to enforce solo execution pool and prevent prefork fork crashes
+is_windows = os.name == "nt" or sys.platform.startswith("win")
+default_pool = "solo" if is_windows else "prefork"
+
 # Apply global task execution, reliability, scalability, and security parameters
 celery_app.conf.update(
+    worker_pool=getattr(settings, "CELERY_WORKER_POOL", default_pool),
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
@@ -24,8 +30,8 @@ celery_app.conf.update(
     # Connection settings: Ensure resilience during worker startup if Redis boots slowly
     broker_connection_retry_on_startup=True,
     
-    # Fix (Anomaly 25): Restart child processes after a low threshold to prevent WeasyPrint memory leaks
-    worker_max_tasks_per_child=getattr(settings, "CELERY_WORKER_MAX_TASKS_PER_CHILD", 5),
+    # Restart child processes after a low threshold on prefork pool to prevent memory leaks
+    worker_max_tasks_per_child=getattr(settings, "CELERY_WORKER_MAX_TASKS_PER_CHILD", 5) if not is_windows else None,
     
     # Concurrency: Limit prefetching to 1 task per worker to balance heavy PDF compilation tasks
     worker_prefetch_multiplier=1,
@@ -33,7 +39,7 @@ celery_app.conf.update(
     # Reliability: Acknowledge tasks only after completion so crashes can be recovered safely
     task_acks_late=True,
     
-    # Fix (Anomaly 22): Reject and requeue tasks if a worker process terminates abruptly mid-task
+    # Reject and requeue tasks if a worker process terminates abruptly mid-task
     task_reject_on_worker_lost=getattr(settings, "CELERY_TASK_REJECT_ON_WORKER_LOST", True),
     
     # Lifecycle settings: Extended timeouts to accommodate 300+ page dual-pass compilation

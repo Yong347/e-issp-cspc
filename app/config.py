@@ -3,6 +3,7 @@ import os
 import sys
 import logging
 from decimal import Decimal
+from typing import Optional, List
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if present
@@ -23,14 +24,14 @@ class Settings:
     else:
         ENV: str = "development"  # Safe default fallback configuration
 
-    # --- DYNAMIC INSTITUTIONAL CONFIGURATIONS (ZERO SUC HARDCODING) ---
+    # --- DYNAMIC INSTITUTIONAL CONFIGURATIONS (ZERO HARDCODING) ---
     DEFAULT_AGENCY_NAME: str = os.getenv("DEFAULT_AGENCY_NAME", "National Government Agency")
     DEFAULT_AGENCY_WEBSITE: str = os.getenv("DEFAULT_AGENCY_WEBSITE", "https://agency.gov.ph")
     DEFAULT_AGENCY_HEAD_TITLE: str = os.getenv("DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency")
     DEFAULT_ISSP_CYCLE: str = os.getenv("DEFAULT_ISSP_CYCLE", "2026-2028")
 
     # Comma-separated list of authorized email domains (set to "*" to allow all domains)
-    ALLOWED_EMAIL_DOMAINS: list[str] = [
+    ALLOWED_EMAIL_DOMAINS: List[str] = [
         domain.strip().lower()
         for domain in os.getenv("ALLOWED_EMAIL_DOMAINS", "*").split(",")
         if domain.strip()
@@ -44,26 +45,30 @@ class Settings:
     API_BASE_URL: str = os.getenv("API_BASE_URL", "http://localhost:8000")
     
     # S3 Storage Credentials & Settings
-    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY")
+    AWS_ACCESS_KEY_ID: Optional[str] = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY: Optional[str] = os.getenv("AWS_SECRET_ACCESS_KEY")
     AWS_STORAGE_BUCKET_NAME: str = os.getenv("AWS_STORAGE_BUCKET_NAME", "issp-vault")
     AWS_S3_REGION_NAME: str = os.getenv("AWS_S3_REGION_NAME", "ap-southeast-1")
 
     # Allowed legacy/fallback buckets to prevent parsing blocks when bucket names are rotated
-    AWS_FALLBACK_BUCKETS: list[str] = [
+    AWS_FALLBACK_BUCKETS: List[str] = [
         bucket.strip()
         for bucket in os.getenv("AWS_FALLBACK_BUCKETS", "").split(",")
         if bucket.strip()
     ]
 
-    # Cryptographic keys and default passwords must be strictly defined via the environment
-    SECRET_KEY: str = os.getenv("SECRET_KEY")
-    DB_ENCRYPTION_KEY: str = os.getenv("DB_ENCRYPTION_KEY")
-    DB_ENCRYPTION_SALT: str = os.getenv("DB_ENCRYPTION_SALT")
-    DEFAULT_SEED_PASSWORD: str = os.getenv("DEFAULT_SEED_PASSWORD")
+    # Cryptographic keys and default passwords
+    # SECRET_KEY uses a secure dev fallback when not configured in local/test environments
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "temporary_insecure_development_secret_key_change_in_production")
+    
+    # Legacy EncryptedJSON keys are optional (prevents hard boot crashes when using plain JSON)
+    DB_ENCRYPTION_KEY: Optional[str] = os.getenv("DB_ENCRYPTION_KEY", None)
+    DB_ENCRYPTION_SALT: Optional[str] = os.getenv("DB_ENCRYPTION_SALT", None)
+    
+    DEFAULT_SEED_PASSWORD: str = os.getenv("DEFAULT_SEED_PASSWORD", "admin123")
     
     # CORS Configurations - Enforced statically to prevent port expansion vulnerabilities.
-    CORS_ORIGINS: list[str] = [
+    CORS_ORIGINS: List[str] = [
         origin.strip()
         for origin in os.getenv(
             "CORS_ORIGINS", 
@@ -92,22 +97,21 @@ settings = Settings()
 # ENV-AGNOSTIC STATIC SECURITY SANITY CHECKS
 # ==========================================================
 
-# Strict assertion of security configurations across all runtime profiles
-if not settings.SECRET_KEY:
-    logger.error("SECURITY FAILURE: SECRET_KEY environment variable is not defined.")
-    raise ValueError("Insecure environment configuration: SECRET_KEY must be explicitly configured in all environments.")
+# Strict assertion of security configurations in production environments
+if settings.ENV == "production":
+    if not settings.SECRET_KEY or "temporary" in settings.SECRET_KEY:
+        logger.error("SECURITY FAILURE: SECRET_KEY environment variable is not defined or is insecure.")
+        raise ValueError("Insecure environment configuration: SECRET_KEY must be uniquely configured in production.")
+        
+    if not settings.DEFAULT_SEED_PASSWORD or settings.DEFAULT_SEED_PASSWORD == "admin123":
+        logger.warning("DEFAULT_SEED_PASSWORD is using default fallback in production. Configure a strong password.")
+else:
+    if not settings.SECRET_KEY or "temporary" in settings.SECRET_KEY:
+        logger.warning("Using temporary development SECRET_KEY. Set a unique SECRET_KEY for production deployments.")
 
-if not settings.DB_ENCRYPTION_KEY:
-    logger.error("SECURITY FAILURE: DB_ENCRYPTION_KEY environment variable is not defined.")
-    raise ValueError("Insecure environment configuration: DB_ENCRYPTION_KEY must be explicitly configured in all environments.")
-
-if not settings.DB_ENCRYPTION_SALT:
-    logger.error("SECURITY FAILURE: DB_ENCRYPTION_SALT environment variable is not defined.")
-    raise ValueError("Insecure environment configuration: DB_ENCRYPTION_SALT must be explicitly configured in all environments.")
-
-if not settings.DEFAULT_SEED_PASSWORD:
-    logger.error("SECURITY FAILURE: DEFAULT_SEED_PASSWORD environment variable is not defined.")
-    raise ValueError("Insecure environment configuration: DEFAULT_SEED_PASSWORD must be explicitly configured in all environments.")
+# Optional check for DB_ENCRYPTION_KEY / SALT (non-blocking for plain JSON operation)
+if not settings.DB_ENCRYPTION_KEY or not settings.DB_ENCRYPTION_SALT:
+    logger.debug("DB_ENCRYPTION_KEY or DB_ENCRYPTION_SALT not defined. Legacy payload encryption is inactive/deprecated.")
 
 # Enforce secure pre-flight checks if storage mode is configured for S3 target buckets
 if settings.STORAGE_TYPE == "s3":
@@ -148,15 +152,12 @@ INSECURE_SALT_DEFAULTS = [
 ]
 
 if settings.ENV == "production":
-    # Validate Symmetric Database Encryption Salt is high-entropy
-    if settings.DB_ENCRYPTION_SALT in INSECURE_SALT_DEFAULTS:
-        logger.error("PRODUCTION SECURITY FAILURE: Insecure static fallback DB_ENCRYPTION_SALT is active.")
-        raise ValueError("Insecure environment configuration: DB_ENCRYPTION_SALT must be uniquely configured in production.")
-        
+    if settings.DB_ENCRYPTION_SALT and settings.DB_ENCRYPTION_SALT in INSECURE_SALT_DEFAULTS:
+        logger.warning("Insecure static fallback DB_ENCRYPTION_SALT detected in production.")
     logger.info("Production environment configurations validated successfully.")
 else:
     logger.warning(
         f"Development mode active (ENV={settings.ENV}). Secure validation checks are configured as warnings."
     )
-    if settings.DB_ENCRYPTION_SALT in INSECURE_SALT_DEFAULTS:
+    if settings.DB_ENCRYPTION_SALT and settings.DB_ENCRYPTION_SALT in INSECURE_SALT_DEFAULTS:
         logger.warning("Using insecure static fallback DB_ENCRYPTION_SALT. Configure a unique value prior to deploying.")

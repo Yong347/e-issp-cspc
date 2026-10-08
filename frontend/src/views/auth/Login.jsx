@@ -59,21 +59,22 @@ export default function Login() {
   };
 
   return (
-    <div className="relative min-h-screen flex items-center justify-center bg-slate-100 dark:bg-[#0b1329] text-slate-800 dark:text-slate-100 overflow-hidden px-4 select-none font-sans transition-colors duration-200">
+    <div className="relative min-h-screen flex items-center justify-center bg-[#edf3fa] dark:bg-[#0b1329] text-slate-800 dark:text-slate-100 overflow-hidden px-4 select-none font-sans transition-colors duration-200">
       
       {/* Light / Dark Mode Toggle Button */}
       <div className="absolute top-6 right-6 z-20">
         <button
           type="button"
           onClick={toggleTheme}
-          className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-850 shadow-xs transition-all cursor-pointer flex items-center gap-1.5 font-bold text-xs"
+          className="p-2.5 rounded-xl bg-[#f7fafc] dark:bg-slate-900 border border-[#cbd8e6] dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-[#eef4fb] dark:hover:bg-slate-800 shadow-xs transition-all cursor-pointer flex items-center gap-1.5 font-bold text-xs"
           title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
         >
-          {theme === "dark" ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-700" />}
+          {theme === "dark" ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-blue-600" />}
           <span>{theme === "dark" ? "Light" : "Dark"}</span>
         </button>
       </div>
 
+      {/* Ambient Radial Soft Glow */}
       <div 
         className="absolute pointer-events-none" 
         style={{ 
@@ -81,16 +82,17 @@ export default function Login() {
           left: '-20%', 
           width: '140%', 
           height: '140%', 
-          background: 'radial-gradient(circle, rgba(37,99,235,0.12) 0%, transparent 60%)', 
+          background: 'radial-gradient(circle, rgba(59,130,246,0.12) 0%, transparent 65%)', 
           zIndex: 0 
         }} 
       />
 
-      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl p-8 border border-slate-200 dark:border-slate-800 z-10 shadow-xl space-y-6">
+      {/* Card Container: Soft Tinted Ice-Blue Slate Surface */}
+      <div className="w-full max-w-md bg-[#f7fafc] dark:bg-slate-900 rounded-2xl p-8 border border-[#cbd8e6] dark:border-slate-800 z-10 shadow-xl space-y-6">
         
         {/* Institutional Branding Header linked to Uploaded Seal */}
         <div className="flex flex-col items-center justify-center text-center space-y-3">
-          <div className="w-16 h-16 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-1.5 flex items-center justify-center shadow-xs overflow-hidden shrink-0">
+          <div className="w-16 h-16 rounded-2xl bg-[#eef4fb] dark:bg-slate-800 border border-[#cbd8e6] dark:border-slate-700 p-1.5 flex items-center justify-center shadow-xs overflow-hidden shrink-0">
             {agencyLogoUrl ? (
               <img 
                 src={agencyLogoUrl} 
@@ -128,7 +130,7 @@ export default function Login() {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-xs text-slate-900 dark:text-white outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono placeholder:text-slate-400"
+              className="w-full p-2.5 bg-[#eef4fb] dark:bg-slate-950 border border-[#cbd8e6] dark:border-slate-800 rounded-lg text-xs text-slate-900 dark:text-white outline-none focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono placeholder:text-slate-400"
               placeholder="username@agency.gov.ph" 
               autoComplete="username"
             />
@@ -144,7 +146,7 @@ export default function Login() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-xs text-slate-900 dark:text-white outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono placeholder:text-slate-400"
+                className="w-full p-2.5 pr-10 bg-[#eef4fb] dark:bg-slate-955 border border-[#cbd8e6] dark:border-slate-800 rounded-lg text-xs text-slate-900 dark:text-white outline-none focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono placeholder:text-slate-400"
                 placeholder="••••••••••••" 
                 autoComplete="current-password"
               />
@@ -170,7 +172,7 @@ export default function Login() {
         </form>
 
         {/* Security Compliance Guarantee */}
-        <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2 text-center text-[10px] text-slate-500 dark:text-slate-400 font-mono">
+        <div className="pt-4 border-t border-[#cbd8e6] dark:border-slate-800 space-y-2 text-center text-[10px] text-slate-500 dark:text-slate-400 font-mono">
           <div className="flex items-center justify-center gap-1.5 text-slate-700 dark:text-slate-300 font-bold">
             <Lock className="w-3.5 h-3.5 text-blue-500" />
             <span>DICT ISSP v.2026 CSPC © All rights reserved</span>

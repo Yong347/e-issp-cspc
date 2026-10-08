@@ -1,23 +1,24 @@
 // frontend/src/views/department/Proposals/UnifiedProposals.jsx
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { useNotifications } from "../../../context/NotificationContext";
 import { 
-  getProposals, 
-  createDraftProposal, 
-  updateProposal, 
-  deleteProposal, 
-  submitProposal, 
-  getDeptCatalog, 
-  getNeedsAssessments, 
-  getOutcomes, 
-  getProjects, 
-  getComments, 
-  postComment, 
-  resolveComment, 
-  uploadCanvas 
+  getProposals,
+  createDraftProposal,
+  createProposalWithCanvas,
+  duplicateProposal,
+  updateProposal,
+  deleteProposal,
+  submitProposal,
+  getDeptCatalog,
+  getNeedsAssessments,
+  getComments,
+  postComment,
+  resolveComment,
+  uploadCanvas,
+  retrieveArchivedDocument
 } from "../../../api/dept";
 import StatusPill from "../../../components/common/StatusPill";
 import { 
@@ -25,12 +26,12 @@ import {
   Plus, 
   Trash2, 
   Edit3, 
+  Copy,
   Send, 
   MessageSquare, 
   AlertCircle, 
   CheckCircle, 
   RefreshCw, 
-  GraduationCap, 
   UploadCloud, 
   Calendar, 
   ExternalLink, 
@@ -42,9 +43,13 @@ import {
   CheckSquare, 
   Sparkles, 
   ClipboardCheck, 
-  Info, 
   Lock, 
-  ShieldAlert 
+  CheckCircle2,
+  Database,
+  ArrowRight,
+  Info,
+  Layers,
+  HelpCircle
 } from "lucide-react";
 
 export default function UnifiedProposals() {
@@ -52,47 +57,52 @@ export default function UnifiedProposals() {
   const { activeCycle, planningYears } = useCycle();
   const { fetchNotifications } = useNotifications();
   const location = useLocation();
+  const navigate = useNavigate();
 
   // Core Data Lists
   const [proposals, setProposals] = useState([]);
-  const [outcomes, setOutcomes] = useState([]);
-  const [projects, setProjects] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [needsAssessments, setNeedsAssessments] = useState([]);
+
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  // Filter States
-  const [activeTab, setActiveTab] = useState("all"); 
+  // Filter States (Department-Centric)
+  const [activeTab, setActiveTab] = useState("all"); // "all" | "Hardware" | "Software" | "Subscription" | "Services" | "needs_linked"
+  const [statusFilter, setStatusFilter] = useState("all"); // "all" | "Draft" | "Submitted" | "Approved" | "Returned"
   const [searchQuery, setSearchQuery] = useState("");
 
   // Notification States
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Form Field States (DICT v.2026 Aligned)
-  const [outcomeId, setOutcomeId] = useState("");
-  const [projectId, setProjectId] = useState("");
-  const [needsAssessmentId, setNeedsAssessmentId] = useState("");
-  const [category, setCategory] = useState("Hardware");
-  const [strategicCategory, setStrategicCategory] = useState("Office Productivity");
-  const [officeLocation, setOfficeLocation] = useState("Central Office");
-  const [fundSource, setFundSource] = useState("General Appropriations Act (GAA)");
+  // Intent-Driven Form Field States (Department-Focused: No Administrative Jargon)
+  const [resourceType, setResourceType] = useState("Hardware"); // "Hardware" | "Software" | "Subscription" | "Services"
   const [itemSelect, setItemSelect] = useState("other");
   const [itemName, setItemName] = useState("");
   const [unitCost, setUnitCost] = useState("");
   const [yearlyQuantities, setYearlyQuantities] = useState({});
+  const [needsAssessmentId, setNeedsAssessmentId] = useState("");
   const [justification, setJustification] = useState("");
-  const [devStatus, setDevStatus] = useState("N/A");
   const [createdByStudents, setCreatedByStudents] = useState(false);
   const [isExpansion, setIsExpansion] = useState(false);
   const [canvasUrl, setCanvasUrl] = useState("");
   const [canvasExpiry, setCanvasExpiry] = useState("");
+  const [supplierName, setSupplierName] = useState("");
+  const [inlineFile, setInlineFile] = useState(null);
 
-  // Edit / Action States
+  // Administrative governance fields silently preserved during edits (Managed exclusively by MIS Admin)
+  const [outcomeId, setOutcomeId] = useState(null);
+  const [projectId, setProjectId] = useState(null);
+  const [strategicCategory, setStrategicCategory] = useState("Office Productivity");
+  const [officeLocation, setOfficeLocation] = useState("Central Office");
+  const [fundSource, setFundSource] = useState("General Appropriations Act (GAA)");
+  const [devStatus, setDevStatus] = useState("N/A");
+
+  // Edit State
   const [editingId, setEditingId] = useState(null);
   
-  // Canvas Upload Modal State (Rule 7)
+  // Canvas Upload Modal State (for quick card action)
   const [activeUploadItem, setActiveUploadItem] = useState(null);
   const [uploadSupplier, setUploadSupplier] = useState("");
   const [uploadFile, setUploadFile] = useState(null);
@@ -104,102 +114,62 @@ export default function UnifiedProposals() {
   const [comments, setComments] = useState([]);
   const [newCommentText, setNewCommentText] = useState("");
 
-  const token = user?.token || localStorage.getItem("access_token") || "";
-  const activeYears = (planningYears && planningYears.length > 0) ? planningYears : [2026, 2027, 2028];
+  const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  
+  // Dynamic Planning Horizon Sequence (Extracts cycle range dynamically; zero hardcoding)
+  const activeYears = useMemo(() => {
+    if (planningYears && planningYears.length > 0) return planningYears;
+    if (activeCycle && activeCycle.includes("-")) {
+      const parts = activeCycle.split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parseInt(parts[1], 10);
+      if (!isNaN(start) && !isNaN(end) && end >= start) {
+        const span = [];
+        for (let y = start; y <= end; y++) span.push(y);
+        return span;
+      }
+    }
+    return [2028, 2029, 2030];
+  }, [planningYears, activeCycle]);
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
     return "₱" + num.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
-  // Capitalization and UACS Auto-Resolution Helper (DBM ₱50,000.00 Rule + DICT Training Code)
-  const getAutoClassification = (name, cost, categoryType, strategicCat, isStudentCreated) => {
-    if (isStudentCreated) {
-      return {
-        expClass: "Capital Outlay",
-        uacs: "50604070 01 - ICT Software (Perpetual CO)"
-      };
-    }
-
-    if (categoryType === "Subscription") {
-      return {
-        expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50299070 00 - ICT Software Subscription (MOOE)"
-      };
-    }
-
-    const unit = parseFloat(cost) || 0;
-    const isCO = unit >= 50000.00;
-    const lower = (name || "").toLowerCase();
-
-    // Mandated by DICT Guidelines Page 24: Training Expenses under UACS 50202010 00
-    if (lower.includes("training") || lower.includes("seminar") || lower.includes("workshop")) {
-      return {
-        expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50202010 00 - Training Expenses (MOOE)"
-      };
-    }
-
-    if (strategicCat === "Continuing Costs/Expenses") {
-      if (lower.includes("software") || lower.includes("subscription") || lower.includes("cloud") || lower.includes("internet")) {
-        return {
-          expClass: "Maintenance and Other Operating Expenses",
-          uacs: "50299070 00 - ICT Software Subscription (MOOE)"
-        };
-      }
-      return {
-        expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50211030 00 - Consulting/Outsourced Development (MOOE)"
-      };
-    }
-
-    if (strategicCat === "Office Productivity") {
-      if (lower.includes("printer") || lower.includes("scanner") || lower.includes("plotter")) {
-        return {
-          expClass: isCO ? "Capital Outlay" : "Maintenance and Other Operating Expenses",
-          uacs: isCO ? "50604050 07 - Printing Equipment (CO)" : "50203210 07 - Semi-Expendable Printing Equipment (MOOE)"
-        };
-      }
-      if (lower.includes("suite") || lower.includes("license") || lower.includes("subscription") || lower.includes("cloud")) {
-        return {
-          expClass: "Maintenance and Other Operating Expenses",
-          uacs: "50299070 00 - ICT Software Subscription (MOOE)"
-        };
-      }
-      return {
-        expClass: isCO ? "Capital Outlay" : "Maintenance and Other Operating Expenses",
-        uacs: isCO ? "50604050 03 - ICT Equipment (CO)" : "50203210 03 - Semi-Expendable ICT Equipment (MOOE)"
-      };
-    }
-
-    // Projects (Internal or Cross-Agency)
-    if (lower.includes("contractor") || lower.includes("consulting") || lower.includes("development")) {
-      return {
-        expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50211030 00 - Consulting/Outsourced Development (MOOE)"
-      };
-    }
-
-    return {
-      expClass: isCO ? "Capital Outlay" : "Maintenance and Other Operating Expenses",
-      uacs: isCO ? "50604050 03 - ICT Equipment (CO)" : "50203210 03 - Semi-Expendable ICT Equipment (MOOE)"
-    };
+  const isExpired = (dateString) => {
+    if (!dateString) return false;
+    const d = new Date(dateString);
+    return !isNaN(d.getTime()) && d < new Date();
   };
 
-  // Sync Global Search Query & Tab from URL Navigation (?search=...&category=...)
+  // Safe Multi-Year Quantity Extractor
+  const getYearQty = useCallback((p, year, idx) => {
+    let yq = p.yearly_quantities;
+    if (typeof yq === "string") {
+      try { yq = JSON.parse(yq); } catch { yq = {}; }
+    }
+    if (yq && typeof yq === "object") {
+      if (yq[String(year)] !== undefined && yq[String(year)] !== null) return parseInt(yq[String(year)], 10) || 0;
+      if (yq[year] !== undefined && yq[year] !== null) return parseInt(yq[year], 10) || 0;
+      if (yq[`Year ${idx + 1}`] !== undefined && yq[`Year ${idx + 1}`] !== null) return parseInt(yq[`Year ${idx + 1}`], 10) || 0;
+    }
+    if (idx === 0) return p.year_1_qty || 0;
+    if (idx === 1) return p.year_2_qty || 0;
+    if (idx === 2) return p.year_3_qty || 0;
+    return 0;
+  }, []);
+
+  // Sync Search Query from URL Navigation
   useEffect(() => {
     const searchParams = new URLSearchParams(location.search);
     const q = searchParams.get("search");
     if (q !== null) {
       setSearchQuery(q);
     }
-    const cat = searchParams.get("category");
-    if (cat !== null) {
-      setActiveTab(cat);
-    }
   }, [location.search]);
 
-  // Synchronize yearly quantities with active planning years non-destructively
+  // Synchronize yearly quantities with active planning horizon
   useEffect(() => {
     setYearlyQuantities(prev => {
       const next = { ...prev };
@@ -210,34 +180,58 @@ export default function UnifiedProposals() {
       });
       return next;
     });
-  }, [planningYears]);
+  }, [activeYears]);
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard Escape Handler to Dismiss Modals
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (activeDiscussionItem) setActiveDiscussionItem(null);
+        if (activeUploadItem) {
+          setActiveUploadItem(null);
+          setUploadFile(null);
+          setUploadSupplier("");
+          setUploadExpiry("");
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeDiscussionItem, activeUploadItem]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [pData, catData, oData, prjData, naData] = await Promise.all([
+      const [pData, catData, naData] = await Promise.all([
         getProposals(activeCycle),
         getDeptCatalog().catch(() => []),
-        getOutcomes().catch(() => []),
-        getProjects().catch(() => []),
         getNeedsAssessments().catch(() => [])
       ]);
       setProposals(Array.isArray(pData) ? pData : []);
       setCatalog(Array.isArray(catData) ? catData : []);
-      setOutcomes(Array.isArray(oData) ? oData : []);
-      setProjects(Array.isArray(prjData) ? prjData : []);
       setNeedsAssessments(Array.isArray(naData) ? naData : []);
-
-      if (Array.isArray(oData) && oData.length > 0 && !outcomeId) {
-        setOutcomeId(String(oData[0].id));
-      }
     } catch (err) {
-      setError(err.message || "Failed to load proposals.");
+      setError(err.message || "Failed to load departmental proposals.");
     } finally {
       setLoading(false);
     }
-  }, [activeCycle, outcomeId]);
+  }, [activeCycle]);
 
   useEffect(() => {
     if (token && activeCycle) {
@@ -245,31 +239,18 @@ export default function UnifiedProposals() {
     }
   }, [token, activeCycle, loadData]);
 
-  // Derived Quantities & Total Cost
-  const calculatedTotalQty = Object.values(yearlyQuantities).reduce((a, b) => a + (parseInt(b, 10) || 0), 0);
-  const calculatedTotalOutlay = (parseFloat(unitCost) || 0) * calculatedTotalQty;
-  const isCapitalOutlayMajor = calculatedTotalOutlay >= 2000000.00;
-  const isOver2M = isCapitalOutlayMajor;
-  const autoClass = getAutoClassification(itemName, unitCost, category, strategicCategory, createdByStudents);
-
-  // Auto-sync development status when outlay crosses ₱2M to prevent validation desync
-  useEffect(() => {
-    if (isOver2M && devStatus === "N/A") {
-      setDevStatus("For Development");
-    } else if (!isOver2M && (devStatus === "For Development" || devStatus === "For Enhancement")) {
-      setDevStatus("N/A");
-    }
-  }, [isOver2M, devStatus]);
-
   // Standard Catalog Auto-Fill Handler
-  const handleCatalogItemChange = (key) => {
+  const handleCatalogItemChange = useCallback((key) => {
     setItemSelect(key);
     if (key === "other") {
       setItemName("");
       setUnitCost("");
       setCanvasUrl("");
       setCanvasExpiry("");
+      setSupplierName("");
+      setInlineFile(null);
       setCreatedByStudents(false);
+      setResourceType("Hardware");
     } else {
       const selected = catalog.find(item => item.item_key === key);
       if (selected) {
@@ -277,29 +258,67 @@ export default function UnifiedProposals() {
         setUnitCost(String(selected.standard_unit_cost));
         setCanvasUrl(selected.canvas_evidence_url || "");
         setCanvasExpiry(selected.canvas_expiration_date ? selected.canvas_expiration_date.split("T")[0] : "");
+        setSupplierName(selected.supplier_name || "Pre-Approved Institutional Vendor");
+        setInlineFile(null);
         setCreatedByStudents(false);
+        setResourceType(selected.category === "software" ? "Software" : "Hardware");
       }
     }
-  };
+  }, [catalog]);
+
+  // Listen to incoming navigation state: 1-Click "Add from Catalog" or "Link Needs Assessment"
+  useEffect(() => {
+    if (location.state?.selectCatalogItem) {
+      const item = location.state.selectCatalogItem;
+      setItemSelect(item.item_key);
+      setItemName(item.display_name);
+      setUnitCost(String(item.standard_unit_cost));
+      setCanvasUrl(item.canvas_evidence_url || "");
+      setCanvasExpiry(item.canvas_expiration_date ? item.canvas_expiration_date.split("T")[0] : "");
+      setSupplierName(item.supplier_name || "Pre-Approved Institutional Vendor");
+      setInlineFile(null);
+      setCreatedByStudents(false);
+      setResourceType(item.category === "software" ? "Software" : "Hardware");
+      setSuccess(`Populated from catalog: '${item.display_name}'. Please enter desired annual quantities.`);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (location.state?.catalogKey && catalog.length > 0) {
+      handleCatalogItemChange(location.state.catalogKey);
+    }
+
+    if (location.state?.prefillNeedsAssessment) {
+      const na = location.state.prefillNeedsAssessment;
+      setNeedsAssessmentId(String(na.id));
+      if (!justification) {
+        setJustification(`[Addressing Department Need]: ${na.current_problem}\n\nProposed Intervention: ${na.proposed_solution}`);
+      }
+      setSuccess(`Linked to Section 8.0 Needs Assessment: '${na.title}'.`);
+    }
+  }, [location.state, catalog, handleCatalogItemChange, justification]);
+
+  // Derived Quantities & Total Cost
+  const calculatedTotalQty = Object.values(yearlyQuantities).reduce((a, b) => a + (parseInt(b, 10) || 0), 0);
+  const calculatedTotalOutlay = (parseFloat(unitCost) || 0) * calculatedTotalQty;
 
   const resetForm = () => {
-    setOutcomeId(outcomes.length > 0 ? String(outcomes[0].id) : "");
-    setProjectId("");
-    setNeedsAssessmentId("");
-    setCategory("Hardware");
-    setStrategicCategory("Office Productivity");
-    setOfficeLocation("Central Office");
-    setFundSource("General Appropriations Act (GAA)");
     setItemSelect("other");
     setItemName("");
     setUnitCost("");
+    setNeedsAssessmentId("");
     setJustification("");
-    setDevStatus("N/A");
     setCreatedByStudents(false);
     setIsExpansion(false);
     setCanvasUrl("");
     setCanvasExpiry("");
-    
+    setSupplierName("");
+    setInlineFile(null);
+    setResourceType("Hardware");
+    setStrategicCategory("Office Productivity");
+    setProjectId(null);
+    setOutcomeId(null);
+    setOfficeLocation("Central Office");
+    setFundSource("General Appropriations Act (GAA)");
+    setDevStatus("N/A");
+
     const initial = {};
     activeYears.forEach(year => {
       initial[String(year)] = 0;
@@ -308,15 +327,31 @@ export default function UnifiedProposals() {
     setEditingId(null);
   };
 
+  // Replicate first year quantity across all years in horizon
+  const handleReplicateAllYears = () => {
+    const firstYear = activeYears[0];
+    const baseQty = yearlyQuantities[String(firstYear)] || 1;
+    const replicated = {};
+    activeYears.forEach(y => {
+      replicated[String(y)] = baseQty;
+    });
+    setYearlyQuantities(replicated);
+  };
+
+  // Clear all quantities in horizon
+  const handleClearAllQuantities = () => {
+    const cleared = {};
+    activeYears.forEach(y => {
+      cleared[String(y)] = 0;
+    });
+    setYearlyQuantities(cleared);
+  };
+
+  // Department User Proposal Submission Handler
   const handleSaveProposal = async (e) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
-
-    if (!outcomeId) {
-      setError("Compliance Violation: Please select an Organizational Outcome (Broader Scope) first.");
-      return;
-    }
 
     const costNum = parseFloat(unitCost);
     if (isNaN(costNum) || costNum < 0) {
@@ -329,46 +364,63 @@ export default function UnifiedProposals() {
       return;
     }
 
-    // Rule 2: Outlays >= ₱2M require Development Status
-    if (isCapitalOutlayMajor && devStatus === "N/A") {
-      setError("Compliance Violation: Outlays exceeding ₱2,000,000.00 require a System Development Status ('For Development' or 'For Enhancement').");
-      return;
-    }
-
     setSubmitting(true);
     try {
+      const isCatalog = itemSelect !== "other";
+      const isTurnover = Boolean(createdByStudents);
+
+      let defaultCat = "Office Productivity";
+      if (resourceType === "Subscription" || resourceType === "Services") {
+        defaultCat = "Continuing Costs/Expenses";
+      }
+
       const payload = {
-        outcome_id: parseInt(outcomeId, 10),
-        project_id: projectId ? projectId : null,
-        needs_assessment_id: needsAssessmentId ? needsAssessmentId : null,
-        category,
-        strategic_category: strategicCategory,
-        office_location: officeLocation,
-        fund_source: fundSource,
         item_select: itemSelect,
         item_name: itemName.trim(),
         unit_cost: costNum,
         yearly_quantities: yearlyQuantities,
         justification: justification.trim() || null,
-        system_development_status: isOver2M ? devStatus : "N/A",
-        created_by_students: createdByStudents,
-        canvas_evidence_url: canvasUrl ? canvasUrl.trim() : null,
+        needs_assessment_id: needsAssessmentId || null,
+        created_by_students: isTurnover,
+        is_in_house_turnover: isTurnover,
+        is_expansion: isExpansion,
+        category: resourceType,
+        strategic_category: editingId ? (strategicCategory || defaultCat) : defaultCat,
+        project_id: editingId ? (projectId || null) : null,
+        supplier_name: supplierName.trim() || null,
         canvas_expiration_date: canvasExpiry ? new Date(canvasExpiry).toISOString() : null,
-        is_expansion: isExpansion
+        canvas_evidence_url: canvasUrl || null,
+        outcome_id: editingId ? (outcomeId ? parseInt(outcomeId, 10) : null) : null,
+        office_location: officeLocation || user?.department_name || "Central Office",
+        fund_source: fundSource || "General Appropriations Act (GAA)",
+        system_development_status: devStatus || "N/A"
       };
 
       if (editingId) {
-        await updateProposal(editingId, payload);
-        setSuccess("Proposal line item updated successfully.");
+        if (inlineFile) {
+          await updateProposal(editingId, payload, inlineFile, token);
+        } else {
+          await updateProposal(editingId, payload, null, token);
+        }
+        setSuccess("Proposal draft updated successfully.");
       } else {
-        await createDraftProposal(payload);
-        setSuccess("Draft proposal successfully created.");
+        if (inlineFile && !isCatalog) {
+          await createProposalWithCanvas(payload, inlineFile, token);
+          setSuccess("Proposal and quotation canvas successfully registered in 1 step!");
+        } else {
+          await createDraftProposal(payload, null, token);
+          setSuccess("Draft proposal successfully created.");
+        }
       }
 
       resetForm();
       loadData();
     } catch (err) {
-      setError(err.message || "Failed to save proposal.");
+      let msg = err.message || "Failed to save proposal.";
+      if (err.violations && Array.isArray(err.violations) && err.violations.length > 0) {
+        msg = `${msg}\n• ${err.violations.join("\n• ")}`;
+      }
+      setError(msg);
     } finally {
       setSubmitting(false);
     }
@@ -378,44 +430,60 @@ export default function UnifiedProposals() {
     setError(null);
     setSuccess(null);
     setEditingId(p.id);
-    setOutcomeId(String(p.outcome_id || (outcomes[0]?.id || "1")));
-    setProjectId(p.project_id || "");
-    setNeedsAssessmentId(p.needs_assessment_id ? String(p.needs_assessment_id) : "");
-    setCategory(p.category || "Hardware");
-    setStrategicCategory(p.strategic_category || "Office Productivity");
-    setOfficeLocation(p.office_location || "Central Office");
-    setFundSource(p.fund_source || "General Appropriations Act (GAA)");
+    
+    // Core department inputs
     setItemSelect(p.item_key || "other");
-    setItemName(p.item_name);
-    setUnitCost(String(p.unit_cost));
+    setItemName(p.item_name || "");
+    setUnitCost(String(p.unit_cost || 0));
+    setNeedsAssessmentId(p.needs_assessment_id ? String(p.needs_assessment_id) : "");
     setJustification(p.justification || "");
-    setDevStatus(p.system_development_status || "N/A");
-    setCreatedByStudents(Boolean(p.created_by_students));
+    setCreatedByStudents(Boolean(p.created_by_students || p.is_in_house_turnover));
     setIsExpansion(Boolean(p.is_expansion));
     setCanvasUrl(p.canvas_evidence_url || "");
     setCanvasExpiry(p.canvas_expiration_date ? p.canvas_expiration_date.split("T")[0] : "");
+    setSupplierName(p.supplier_name || p.payload?.supplier_name || "");
+    setInlineFile(null);
+    setResourceType(p.category || "Hardware");
+
+    // Preserve existing administrative classifications silently
+    setStrategicCategory(p.strategic_category || "Office Productivity");
+    setProjectId(p.project_id || null);
+    setOutcomeId(p.outcome_id ? String(p.outcome_id) : null);
+    setOfficeLocation(p.office_location || user?.department_name || "Central Office");
+    setFundSource(p.fund_source || "General Appropriations Act (GAA)");
+    setDevStatus(p.system_development_status || "N/A");
     
     const qtyMap = {};
     activeYears.forEach((year, idx) => {
-      let q = p.yearly_quantities?.[String(year)];
-      if (q === undefined) {
-        if (idx === 0) q = p.year_1_qty;
-        else if (idx === 1) q = p.year_2_qty;
-        else if (idx === 2) q = p.year_3_qty;
-      }
-      qtyMap[String(year)] = q || 0;
+      qtyMap[String(year)] = getYearQty(p, year, idx);
     });
     setYearlyQuantities(qtyMap);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const handleDelete = async (id, name) => {
-    if (!window.confirm(`Purge proposal draft for '${name}'?`)) return;
+  // 1-Click Duplicate Proposal Clone Handler
+  const handleDuplicate = async (id, name) => {
     setError(null);
     setSuccess(null);
     try {
-      await deleteProposal(id);
-      setSuccess("Proposal draft purged successfully.");
+      const cloned = await duplicateProposal(id, token);
+      setSuccess(`Duplicated '${name}' into a fresh draft.`);
+      await loadData();
+      if (cloned) {
+        handleEdit(cloned);
+      }
+    } catch (err) {
+      setError(err.message || "Failed to duplicate proposal.");
+    }
+  };
+
+  const handleDelete = async (id, name) => {
+    if (!window.confirm(`Delete proposal draft for '${name}'?`)) return;
+    setError(null);
+    setSuccess(null);
+    try {
+      await deleteProposal(id, token);
+      setSuccess("Proposal draft deleted successfully.");
       loadData();
     } catch (err) {
       setError(err.message || "Failed to delete proposal.");
@@ -426,8 +494,8 @@ export default function UnifiedProposals() {
     setError(null);
     setSuccess(null);
     try {
-      await submitProposal(id);
-      setSuccess(`Proposal '${name}' submitted to governance review queue.`);
+      await submitProposal(id, token);
+      setSuccess(`Proposal '${name}' submitted to the MIS review queue.`);
       loadData();
       if (fetchNotifications) fetchNotifications();
     } catch (err) {
@@ -435,7 +503,21 @@ export default function UnifiedProposals() {
     }
   };
 
-  // Rule 7: Uploads or updates a canvas quotation / turnover deed
+  // Transparent Official Archive Access Handler (Automated Document Retrieval)
+  const handleOpenQuotation = async (proposal) => {
+    if (!proposal.canvas_evidence_url) return;
+    try {
+      const res = await retrieveArchivedDocument(proposal.id, token);
+      if (res && res.file_url) {
+        window.open(res.file_url, "_blank", "noopener,noreferrer");
+        return;
+      }
+    } catch (err) {
+      console.warn("Direct archive access fallback:", err);
+    }
+    window.open(proposal.canvas_evidence_url, "_blank", "noopener,noreferrer");
+  };
+
   const handleUploadCanvasModal = async (e) => {
     e.preventDefault();
     if (!uploadFile || !uploadSupplier.trim() || !activeUploadItem) return;
@@ -446,7 +528,7 @@ export default function UnifiedProposals() {
       const expiryIso = uploadExpiry ? new Date(uploadExpiry).toISOString() : null;
       await uploadCanvas(activeUploadItem.id, uploadSupplier.trim(), uploadFile, expiryIso, token);
 
-      setSuccess("Document and validity period updated successfully.");
+      setSuccess("Quotation canvas successfully uploaded and attached.");
       setActiveUploadItem(null);
       setUploadFile(null);
       setUploadSupplier("");
@@ -463,7 +545,7 @@ export default function UnifiedProposals() {
     setActiveDiscussionItem(item);
     setNewCommentText("");
     try {
-      const data = await getComments(item.id);
+      const data = await getComments(item.id, token);
       setComments(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to load comment thread", err);
@@ -477,9 +559,9 @@ export default function UnifiedProposals() {
       await postComment(activeDiscussionItem.id, {
         text: newCommentText.trim(),
         requires_department_action: false
-      });
+      }, token);
       setNewCommentText("");
-      const data = await getComments(activeDiscussionItem.id);
+      const data = await getComments(activeDiscussionItem.id, token);
       setComments(Array.isArray(data) ? data : []);
     } catch (err) {
       alert(err.message);
@@ -488,8 +570,8 @@ export default function UnifiedProposals() {
 
   const handleResolveComment = async (commentId) => {
     try {
-      await resolveComment(activeDiscussionItem.id, commentId);
-      const data = await getComments(activeDiscussionItem.id);
+      await resolveComment(activeDiscussionItem.id, commentId, token);
+      const data = await getComments(activeDiscussionItem.id, token);
       setComments(Array.isArray(data) ? data : []);
       loadData();
       if (fetchNotifications) fetchNotifications();
@@ -498,51 +580,61 @@ export default function UnifiedProposals() {
     }
   };
 
-  // Tab and Search Filter
+  // Filter Tabs Definition (Intuitive, Department-Friendly)
+  const filterTabs = [
+    { id: "all", label: "All Items" },
+    { id: "Hardware", label: "Hardware" },
+    { id: "Software", label: "Packaged Software Licenses" },
+    { id: "Subscription", label: "Cloud & Subscriptions" },
+    { id: "Services", label: "Technical Services" },
+    { id: "needs_linked", label: "Needs-Linked" }
+  ];
+
   const filteredProposals = useMemo(() => {
     return proposals.filter(p => {
+      // Category / Nature Filter
       if (activeTab === "needs_linked") {
         if (!p.needs_assessment_id) return false;
-      } else if (activeTab === "Capital Outlay") {
-        if (p.expenditure_class !== "Capital Outlay") return false;
-      } else if (activeTab === "MOOE") {
-        if (p.expenditure_class === "Capital Outlay") return false;
       } else if (activeTab !== "all") {
-        if (p.strategic_category !== activeTab) return false;
+        if ((p.category || "").toLowerCase() !== activeTab.toLowerCase()) return false;
       }
 
+      // Status Filter
+      if (statusFilter !== "all") {
+        if ((p.status || "").toLowerCase() !== statusFilter.toLowerCase()) return false;
+      }
+
+      // Text Search Query Filter
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchesName = (p.item_name || "").toLowerCase().includes(q);
-        const matchesOutcome = (p.outcome?.outcome_name || "").toLowerCase().includes(q);
-        const matchesUacs = (p.uacs_object_code || "").toLowerCase().includes(q);
-        const matchesProject = (p.project_rel?.project_title || "").toLowerCase().includes(q);
         const matchesJust = (p.justification || "").toLowerCase().includes(q);
-        if (!matchesName && !matchesOutcome && !matchesUacs && !matchesProject && !matchesJust) return false;
+        const matchesCat = (p.category || "").toLowerCase().includes(q);
+        if (!matchesName && !matchesJust && !matchesCat) return false;
       }
 
       return true;
     });
-  }, [proposals, activeTab, searchQuery]);
+  }, [proposals, activeTab, statusFilter, searchQuery]);
 
   return (
-    <div className="space-y-6 text-xs text-slate-800 dark:text-slate-100 max-w-7xl mx-auto font-sans select-none">
+    <div className="space-y-6 text-xs text-slate-800 dark:text-slate-100 max-w-7xl mx-auto font-sans select-none transition-colors duration-200">
       
-      {/* Top Banner */}
+      {/* Top Banner Panel */}
       <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-xs flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h2 className="text-base font-serif font-bold text-slate-900 dark:text-white flex items-center gap-2">
             <FolderKanban className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-            <span>Unified Resource Proposals Ledger (Part IV.A)</span>
+            <span>Resource Proposals Ledger (Part IV.A Detailed Requirements)</span>
           </h2>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
-            Merged CapEx &amp; MOOE ledger. Target deployment office automated to: <strong className="text-slate-900 dark:text-white">{user?.department_name || "Assigned Department"}</strong>.
+            Submit resource needs and technical specifications for <strong>{user?.department_name || "your department"}</strong>. Choose your procurement nature, enter target quantities, attach quotation proofs, and link to your Needs Assessment. Organizational Outcomes, Project Portfolios, and DBM UACS accounts are assigned by the Administrator upon review.
           </p>
         </div>
         <button 
           onClick={loadData} 
           disabled={loading}
-          className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5 font-bold shadow-xs text-xs"
+          className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5 font-bold shadow-xs text-xs shrink-0"
           title="Refresh Ledger"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -550,23 +642,70 @@ export default function UnifiedProposals() {
         </button>
       </div>
 
+      {/* Explicit Guidance Banner: Packaged COTS Licenses vs Enterprise Information Systems */}
+      <div className="p-4 bg-blue-50/70 dark:bg-blue-955/30 border border-blue-200 dark:border-blue-900/60 rounded-2xl text-[11px] text-blue-950 dark:text-blue-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs leading-relaxed animate-fadeIn">
+        <div className="flex items-start gap-2.5">
+          <Info className="w-5 h-5 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+          <div className="space-y-0.5">
+            <span className="font-bold text-blue-900 dark:text-blue-300 block text-xs uppercase tracking-wide font-mono">
+              Notice: Packaged Software Licenses vs. Enterprise Systems
+            </span>
+            <p>
+              Proposing <strong>physical hardware</strong>, <strong>perpetual off-the-shelf seat licenses</strong> (e.g., AutoCAD, SPSS, Adobe CC, Windows Server CALs), or <strong>recurring subscriptions</strong>? Budget for them directly on this ledger.
+              Need to propose a multi-user institutional database application, clinic records system, or citizen portal? Propose it under <strong>Part III.D Information Systems</strong>.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => navigate("/dept/proposed-systems")}
+          className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 shrink-0 transition-all cursor-pointer shadow-xs whitespace-nowrap self-end sm:self-auto"
+        >
+          <Database className="w-3.5 h-3.5" />
+          <span>Propose a System (Part III.D)</span>
+          <ArrowRight className="w-3 h-3" />
+        </button>
+      </div>
+
+      {/* Error and Success Notifications */}
       {error && (
-        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
-          <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
-          <span>{error}</span>
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 rounded-xl flex items-start justify-between gap-2.5 shadow-xs animate-fadeIn">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+            <span className="whitespace-pre-wrap leading-relaxed font-semibold">{error}</span>
+          </div>
+          <button 
+            type="button"
+            onClick={() => setError(null)} 
+            className="text-rose-400 hover:text-rose-600 dark:hover:text-white cursor-pointer p-0.5"
+            title="Dismiss error"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
-          <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <span>{success}</span>
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between gap-2.5 shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2.5">
+            <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span>{success}</span>
+          </div>
+          <button 
+            type="button"
+            onClick={() => setSuccess(null)} 
+            className="text-emerald-400 hover:text-emerald-600 dark:hover:text-white cursor-pointer p-0.5"
+            title="Dismiss notification"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
-        {/* Left Column: Proposal Submission Form */}
+        {/* Left Column: Simplified Department Proposal Intake Form */}
         <form onSubmit={handleSaveProposal} className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-4 h-fit shadow-xs">
           <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2.5">
             <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
@@ -584,37 +723,150 @@ export default function UnifiedProposals() {
             )}
           </div>
 
-          {/* Rule 6: Broader Scope Target (Organizational Outcome) at the TOP */}
-          <div className="space-y-1.5 bg-blue-50/60 dark:bg-slate-955 p-3.5 rounded-xl border border-blue-200 dark:border-slate-800">
-            <label className="text-[10px] uppercase font-bold text-blue-800 dark:text-blue-400 tracking-wider flex items-center gap-1.5">
-              <GraduationCap className="w-4 h-4" />
-              <span>Broader Scope Target: Outcome (Part I.A.4)</span>
+          {/* Categorized Pre-Approved Catalog Reference Selection */}
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">
+              Price Reference Catalog Selection
             </label>
-            {outcomes.length > 0 ? (
-              <select
-                value={outcomeId}
-                onChange={e => setOutcomeId(e.target.value)}
-                className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none text-xs font-semibold cursor-pointer focus:border-blue-500"
-                required
-              >
-                {outcomes.map(o => (
-                  <option key={o.id} value={String(o.id)}>
-                    {o.outcome_name} ({o.type_label || "Outcome"})
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="p-2.5 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 rounded-lg text-[10.5px]">
-                No Organizational Outcomes defined by Admin.
-              </div>
-            )}
+            <select
+              value={itemSelect}
+              onChange={e => handleCatalogItemChange(e.target.value)}
+              className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white cursor-pointer outline-none font-mono text-xs focus:border-blue-500"
+            >
+              <option value="other">-- Custom Technical Request (Other) --</option>
+              {["computing_devices", "networking", "printers_imaging", "software", "other"].map(catGroup => {
+                const groupItems = catalog.filter(i => (i.category || "other").toLowerCase() === catGroup.toLowerCase());
+                if (groupItems.length === 0) return null;
+                const groupLabels = {
+                  computing_devices: "Computing Devices (Desktops, Laptops)",
+                  networking: "Networking & Connectivity",
+                  printers_imaging: "Printers & Imaging",
+                  software: "Software Packages & Subscriptions",
+                  other: "Other Standard Equipment"
+                };
+                return (
+                  <optgroup key={catGroup} label={groupLabels[catGroup] || catGroup} className="bg-white dark:bg-slate-900 font-bold text-blue-700 dark:text-blue-400">
+                    {groupItems.map(item => (
+                      <option key={item.id || item.item_key} value={item.item_key} className="text-slate-800 dark:text-slate-200 font-normal">
+                        {item.display_name} — {formatPHP(item.standard_unit_cost)}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
+            </select>
           </div>
 
-          {/* Optional Link to Department Needs Assessment (Sec 8.0) */}
+          {/* Catalog Item Pre-Approved Indicator Card */}
+          {itemSelect !== "other" && (
+            <div className="p-3 bg-emerald-50 dark:bg-emerald-955/30 border border-emerald-200 dark:border-emerald-800/80 rounded-xl space-y-1.5 animate-fadeIn">
+              <div className="flex justify-between items-center">
+                <span className="font-bold text-emerald-800 dark:text-emerald-300 text-xs flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                  <span>Pre-Approved Catalog Standard</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleCatalogItemChange("other")}
+                  className="text-[10px] text-emerald-700 dark:text-emerald-400 underline font-bold hover:text-emerald-900 dark:hover:text-emerald-300 cursor-pointer"
+                >
+                  Switch to Custom
+                </button>
+              </div>
+              <div className="flex justify-between text-[10.5px] font-mono text-emerald-900 dark:text-emerald-200">
+                <span>Standard Rate: <strong>{formatPHP(unitCost)}</strong></span>
+                <span>Proof: <strong>Pre-Approved</strong></span>
+              </div>
+              <p className="text-[10px] text-emerald-700 dark:text-emerald-400">
+                Unit cost and specifications are verified. Quotation canvas upload is exempt [2].
+              </p>
+            </div>
+          )}
+
+          {/* 1. Resource Nature Selection (4 Official Statutory Categories) */}
           <div className="space-y-1">
-            <label className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
-              <ClipboardCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-              <span>Link to Needs Assessment (Section 8.0)</span>
+            <div className="flex justify-between items-center">
+              <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+                Resource Nature
+              </label>
+              <span className="text-[9.5px] text-slate-400 dark:text-slate-500 font-mono">Official DICT/DBM Categories</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 font-semibold text-xs">
+              {[
+                { id: "Hardware", label: "Hardware Equipment" },
+                { id: "Software", label: "Software (Perpetual/COTS)" },
+                { id: "Subscription", label: "Subscription (Cloud/SaaS)" },
+                { id: "Services", label: "Services (Consulting/Support)" }
+              ].map(t => (
+                <button
+                  key={t.id}
+                  type="button"
+                  disabled={itemSelect !== "other"}
+                  onClick={() => setResourceType(t.id)}
+                  className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                    resourceType === t.id
+                      ? "bg-blue-600 text-white border-blue-600 shadow-2xs font-bold"
+                      : "bg-slate-50 dark:bg-slate-955 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-blue-400"
+                  } disabled:opacity-50`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Software Scope Context Hint */}
+          {resourceType === "Software" && itemSelect === "other" && (
+            <div className="p-3 bg-blue-50/60 dark:bg-blue-955/20 border border-blue-200 dark:border-blue-900/50 rounded-xl text-[10.5px] text-slate-700 dark:text-slate-300 flex items-start gap-2 leading-relaxed animate-fadeIn">
+              <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+              <span>
+                <strong>Packaged COTS Licenses:</strong> Propose commercial off-the-shelf seat licenses here (e.g. AutoCAD, Adobe CC, SPSS, Windows Server CALs). For bespoke institutional database systems or web portals, please use <Link to="/dept/proposed-systems" className="text-blue-600 dark:text-blue-400 font-bold underline">Propose a System (Part III.D)</Link>.
+              </span>
+            </div>
+          )}
+
+          {/* 2. Item Description */}
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">
+              Item Name &amp; Technical Description
+            </label>
+            <input
+              type="text"
+              required
+              disabled={itemSelect !== "other"}
+              value={itemName}
+              onChange={e => setItemName(e.target.value)}
+              placeholder="e.g. High-Performance Mobile Workstation, 50 AutoCAD Perpetual Lab Licenses"
+              className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold outline-none focus:border-blue-500 disabled:opacity-60 text-xs"
+            />
+          </div>
+
+          {/* 3. Unit Cost */}
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">
+              Unit Cost (PHP ₱)
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              required
+              disabled={itemSelect !== "other"}
+              value={unitCost}
+              onChange={e => setUnitCost(e.target.value)}
+              placeholder="0.00"
+              className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono font-bold outline-none focus:border-blue-500 disabled:opacity-60 text-xs"
+            />
+          </div>
+
+          {/* 4. Link to Department Needs Assessment */}
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between">
+              <span className="flex items-center gap-1">
+                <ClipboardCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                <span>Link to Department Needs Assessment (Section 8.0)</span>
+              </span>
+              <span className="text-[9px] text-slate-400 dark:text-slate-500 font-mono">Optional</span>
             </label>
             <select
               value={needsAssessmentId}
@@ -631,159 +883,107 @@ export default function UnifiedProposals() {
               <option value="">-- None / Standalone Line Item --</option>
               {needsAssessments.map(n => (
                 <option key={n.id} value={String(n.id)}>
-                  [{n.mfo_alignment?.toUpperCase() || "MFO"}] {n.title}
+                  [{n.mfo_alignment || "Program"}] {n.title}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* Resource Category & Strategic Bucket */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase font-bold text-slate-500">Classification</label>
-              <select
-                value={category}
-                onChange={e => setCategory(e.target.value)}
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none cursor-pointer text-xs font-semibold"
-              >
-                <option value="Hardware">Hardware</option>
-                <option value="Software">Software</option>
-                <option value="Subscription">Subscription</option>
-              </select>
+          {/* 5. Dynamic Multi-Year Targets Grid with Steppers & Quick Helpers */}
+          <div className="space-y-2.5 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider flex items-center gap-1 font-mono">
+                <Calendar className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                <span>Multi-Year Quantities ({activeYears.length} Years Horizon)</span>
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleReplicateAllYears}
+                  className="text-[9px] text-blue-600 dark:text-blue-400 hover:underline font-mono cursor-pointer"
+                  title="Copy Year 1 quantity across all horizon years"
+                >
+                  Replicate Y1
+                </button>
+                <span className="text-slate-300 dark:text-slate-700">|</span>
+                <button
+                  type="button"
+                  onClick={handleClearAllQuantities}
+                  className="text-[9px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 font-mono cursor-pointer"
+                >
+                  Clear
+                </button>
+              </div>
             </div>
 
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase font-bold text-slate-500">Spending Bucket</label>
-              <select
-                value={strategicCategory}
-                onChange={e => setStrategicCategory(e.target.value)}
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white cursor-pointer outline-none text-xs font-semibold"
-              >
-                <option value="Office Productivity">Office Productivity</option>
-                <option value="Internal ICT Projects">Internal Projects</option>
-                <option value="Cross-Agency ICT Projects">Cross-Agency</option>
-                <option value="Continuing Costs/Expenses">Continuing Costs</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Pre-Approved Catalog Reference */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase font-bold text-slate-500">Price Reference Catalog</label>
-            <select
-              value={itemSelect}
-              onChange={e => handleCatalogItemChange(e.target.value)}
-              className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white cursor-pointer outline-none font-mono text-xs"
-            >
-              <option value="other">-- Custom Request (Other) --</option>
-              {catalog.map(item => (
-                <option key={item.id} value={item.item_key}>
-                  {item.display_name} ({formatPHP(item.standard_unit_cost)})
-                </option>
+            <div className="space-y-2">
+              {activeYears.map((year, idx) => (
+                <div key={year} className="flex justify-between items-center text-xs">
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">
+                    Year {idx + 1} (FY {year}):
+                  </span>
+                  
+                  {/* Dynamic Stepper & Numeric Input */}
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setYearlyQuantities(prev => ({
+                        ...prev,
+                        [String(year)]: Math.max(0, (parseInt(prev[String(year)], 10) || 0) - 1)
+                      }))}
+                      className="w-6 h-6 rounded bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold flex items-center justify-center cursor-pointer text-xs"
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="0"
+                      value={yearlyQuantities[String(year)] ?? 0}
+                      onChange={e => setYearlyQuantities({
+                        ...yearlyQuantities,
+                        [String(year)]: Math.max(0, parseInt(e.target.value, 10) || 0)
+                      })}
+                      className="w-16 p-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 text-center rounded-lg text-slate-900 dark:text-white font-mono font-bold text-xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setYearlyQuantities(prev => ({
+                        ...prev,
+                        [String(year)]: (parseInt(prev[String(year)], 10) || 0) + 1
+                      }))}
+                      className="w-6 h-6 rounded bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold flex items-center justify-center cursor-pointer text-xs"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
               ))}
-            </select>
+            </div>
           </div>
 
-          {/* Linked Strategic ICT Project */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
-              <FolderKanban className="w-3.5 h-3.5 text-blue-500" />
-              <span>Linked Strategic Project (Part III.E)</span>
+          {/* 6. Technical Specifications & Justification */}
+          <div className="space-y-1.5">
+            <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+              Technical Specifications &amp; Operational Rationale
             </label>
-            <select
-              value={projectId}
-              onChange={e => setProjectId(e.target.value)}
-              className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none text-xs cursor-pointer focus:border-blue-500 font-medium"
-            >
-              <option value="">-- Standalone (Office Productivity / Continuing) --</option>
-              {projects.map(p => (
-                <option key={p.id} value={p.id}>[{p.project_category}] {p.project_title}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Item Description */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase font-bold text-slate-500">Item Description</label>
-            <input
-              type="text"
-              required
-              disabled={itemSelect !== "other"}
-              value={itemName}
-              onChange={e => setItemName(e.target.value)}
-              placeholder="e.g. Workstation Laptop, Productivity Software"
-              className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold outline-none focus:border-blue-500 disabled:opacity-60 text-xs"
+            <textarea
+              value={justification}
+              onChange={e => setJustification(e.target.value)}
+              placeholder="Detail operational necessity, hardware specs, user workloads, or target division tasks..."
+              rows={3}
+              className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-relaxed resize-none text-xs outline-none focus:border-blue-500"
             />
           </div>
 
-          {/* Location & Fund Source */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase font-bold text-slate-500">Deployment Location</label>
-              <select
-                value={officeLocation}
-                onChange={e => setOfficeLocation(e.target.value)}
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white cursor-pointer outline-none text-xs"
-              >
-                <option value="Central Office">Central Office</option>
-                <option value="Field/Regional Office">Field/Regional Office</option>
-              </select>
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase font-bold text-slate-500">Financing Source</label>
-              <select
-                value={fundSource}
-                onChange={e => setFundSource(e.target.value)}
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white cursor-pointer outline-none text-xs"
-              >
-                <option value="General Appropriations Act (GAA)">GAA (National Budget)</option>
-                <option value="Foreign-Assisted Projects (FAP)">FAP (Loans / Grants)</option>
-                <option value="Locally Funded">Locally Funded</option>
-                <option value="Other Income Generating Sources">Other Income</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Unit Cost & Real-Time DBM Auto-Classification */}
-          <div className="grid grid-cols-2 gap-3 items-end">
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase font-bold text-slate-500">Unit Cost (PHP ₱)</label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                required
-                disabled={itemSelect !== "other"}
-                value={unitCost}
-                onChange={e => setUnitCost(e.target.value)}
-                placeholder="0.00"
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono font-bold outline-none focus:border-blue-500 disabled:opacity-60 text-xs"
-              />
-            </div>
-
-            {/* Live DBM Classification Badge */}
-            <div className="p-2.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1">
-              <span className="text-[9px] uppercase font-bold text-slate-400 block tracking-wider">Accounting Class</span>
-              <span className={`inline-block px-2 py-0.5 rounded-full text-[9px] font-bold uppercase font-mono tracking-wider border ${
-                autoClass.expClass === "Capital Outlay"
-                  ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20"
-                  : "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20"
-              }`}>
-                {autoClass.expClass === "Capital Outlay" ? "Capital Outlay" : "MOOE"}
-              </span>
-              <span className="block text-[9px] text-slate-500 font-mono truncate" title={autoClass.uacs}>
-                {autoClass.uacs.split(" - ")[0]}
-              </span>
-            </div>
-          </div>
-
-          {/* Rule 1: In-House / Non-Commercial Development Systems Bypass Toggle */}
+          {/* 7. In-House / Non-Commercial Development Turnover Toggle */}
           <div className="p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between">
             <div className="space-y-0.5 pr-2">
-              <span className="font-bold text-slate-900 dark:text-white block text-xs">In-House / Non-Commercial Asset</span>
-              <span className="text-[10px] text-slate-500 block leading-tight">
-                Capital Outlay; market quotation is optional (Rule 1).
+              <span className="font-bold text-slate-900 dark:text-white block text-xs">
+                In-House Developed / Non-Commercial Asset
+              </span>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 block leading-tight">
+                Check if software is developed internally or turned over; commercial quotation canvas is optional.
               </span>
             </div>
             <input
@@ -794,86 +994,7 @@ export default function UnifiedProposals() {
             />
           </div>
 
-          {/* Dynamic Quotation Proof / Turnover Deed Section */}
-          {itemSelect === "other" && (
-            <div className="space-y-2 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
-              <div className="flex justify-between items-center">
-                <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
-                  {createdByStudents 
-                    ? "Turnover Deed / Proof (Optional)" 
-                    : "Market Quotation Proof (PDF)"}
-                </label>
-                {canvasUrl && (
-                  <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1 font-mono">
-                    <Check className="w-3 h-3" /> Attached
-                  </span>
-                )}
-              </div>
-
-              {canvasUrl ? (
-                <div className="flex items-center justify-between p-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl">
-                  <a
-                    href={canvasUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-blue-600 dark:text-blue-400 hover:underline font-semibold text-[10px] truncate max-w-[180px] inline-flex items-center gap-1"
-                  >
-                    <FileText className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">{canvasUrl.split("/").pop()}</span>
-                    <ExternalLink className="w-2.5 h-2.5 shrink-0" />
-                  </a>
-                  <button
-                    type="button"
-                    onClick={() => { setCanvasUrl(""); setCanvasExpiry(""); }}
-                    className="text-rose-500 hover:text-rose-700 text-[10px] font-bold p-1 cursor-pointer"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ) : (
-                <p className="text-[10px] text-slate-500 italic">
-                  {createdByStudents 
-                    ? "Optional: You can save this draft and attach supporting documents (e.g. deed of turnover, project acceptance sheet) anytime."
-                    : "Quotation proof can be linked via 'Attach Document' or upload after drafting."}
-                </p>
-              )}
-
-              <div className="space-y-1 pt-1">
-                <label className="text-[9px] uppercase font-bold text-slate-400 block">
-                  Quotation / Proof Expiration Date {createdByStudents ? "(Optional)" : ""}
-                </label>
-                <input
-                  type="date"
-                  value={canvasExpiry}
-                  onChange={e => setCanvasExpiry(e.target.value)}
-                  className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs outline-none cursor-pointer"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Rule 2: Outlays >= ₱2,000,000.00 System Development Tag */}
-          {isOver2M && (
-            <div className="p-3.5 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/60 rounded-xl space-y-2 animate-fadeIn">
-              <span className="block text-[10px] text-amber-800 dark:text-amber-300 font-bold uppercase tracking-wider flex items-center gap-1">
-                <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>Major Outlay (&ge; ₱2M): Lifecycle Tag Required</span>
-              </span>
-              <p className="text-[10.5px] text-slate-600 dark:text-slate-400 leading-normal">
-                Outlays exceeding ₱2,000,000.00 require a development lifecycle tag for DICT compliance.
-              </p>
-              <select
-                value={devStatus}
-                onChange={e => setDevStatus(e.target.value)}
-                className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none cursor-pointer text-xs"
-              >
-                <option value="For Development">For Development (New System)</option>
-                <option value="For Enhancement">For Enhancement (Upgrade Profile)</option>
-              </select>
-            </div>
-          )}
-
-          {/* Expansion Project Declaration */}
+          {/* 8. Expansion Project Declaration */}
           <div className="flex items-start gap-2.5 p-3 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
             <input
               type="checkbox"
@@ -886,57 +1007,148 @@ export default function UnifiedProposals() {
               <label htmlFor="expansion_toggle" className="text-[10.5px] font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider block cursor-pointer">
                 Expansion Project (New Capacity)
               </label>
-              <span className="text-[10px] text-slate-500 block leading-tight">
-                Check if this proposal is expanding capacity rather than replacing retired End-of-Life (EOL) hardware. Bypasses Annex 1 hardware retirement matching.
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 block leading-tight">
+                Check if this proposal adds new capacity rather than replacing retired End-of-Life (EOL) equipment in Annex 1.
               </span>
             </div>
           </div>
 
-          {/* Multi-Year Targets Grid */}
+          {/* 9. Quotation Evidence Section (1-Step File Attachment) */}
           <div className="space-y-2.5 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
-            <span className="block text-[10px] uppercase font-bold text-slate-500 tracking-wider flex items-center gap-1">
-              <Calendar className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-              <span>Multi-Year Quantities ({activeYears.length} Years Horizon)</span>
-            </span>
-            <div className="space-y-2">
-              {activeYears.map(year => (
-                <div key={year} className="flex justify-between items-center text-xs">
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">FY {year} Target:</span>
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+                Quotation Evidence &amp; Proof
+              </span>
+              {itemSelect !== "other" ? (
+                <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20 font-bold font-mono">
+                  ✓ Catalog Pre-Approved
+                </span>
+              ) : createdByStudents ? (
+                <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20 font-bold font-mono">
+                  ✓ In-House Turnover
+                </span>
+              ) : (
+                <span className="text-[9px] text-blue-600 dark:text-blue-400 font-mono font-bold">
+                  *Required for Submission
+                </span>
+              )}
+            </div>
+
+            {itemSelect === "other" && !createdByStudents && (
+              <div className="space-y-2.5 pt-1">
+                <div className="space-y-1">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-400 dark:text-slate-500 block">
+                    Supplier / Vendor Name
+                  </label>
                   <input
-                    type="number"
-                    min="0"
-                    placeholder="0"
-                    value={yearlyQuantities[String(year)] ?? 0}
-                    onChange={e => setYearlyQuantities({
-                      ...yearlyQuantities,
-                      [String(year)]: parseInt(e.target.value, 10) || 0
-                    })}
-                    className="w-20 p-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 text-center rounded-lg text-slate-900 dark:text-white font-mono font-bold"
+                    type="text"
+                    value={supplierName}
+                    onChange={e => setSupplierName(e.target.value)}
+                    placeholder="e.g. Authorized Bidding Supplier / Solution Provider"
+                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none focus:border-blue-500"
                   />
                 </div>
-              ))}
-            </div>
+
+                {/* 1-Step Inline File Picker */}
+                <div className="space-y-1">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-400 dark:text-slate-500 block">
+                    Attach Quotation Canvas (PDF)
+                  </label>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    onChange={e => setInlineFile(e.target.files[0] || null)}
+                    className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
+                  />
+                  {inlineFile && (
+                    <div className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono flex items-center gap-1 pt-0.5">
+                      <Check className="w-3 h-3" />
+                      <span>Ready to upload: {inlineFile.name} ({(inlineFile.size / 1024).toFixed(1)} KB)</span>
+                    </div>
+                  )}
+                  {canvasUrl && !inlineFile && (
+                    <div className="flex items-center justify-between text-[10px] pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenQuotation({ id: editingId, canvas_evidence_url: canvasUrl })}
+                        className="text-blue-600 dark:text-blue-400 hover:underline font-semibold inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <FileText className="w-3 h-3" />
+                        <span>Current Quote Attached ({canvasUrl.split("/").pop().split("?")[0]})</span>
+                        <ExternalLink className="w-2.5 h-2.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setCanvasUrl(""); setCanvasExpiry(""); }}
+                        className="text-rose-500 hover:text-rose-700 text-[10px] font-bold p-1 cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-400 dark:text-slate-500 block">
+                    Quotation Expiration Date
+                  </label>
+                  <input
+                    type="date"
+                    value={canvasExpiry}
+                    onChange={e => setCanvasExpiry(e.target.value)}
+                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs outline-none cursor-pointer"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Optional proof upload for student/in-house turnovers */}
+            {itemSelect === "other" && createdByStudents && (
+              <div className="space-y-2 pt-1 animate-fadeIn">
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 italic">
+                  Commercial quotation is optional. You may optionally attach a turnover deed, project specification, or approval memorandum below.
+                </p>
+                <div className="space-y-1">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-400 dark:text-slate-500 block">
+                    Turnover Deed / Supporting Proof (PDF, Optional)
+                  </label>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    onChange={e => setInlineFile(e.target.files[0] || null)}
+                    className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
+                  />
+                </div>
+                {canvasUrl && !inlineFile && (
+                  <div className="flex items-center justify-between text-[10px] pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenQuotation({ id: editingId, canvas_evidence_url: canvasUrl })}
+                      className="text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1 font-semibold cursor-pointer"
+                    >
+                      <FileText className="w-3 h-3" />
+                      <span>Current Proof Attached</span>
+                      <ExternalLink className="w-2.5 h-2.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setCanvasUrl(""); setCanvasExpiry(""); }}
+                      className="text-rose-500 hover:text-rose-700 text-[10px] font-bold p-1 cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Specifications Justification */}
-          {itemSelect === "other" && (
-            <div className="space-y-1.5 animate-fadeIn">
-              <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
-                Technical Justification
-              </label>
-              <textarea
-                value={justification}
-                onChange={e => setJustification(e.target.value)}
-                placeholder="Hardware specifications, CPU cores, storage capacity, operating workload requirements..."
-                rows={3}
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-relaxed resize-none text-xs outline-none focus:border-blue-500"
-              />
-            </div>
-          )}
-
-          {/* Total Outlay Indicator */}
+          {/* Clean Outlay Summary Indicator */}
           <div className="p-3.5 bg-slate-100 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between font-sans">
-            <span className="text-slate-600 dark:text-slate-400 font-semibold">Projected Outlay:</span>
+            <div>
+              <span className="text-slate-600 dark:text-slate-400 font-semibold block text-[11px]">Total Estimated Outlay:</span>
+              <span className="text-[9.5px] text-slate-400 dark:text-slate-500 font-mono">({calculatedTotalQty} Total Units Requested)</span>
+            </div>
             <span className="font-mono text-sm font-bold text-blue-600 dark:text-blue-400">
               {formatPHP(calculatedTotalOutlay)}
             </span>
@@ -948,25 +1160,18 @@ export default function UnifiedProposals() {
             className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm text-xs"
           >
             <Plus className="w-4 h-4" />
-            <span>{submitting ? "Saving..." : editingId ? "Save Proposal Modifications" : "Save Proposal Draft"}</span>
+            <span>{submitting ? "Saving..." : editingId ? "Save Proposal Changes" : "Save Proposal Draft"}</span>
           </button>
         </form>
 
         {/* Right Column: Proposals Ledger Workspace */}
         <div className="lg:col-span-2 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-4 shadow-xs flex flex-col justify-between">
           <div className="space-y-4">
+            
+            {/* Filter and Search Bar */}
             <div className="flex flex-col sm:flex-row gap-3 justify-between sm:items-center border-b border-slate-200 dark:border-slate-800 pb-3">
               <div className="flex flex-wrap gap-1 p-1 bg-slate-100 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl self-start">
-                {[
-                  { id: "all", label: "All Items" },
-                  { id: "Office Productivity", label: "Office Productivity" },
-                  { id: "Internal ICT Projects", label: "Projects" },
-                  { id: "Cross-Agency ICT Projects", label: "Cross-Agency" },
-                  { id: "Continuing Costs/Expenses", label: "Continuing" },
-                  { id: "Capital Outlay", label: "CapEx (CO)" },
-                  { id: "MOOE", label: "MOOE" },
-                  { id: "needs_linked", label: "Needs Linked (Sec 8)" }
-                ].map(tab => (
+                {filterTabs.map(tab => (
                   <button
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id)}
@@ -981,29 +1186,43 @@ export default function UnifiedProposals() {
                 ))}
               </div>
 
-              <div className="relative w-full sm:w-56">
-                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Search proposals..."
-                  value={searchQuery}
-                  onChange={e => setSearchQuery(e.target.value)}
-                  className="p-1.5 pl-8 pr-7 w-full bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-xs outline-none text-slate-900 dark:text-white placeholder-slate-400 focus:border-blue-500"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => setSearchQuery("")}
-                    className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                <select
+                  value={statusFilter}
+                  onChange={e => setStatusFilter(e.target.value)}
+                  className="p-1.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-300 outline-none text-[11px] cursor-pointer font-semibold"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="Draft">Draft Mode</option>
+                  <option value="Submitted">In Review</option>
+                  <option value="Approved">Approved</option>
+                  <option value="Returned">Returned</option>
+                </select>
+
+                <div className="relative w-full sm:w-52">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search proposals..."
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    className="p-1.5 pl-8 pr-7 w-full bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-xs outline-none text-slate-900 dark:text-white placeholder-slate-400 focus:border-blue-500"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery("")}
+                      className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
             {/* Proposal Cards List */}
-            <div className="space-y-3.5 max-h-[650px] overflow-y-auto pr-1">
+            <div className="space-y-3.5 max-h-[660px] overflow-y-auto pr-1">
               {loading && proposals.length === 0 ? (
                 <div className="text-center py-20 text-slate-500 flex flex-col items-center justify-center gap-2">
                   <RefreshCw className="w-6 h-6 animate-spin text-blue-500 mb-2" />
@@ -1012,9 +1231,11 @@ export default function UnifiedProposals() {
               ) : filteredProposals.length > 0 ? (
                 filteredProposals.map(p => {
                   const subtotal = parseFloat(p.total_cost || 0);
-                  const isCanvasExpired = p.canvas_expiration_date && new Date(p.canvas_expiration_date) < new Date();
-                  const needsCanvas = !p.created_by_students && (!p.canvas_evidence_url || isCanvasExpired);
-                  const inHouseExpiredWarning = p.created_by_students && parseFloat(p.unit_cost) > 0 && p.canvas_evidence_url && isCanvasExpired;
+                  const isCatalog = Boolean(p.item_key && p.item_key !== "other");
+                  const isStudentAsset = Boolean(p.created_by_students || p.is_in_house_turnover);
+                  const isCanvasExpired = isExpired(p.canvas_expiration_date);
+                  const needsCanvas = !isCatalog && !isStudentAsset && (!p.canvas_evidence_url || isCanvasExpired);
+                  const hasActionRequired = (p.comments || []).some(c => c.requires_department_action && !c.is_resolved);
 
                   return (
                     <div 
@@ -1023,38 +1244,60 @@ export default function UnifiedProposals() {
                         p.status === "Returned" 
                           ? "bg-rose-50/60 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/60" 
                           : needsCanvas 
-                          ? "bg-amber-50/70 dark:bg-amber-950/20 border-amber-300 dark:border-amber-900/60" 
-                          : "bg-white dark:bg-slate-955 border-slate-200 dark:border-slate-800"
+                          ? "bg-amber-50/70 dark:bg-amber-955/20 border-amber-300 dark:border-amber-900/60" 
+                          : "bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800"
                       }`}
                     >
                       <div className="flex justify-between items-start gap-4 border-b border-slate-100 dark:border-slate-800 pb-2.5">
                         <div>
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-bold text-slate-900 dark:text-white text-sm">{p.item_name}</span>
-                            <span className={`text-[8.5px] px-2 py-0.5 rounded-full font-bold uppercase font-mono border ${
-                              p.expenditure_class === "Capital Outlay" 
-                                ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20" 
-                                : "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20"
-                            }`}>
-                              {p.expenditure_class === "Capital Outlay" ? "Capital Outlay (CO)" : "MOOE"}
+                            <span className="text-[8.5px] px-2 py-0.5 rounded-full font-bold uppercase font-mono border bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+                              {p.category === "Software" ? "Packaged Software Licenses" : (p.category || "Hardware")}
                             </span>
-                            {p.created_by_students && (
+                            {isStudentAsset && (
                               <span className="text-[8.5px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20 font-bold uppercase font-mono flex items-center gap-0.5">
                                 <Sparkles className="w-2.5 h-2.5" /> In-House / Non-Commercial
                               </span>
                             )}
                             {p.needs_assessment_id && (
                               <span className="text-[8.5px] px-2 py-0.5 rounded-full bg-teal-50 text-teal-700 border border-teal-200 dark:bg-teal-500/10 dark:text-teal-300 dark:border-teal-500/20 font-bold uppercase font-mono flex items-center gap-0.5">
-                                <ClipboardCheck className="w-2.5 h-2.5" /> Sec 8.0 Linked
+                                <ClipboardCheck className="w-2.5 h-2.5" /> Needs Linked
+                              </span>
+                            )}
+                            {p.is_expansion && (
+                              <span className="text-[8.5px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 font-bold uppercase font-mono">
+                                Expansion
                               </span>
                             )}
                           </div>
-                          <div className="text-[10px] text-slate-500 font-mono mt-1 space-x-2">
-                            <span>UACS: <strong className="text-slate-700 dark:text-slate-300">{p.uacs_object_code || "50604050 03"}</strong></span>
-                            <span>&bull;</span>
-                            <span>Outcome: <strong className="text-slate-700 dark:text-slate-300">{p.outcome?.outcome_name}</strong></span>
-                            <span>&bull;</span>
-                            <span>Fund: <strong className="text-slate-700 dark:text-slate-300">{p.fund_source ? p.fund_source.split(" (")[0] : "GAA"}</strong></span>
+
+                          {/* Administrative Assignment Badges (Rendered cleanly when mapped by Admin) */}
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono mt-1 flex flex-wrap items-center gap-2">
+                            {p.outcome?.outcome_name ? (
+                              <span className="text-blue-600 dark:text-blue-400 font-semibold">
+                                Program: {p.outcome.outcome_name}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 dark:text-slate-500 italic">
+                                Program Alignment: Pending Review
+                              </span>
+                            )}
+                            {p.project_rel?.project_title ? (
+                              <>
+                                <span>&bull;</span>
+                                <span className="text-purple-600 dark:text-purple-400 font-semibold">
+                                  Portfolio Project: {p.project_rel.project_title}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span>&bull;</span>
+                                <span className="text-amber-600 dark:text-amber-400 italic">
+                                  Intake Pool (Unlinked)
+                                </span>
+                              </>
+                            )}
                           </div>
                         </div>
                         
@@ -1062,98 +1305,92 @@ export default function UnifiedProposals() {
                           <StatusPill status={p.status} />
                           <button
                             onClick={() => openDiscussion(p)}
-                            className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
+                            className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors relative"
                             title="Remarks & Discussions"
                           >
                             <MessageSquare className="w-4 h-4" />
+                            {hasActionRequired && (
+                              <span className="w-2 h-2 rounded-full bg-rose-500 absolute top-1 right-1 animate-pulse" />
+                            )}
                           </button>
                         </div>
                       </div>
 
-                      {/* Rule 7: Missing / Expired Quotation Banner */}
+                      {/* Returned Reason Guidance Banner */}
+                      {p.status === "Returned" && (
+                        <div className="p-3 bg-rose-100/90 dark:bg-rose-955/60 border border-rose-300 dark:border-rose-800 text-rose-800 dark:text-rose-200 rounded-xl text-xs flex items-start gap-2 animate-fadeIn">
+                          <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                          <div>
+                            <span className="font-bold block text-[11px] uppercase tracking-wide">Proposal Returned for Revision</span>
+                            <span className="text-[11px] leading-relaxed">
+                              {p.rejection_reason || "The MIS Administrator has requested technical adjustments. Check the discussion remarks thread for instructions, update the required parameters, and resubmit."}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Missing / Expired Quotation Banner */}
                       {needsCanvas && (
-                        <div className="p-3 bg-amber-100 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800/80 text-amber-900 dark:text-amber-300 rounded-xl flex items-center justify-between text-[11px] font-bold">
+                        <div className="p-3 bg-amber-100 dark:bg-amber-955/30 border border-amber-300 dark:border-amber-800/80 text-amber-900 dark:text-amber-300 rounded-xl flex items-center justify-between text-[11px] font-bold">
                           <span className="flex items-center gap-1.5">
                             <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                            <span>{isCanvasExpired ? "Market quotation has expired! Please upload an updated quotation before submitting." : "Quotation canvas required before submission."}</span>
+                            <span>{isCanvasExpired ? "Market quotation has expired! Please attach an updated quote." : "A quotation canvas is required before submitting to review."}</span>
                           </span>
                           <button 
                             onClick={() => {
                               setActiveUploadItem(p);
-                              setUploadSupplier(p.payload?.supplier_name || "");
+                              setUploadSupplier(p.supplier_name || p.payload?.supplier_name || "");
                               setUploadFile(null);
                               setUploadExpiry(p.canvas_expiration_date ? p.canvas_expiration_date.split("T")[0] : "");
                             }}
                             className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg cursor-pointer uppercase tracking-wider text-[9px] shadow-xs"
                           >
-                            Upload Canvas
+                            Upload Quote
                           </button>
                         </div>
                       )}
 
-                      {/* Funded In-House Proposal Expired Notice */}
-                      {inHouseExpiredWarning && (
-                        <div className="p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900 text-blue-900 dark:text-blue-300 rounded-xl flex items-center justify-between text-[11px]">
-                          <span className="flex items-center gap-1.5">
-                            <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-                            <span>Supporting documentation for this funded non-commercial project has expired. You may refresh it or submit as-is.</span>
-                          </span>
-                          <button 
-                            onClick={() => {
-                              setActiveUploadItem(p);
-                              setUploadSupplier(p.payload?.supplier_name || "");
-                              setUploadFile(null);
-                              setUploadExpiry(p.canvas_expiration_date ? p.canvas_expiration_date.split("T")[0] : "");
-                            }}
-                            className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg cursor-pointer uppercase tracking-wider text-[9px] shadow-xs"
-                          >
-                            Update Proof
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Quotation / Proof Audit State Strip */}
+                      {/* Quotation / Proof Status Strip */}
                       <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 text-[10.5px]">
                         <div className="flex items-center gap-2">
-                          <span className="text-slate-500 font-semibold uppercase text-[9px]">Proof Document:</span>
-                          {p.created_by_students ? (
+                          <span className="text-slate-500 dark:text-slate-400 font-semibold uppercase text-[9px]">Proof Document:</span>
+                          {isCatalog ? (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20 text-[8.5px] font-bold uppercase font-mono">
+                              ✓ Catalog Pre-Approved (Quotation Exempt)
+                            </span>
+                          ) : isStudentAsset ? (
                             p.canvas_evidence_url ? (
                               <div className="flex items-center gap-1.5">
-                                <a
-                                  href={p.canvas_evidence_url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-blue-600 dark:text-blue-400 underline font-semibold text-[10px] inline-flex items-center gap-1"
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenQuotation(p)}
+                                  className="text-blue-600 dark:text-blue-400 underline font-semibold text-[10px] inline-flex items-center gap-1 cursor-pointer"
                                 >
-                                  <span>View Proof</span>
+                                  <span>View Turnover Proof</span>
                                   <ExternalLink className="w-2.5 h-2.5" />
-                                </a>
-                                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20 text-[8.5px] font-bold uppercase font-mono">
-                                  Turnover Proof Attached
-                                </span>
+                                </button>
                               </div>
                             ) : (
-                              <span className="text-slate-400 italic font-mono text-[10px]">
-                                No Canvas (Bypassed)
+                              <span className="text-slate-400 dark:text-slate-500 italic font-mono text-[10px]">
+                                Turnover Asset (Quotation Exempt)
                               </span>
                             )
                           ) : p.canvas_evidence_url ? (
                             <div className="flex items-center gap-1.5">
-                              <a
-                                href={p.canvas_evidence_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-blue-600 dark:text-blue-400 underline font-semibold text-[10px] inline-flex items-center gap-1"
+                              <button
+                                type="button"
+                                onClick={() => handleOpenQuotation(p)}
+                                className="text-blue-600 dark:text-blue-400 underline font-semibold text-[10px] inline-flex items-center gap-1 cursor-pointer"
                               >
-                                <span>View Canvas</span>
+                                <span>View Document in Official Archive</span>
                                 <ExternalLink className="w-2.5 h-2.5" />
-                              </a>
+                              </button>
                               {isCanvasExpired ? (
                                 <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-500/10 dark:text-rose-400 dark:border-rose-500/20 text-[8.5px] font-bold uppercase font-mono animate-pulse">
                                   Expired
                                 </span>
                               ) : (
-                                <span className="text-slate-400 font-mono text-[9.5px]">
+                                <span className="text-slate-400 dark:text-slate-500 font-mono text-[9.5px]">
                                   {p.canvas_expiration_date ? `Valid until ${new Date(p.canvas_expiration_date).toLocaleDateString()}` : "Active"}
                                 </span>
                               )}
@@ -1165,27 +1402,34 @@ export default function UnifiedProposals() {
                           )}
                         </div>
 
-                        {(p.status === "Draft" || p.status === "Returned") && (
+                        {(p.status === "Draft" || p.status === "Returned") && !isCatalog && (
                           <button
                             type="button"
                             onClick={() => {
                               setActiveUploadItem(p);
-                              setUploadSupplier(p.payload?.supplier_name || "");
+                              setUploadSupplier(p.supplier_name || p.payload?.supplier_name || "");
                               setUploadFile(null);
                               setUploadExpiry(p.canvas_expiration_date ? p.canvas_expiration_date.split("T")[0] : "");
                             }}
                             className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold uppercase text-[9px] transition-colors cursor-pointer shadow-2xs font-mono"
                           >
-                            {p.canvas_evidence_url ? "Update Document" : "Attach Document"}
+                            {p.canvas_evidence_url ? "Update Quote" : "Attach Quote"}
                           </button>
                         )}
                       </div>
 
+                      {/* Technical Justification text */}
+                      {p.justification && (
+                        <p className="text-slate-600 dark:text-slate-400 text-[11px] leading-relaxed italic">
+                          "{p.justification}"
+                        </p>
+                      )}
+
                       {/* Multi-Year Physical Targets Breakdown Strip */}
                       <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100 dark:border-slate-800 text-[10px] font-mono">
-                        <span className="text-slate-400 uppercase font-bold text-[9px]">Targets:</span>
+                        <span className="text-slate-400 dark:text-slate-500 uppercase font-bold text-[9px]">Annual Targets:</span>
                         {activeYears.map((yr, idx) => {
-                          const q = p.yearly_quantities?.[String(yr)] ?? (idx === 0 ? p.year_1_qty : idx === 1 ? p.year_2_qty : idx === 2 ? p.year_3_qty : 0);
+                          const q = getYearQty(p, yr, idx);
                           return (
                             <span key={yr} className="bg-slate-50 dark:bg-slate-900 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800">
                               FY {yr}: <strong className="text-blue-600 dark:text-blue-400">{q || 0}</strong>
@@ -1197,58 +1441,70 @@ export default function UnifiedProposals() {
                       <div className="flex justify-between items-center text-[10.5px] font-mono pt-1">
                         <div className="flex gap-4">
                           <div>
-                            <span className="text-slate-400">Unit Cost:</span>
+                            <span className="text-slate-400 dark:text-slate-500">Unit Cost:</span>
                             <span className="text-slate-800 dark:text-slate-200 ml-1 font-bold">{formatPHP(p.unit_cost)}</span>
                           </div>
                           <div>
-                            <span className="text-slate-400">Total Units:</span>
+                            <span className="text-slate-400 dark:text-slate-500">Total Units:</span>
                             <span className="text-slate-800 dark:text-slate-200 ml-1 font-bold">{p.total_qty} units</span>
                           </div>
                           <div>
-                            <span className="text-slate-400">Total Outlay:</span>
+                            <span className="text-slate-400 dark:text-slate-500">Total Outlay:</span>
                             <span className="text-slate-900 dark:text-white ml-1 font-bold text-xs">{formatPHP(subtotal)}</span>
                           </div>
                         </div>
 
                         {/* Actions */}
-                        {p.status === "Draft" || p.status === "Returned" ? (
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              onClick={() => handleEdit(p)}
-                              className="p-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-lg text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
-                              title="Edit proposal parameters"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => handleDelete(p.id, p.item_name)}
-                              className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 rounded-lg text-slate-500 cursor-pointer transition-colors"
-                              title="Delete proposal draft"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => handleSubmitProposal(p.id, p.item_name)}
-                              disabled={needsCanvas}
-                              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-bold cursor-pointer transition-colors flex items-center gap-1 text-[10px] shadow-sm"
-                              title="Submit to Review Queue"
-                            >
-                              <Send className="w-3 h-3" />
-                              <span>Submit</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-[10px] text-slate-400 uppercase font-bold flex items-center gap-1">
-                            <Lock className="w-3 h-3" /> Under Review
-                          </span>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          {/* 1-Click Duplicate/Clone Proposal Button */}
+                          <button
+                            type="button"
+                            onClick={() => handleDuplicate(p.id, p.item_name)}
+                            className="p-1.5 bg-slate-100 hover:bg-blue-50 hover:text-blue-600 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-lg text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+                            title="Duplicate Proposal into New Draft"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+
+                          {p.status === "Draft" || p.status === "Returned" ? (
+                            <>
+                              <button
+                                onClick={() => handleEdit(p)}
+                                className="p-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-lg text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
+                                title="Edit proposal parameters"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleDelete(p.id, p.item_name)}
+                                className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 rounded-lg text-slate-500 cursor-pointer transition-colors"
+                                title="Delete proposal draft"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleSubmitProposal(p.id, p.item_name)}
+                                disabled={needsCanvas}
+                                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-bold cursor-pointer transition-colors flex items-center gap-1 text-[10px] shadow-sm"
+                                title={needsCanvas ? "Quotation canvas required before submission" : "Submit to Review Queue"}
+                              >
+                                <Send className="w-3 h-3" />
+                                <span>Submit</span>
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-[10px] text-slate-400 font-mono font-bold uppercase flex items-center gap-1">
+                              <Lock className="w-3 h-3" /> Under Review
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
                 })
               ) : (
-                <div className="text-center py-20 text-slate-400 italic">
-                  No proposals logged matching active query.
+                <div className="text-center py-20 text-slate-400 dark:text-slate-500 italic">
+                  No resource proposals match your active filter.
                 </div>
               )}
             </div>
@@ -1264,7 +1520,7 @@ export default function UnifiedProposals() {
             <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-955">
               <div>
                 <h3 className="text-slate-900 dark:text-white font-bold text-sm">Discussions &amp; Revision Remarks</h3>
-                <p className="text-[10px] text-slate-500 font-mono">Proposal: {activeDiscussionItem.item_name}</p>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">Proposal: {activeDiscussionItem.item_name}</p>
               </div>
               <button onClick={() => setActiveDiscussionItem(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer">
                 <X className="w-5 h-5" />
@@ -1277,7 +1533,7 @@ export default function UnifiedProposals() {
                   <div key={comment.id} className="p-3.5 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl space-y-2">
                     <div className="flex justify-between items-center text-[10px]">
                       <span className="font-bold text-blue-600 dark:text-blue-400">{comment.author_name}</span>
-                      <span className="text-slate-400 font-mono">{new Date(comment.timestamp).toLocaleTimeString()}</span>
+                      <span className="text-slate-400 dark:text-slate-500 font-mono">{new Date(comment.timestamp).toLocaleTimeString()}</span>
                     </div>
                     <p className="text-slate-700 dark:text-slate-300 leading-relaxed text-xs">{comment.text}</p>
                     
@@ -1322,7 +1578,7 @@ export default function UnifiedProposals() {
         </div>
       )}
 
-      {/* MODAL 2: UPLOAD / UPDATE CANVAS QUOTATION (RULE 7) */}
+      {/* MODAL 2: UPLOAD / UPDATE CANVAS QUOTATION */}
       {activeUploadItem && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
@@ -1331,7 +1587,7 @@ export default function UnifiedProposals() {
                 <h3 className="font-bold text-slate-900 dark:text-white text-sm">
                   {activeUploadItem.created_by_students ? "Attach Proof / Turnover Deed (PDF)" : "Update Market Quotation (PDF)"}
                 </h3>
-                <span className="text-[10px] font-mono text-slate-500">{activeUploadItem.item_name}</span>
+                <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">{activeUploadItem.item_name}</span>
               </div>
               <button 
                 onClick={() => { setActiveUploadItem(null); setUploadFile(null); setUploadSupplier(""); setUploadExpiry(""); }} 
@@ -1343,7 +1599,7 @@ export default function UnifiedProposals() {
 
             <form onSubmit={handleUploadCanvasModal} className="space-y-4 text-xs">
               <div className="space-y-1">
-                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
+                <label className="block text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 mb-1">
                   {activeUploadItem.created_by_students ? "Internal Development Team / Turnover Unit" : "Supplier Name"}
                 </label>
                 <input
@@ -1354,7 +1610,7 @@ export default function UnifiedProposals() {
               </div>
 
               <div className="space-y-1">
-                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
+                <label className="block text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 mb-1">
                   Quotation Expiration Date {activeUploadItem.created_by_students ? "(Optional)" : ""}
                 </label>
                 <input
@@ -1366,7 +1622,7 @@ export default function UnifiedProposals() {
               </div>
 
               <div className="space-y-1">
-                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
+                <label className="block text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 mb-1">
                   {activeUploadItem.created_by_students 
                     ? "Turnover Deed / Supporting Proof (PDF) - Optional" 
                     : "Market Quotation Canvas (PDF) - Mandatory"}
@@ -1374,7 +1630,7 @@ export default function UnifiedProposals() {
                 <input
                   type="file" required accept="application/pdf"
                   onChange={e => setUploadFile(e.target.files[0])}
-                  className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
+                  className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
                 />
               </div>
 

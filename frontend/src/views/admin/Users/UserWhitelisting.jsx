@@ -1,5 +1,5 @@
 // frontend/src/views/admin/Users/UserWhitelisting.jsx
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { 
   UserPlus, 
@@ -19,7 +19,10 @@ import {
   Building,
   UserCheck,
   Search,
-  Lock
+  Lock,
+  Users,
+  ShieldCheck,
+  PackageCheck
 } from "lucide-react";
 
 export default function UserWhitelisting() {
@@ -61,7 +64,7 @@ export default function UserWhitelisting() {
 
   const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
   const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || localStorage.getItem("access_token") || "";
+  const token = user?.token || user?.accessToken || localStorage.getItem("access_token") || localStorage.getItem("token") || "";
 
   const parseErrorMessage = async (res, defaultContext) => {
     let detail = "";
@@ -93,9 +96,10 @@ export default function UserWhitelisting() {
       });
       if (res.ok) {
         const data = await res.json();
-        setDepartments(Array.isArray(data) ? data : []);
-        if (Array.isArray(data) && data.length > 0 && !deptId) {
-          setDeptId(String(data[0].department_id || data[0].id));
+        const list = Array.isArray(data) ? data : [];
+        setDepartments(list);
+        if (list.length > 0 && !deptId) {
+          setDeptId(String(list[0].department_id || list[0].id));
         }
       } else {
         const msg = await parseErrorMessage(res, "Failed to load departments registry");
@@ -136,20 +140,28 @@ export default function UserWhitelisting() {
     }
   }, [token]);
 
+  // Compute Metrics for Executive Header Bar
+  const stats = useMemo(() => {
+    const total = whitelist.length;
+    const admins = whitelist.filter(u => u.role_tag === "ROLE_MIS_ADMIN").length;
+    const supply = whitelist.filter(u => u.role_tag === "ROLE_SUPPLY_USER").length;
+    const depts = whitelist.filter(u => u.role_tag === "ROLE_DEPT_USER").length;
+    return { total, admins, supply, depts, totalDepts: departments.length };
+  }, [whitelist, departments]);
+
   // CREATE USER (Mandatory Password & Multi-Role Support)
   const handleAddUser = async (e) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
 
-    // Initial password is required for manual administrative onboarding
     if (!password || password.trim().length < 8) {
       setError("Initial account password is required and must be at least 8 characters long.");
       return;
     }
 
     if (role !== "ROLE_MIS_ADMIN" && !deptId) {
-      setError("Department assignment is mandatory for Department Users and Supply Officers.");
+      setError("Department assignment is mandatory for Department Planners and Supply Officers.");
       return;
     }
 
@@ -190,10 +202,11 @@ export default function UserWhitelisting() {
     setEditingUser(u);
     setEditEmail(u.email);
     setEditRole(u.role_tag);
+    const existingDeptId = u.department_id || u.department?.id;
     setEditDeptId(
-      u.department_id 
-        ? String(u.department_id) 
-        : (departments[0]?.department_id ? String(departments[0].department_id) : "")
+      existingDeptId 
+        ? String(existingDeptId) 
+        : (departments[0]?.department_id || departments[0]?.id ? String(departments[0].department_id || departments[0].id) : "")
     );
     setEditPassword("");
     setShowEditPassword(false);
@@ -252,7 +265,7 @@ export default function UserWhitelisting() {
 
   // DELETE USER
   const handleDeleteUser = async (userId, userEmail) => {
-    if (userEmail === user?.email) {
+    if (userEmail === user?.email || String(userId) === String(user?.id)) {
       setError("Administrative Guard: You are prohibited from deleting your active account session.");
       return;
     }
@@ -344,7 +357,7 @@ export default function UserWhitelisting() {
         setSuccess("Department designation updated successfully.");
         setEditingDept(null);
         setEditDeptName("");
-        fetchDepartments();
+        await fetchDepartments();
         fetchWhitelist();
       }
     } catch (err) {
@@ -356,7 +369,7 @@ export default function UserWhitelisting() {
 
   // DELETE DEPARTMENT
   const handleDeleteDepartment = async (id, name) => {
-    if (!window.confirm(`Are you sure you want to delete the department '${name}'? This may affect linked accounts and proposals.`)) return;
+    if (!window.confirm(`Are you sure you want to delete the department '${name}'? This action will fail if active proposals are linked to it.`)) return;
 
     setError(null);
     setSuccess(null);
@@ -372,6 +385,7 @@ export default function UserWhitelisting() {
       } else {
         setSuccess(`Department '${name}' removed successfully from active registry.`);
         await fetchDepartments();
+        fetchWhitelist();
       }
     } catch (err) {
       setError(err.message || "Network error deleting department.");
@@ -379,49 +393,106 @@ export default function UserWhitelisting() {
   };
 
   // Filter accounts list based on search term
-  const filteredWhitelist = whitelist.filter((u) => {
-    if (!searchQuery.trim()) return true;
+  const filteredWhitelist = useMemo(() => {
+    if (!searchQuery.trim()) return whitelist;
     const q = searchQuery.toLowerCase().trim();
-    const matchesEmail = (u.email || "").toLowerCase().includes(q);
-    const matchesRole = (u.role_tag || "").toLowerCase().includes(q);
-    const matchesDept = (u.department_name || "").toLowerCase().includes(q);
-    return matchesEmail || matchesRole || matchesDept;
-  });
+    return whitelist.filter((u) => {
+      const matchesEmail = (u.email || "").toLowerCase().includes(q);
+      const matchesRole = (u.role_tag || "").toLowerCase().includes(q);
+      const deptName = u.department?.name || u.department_name || "";
+      const matchesDept = deptName.toLowerCase().includes(q);
+      return matchesEmail || matchesRole || matchesDept;
+    });
+  }, [whitelist, searchQuery]);
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto text-slate-800 dark:text-slate-100 select-none text-xs font-sans transition-colors duration-200">
+    <div className="space-y-6 max-w-7xl mx-auto text-slate-800 dark:text-slate-100 select-none text-xs font-sans transition-colors duration-200">
+      
       {/* Header Banner */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 gap-4 shadow-sm">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 gap-4 shadow-xs">
         <div>
           <h2 className="text-slate-900 dark:text-white font-serif font-bold text-base flex items-center gap-2">
             <Shield className="w-5 h-5 text-blue-600 dark:text-blue-500" />
-            <span>Institutional User Management & Manual Onboarding</span>
+            <span>Institutional Access Control & User Registry</span>
           </h2>
           <p className="text-slate-500 dark:text-slate-400 mt-1">
-            Manually register Department Planners, Supply Officers, and Administrators with direct credential access and department mappings.
+            Manage Department Planners, Supply Officers, and Administrators with role-based access, credential provisioning, and department mappings.
           </p>
         </div>
         <button
-          onClick={fetchWhitelist}
+          onClick={() => { fetchDepartments(); fetchWhitelist(); }}
           disabled={loading}
-          className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 text-xs font-bold disabled:opacity-50 cursor-pointer self-start"
+          className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 text-xs font-bold disabled:opacity-50 cursor-pointer self-start"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>Refresh</span>
+          <span>Sync Registry</span>
         </button>
       </div>
 
+      {/* Summary KPI Counters */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
+          <div className="p-2 bg-blue-50 dark:bg-blue-950/50 rounded-lg text-blue-600 dark:text-blue-400">
+            <Users className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase font-bold text-slate-400">Total Users</div>
+            <div className="text-base font-extrabold text-slate-900 dark:text-white font-mono">{stats.total}</div>
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
+          <div className="p-2 bg-purple-50 dark:bg-purple-950/50 rounded-lg text-purple-600 dark:text-purple-400">
+            <ShieldCheck className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase font-bold text-slate-400">Admins</div>
+            <div className="text-base font-extrabold text-purple-600 dark:text-purple-400 font-mono">{stats.admins}</div>
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
+          <div className="p-2 bg-blue-50 dark:bg-blue-950/50 rounded-lg text-blue-600 dark:text-blue-400">
+            <UserCheck className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase font-bold text-slate-400">Planners</div>
+            <div className="text-base font-extrabold text-blue-600 dark:text-blue-400 font-mono">{stats.depts}</div>
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
+          <div className="p-2 bg-amber-50 dark:bg-amber-950/50 rounded-lg text-amber-600 dark:text-amber-400">
+            <PackageCheck className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase font-bold text-slate-400">Supply Officers</div>
+            <div className="text-base font-extrabold text-amber-600 dark:text-amber-400 font-mono">{stats.supply}</div>
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3 col-span-2 sm:col-span-1">
+          <div className="p-2 bg-emerald-50 dark:bg-emerald-950/50 rounded-lg text-emerald-600 dark:text-emerald-400">
+            <Landmark className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase font-bold text-slate-400">Departments</div>
+            <div className="text-base font-extrabold text-emerald-600 dark:text-emerald-400 font-mono">{stats.totalDepts}</div>
+          </div>
+        </div>
+      </div>
+
       {error && (
-        <div className="p-4 bg-rose-50 dark:bg-red-955/20 border border-rose-200 dark:border-red-900/60 text-rose-700 dark:text-red-300 rounded-xl flex items-center gap-2.5 animate-fadeIn shadow-xs">
-          <AlertCircle className="w-4 h-4 text-rose-600 dark:text-red-400 shrink-0" />
-          <span>{error}</span>
+        <div className="p-4 bg-rose-50 dark:bg-rose-955/30 border border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300 rounded-xl flex items-center gap-2.5 animate-fadeIn shadow-xs">
+          <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+          <span className="font-medium">{error}</span>
         </div>
       )}
 
       {success && (
         <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50 text-emerald-700 dark:text-emerald-300 rounded-xl flex items-center gap-2.5 animate-fadeIn shadow-xs">
           <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <span>{success}</span>
+          <span className="font-medium">{success}</span>
         </div>
       )}
 
@@ -429,10 +500,10 @@ export default function UserWhitelisting() {
         {/* Left Column: Creator Form & Department Management */}
         <div className="space-y-6">
           {/* User Onboarding Form Box */}
-          <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-sm">
+          <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
             <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5">
               <UserPlus className="w-4 h-4 text-blue-600 dark:text-blue-500" />
-              <span>Manually Onboard User</span>
+              <span>Provision User Account</span>
             </h3>
             
             <form onSubmit={handleAddUser} className="space-y-4">
@@ -445,14 +516,14 @@ export default function UserWhitelisting() {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="user@agency.gov.ph"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs"
+                  placeholder="planner@agency.gov.ph"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs transition-colors"
                 />
               </div>
 
               <div className="space-y-1">
                 <label className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400 tracking-wider">
-                  Initial Password (Mandatory)
+                  Initial Password (Min. 8 Chars)
                 </label>
                 <div className="relative">
                   <input
@@ -460,13 +531,13 @@ export default function UserWhitelisting() {
                     required
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Min. 8 characters"
-                    className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs"
+                    placeholder="••••••••••••"
+                    className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs transition-colors"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                    className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -480,7 +551,7 @@ export default function UserWhitelisting() {
                 <select
                   value={role}
                   onChange={(e) => setRole(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
                 >
                   <option value="ROLE_DEPT_USER">Department User (Proposals & Needs)</option>
                   <option value="ROLE_SUPPLY_USER">Supply Officer (Annex 1 Master Inventory)</option>
@@ -497,19 +568,23 @@ export default function UserWhitelisting() {
                     <select
                       value={deptId}
                       onChange={(e) => setDeptId(e.target.value)}
-                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
                       required
                     >
-                      {departments.map((dept) => (
-                        <option key={dept.department_id || dept.id} value={String(dept.department_id || dept.id)}>
-                          {dept.department_name || dept.name}
-                        </option>
-                      ))}
+                      {departments.map((dept) => {
+                        const dId = String(dept.department_id || dept.id);
+                        const dName = dept.department_name || dept.name;
+                        return (
+                          <option key={dId} value={dId}>
+                            {dName}
+                          </option>
+                        );
+                      })}
                     </select>
                   ) : (
-                    <span className="text-slate-500 italic block text-[10px] bg-slate-50 dark:bg-slate-955 p-2.5 rounded border border-slate-200 dark:border-slate-850">
-                      Please register a department division below first.
-                    </span>
+                    <div className="text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-955/30 p-2.5 rounded-xl border border-amber-200 dark:border-amber-900/50 text-[11px] leading-tight">
+                      No departments configured. Please register a department in the panel below before creating department users.
+                    </div>
                   )}
                 </div>
               )}
@@ -517,16 +592,16 @@ export default function UserWhitelisting() {
               <button
                 type="submit"
                 disabled={submitting || (role !== "ROLE_MIS_ADMIN" && departments.length === 0)}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-lg cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-sm text-xs"
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-xs text-xs"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>{submitting ? "Onboarding..." : "Create & Authorize User"}</span>
+                <span>{submitting ? "Provisioning..." : "Provision & Authorize User"}</span>
               </button>
             </form>
           </div>
 
           {/* Department Management Panel */}
-          <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-sm">
+          <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
             <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5">
               <Landmark className="w-4 h-4 text-purple-600 dark:text-purple-400" />
               <span>Department Registry</span>
@@ -539,68 +614,74 @@ export default function UserWhitelisting() {
                 value={newDeptName}
                 onChange={(e) => setNewDeptName(e.target.value)}
                 placeholder="e.g. Planning & Management Service"
-                className="flex-1 p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs"
+                className="flex-1 p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs"
               />
               <button
                 type="submit"
                 disabled={creatingDept}
-                className="p-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-bold shrink-0 flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+                className="px-3 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold shrink-0 flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>{creatingDept ? "..." : "Add"}</span>
               </button>
             </form>
 
-            <div className="max-h-44 overflow-y-auto space-y-1.5 pt-1 pr-1">
-              {departments.map((dept) => {
-                const deptIdVal = dept.department_id || dept.id;
-                const deptNameVal = dept.department_name || dept.name;
-                return (
-                  <div key={deptIdVal} className="flex justify-between items-center bg-slate-50 dark:bg-slate-955 p-2 rounded-lg border border-slate-200 dark:border-slate-850 text-xs">
-                    <span className="font-semibold text-slate-700 dark:text-slate-300">{deptNameVal}</span>
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => openEditDeptModal(dept)}
-                        className="p-1 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded transition-colors cursor-pointer"
-                        title="Edit Department Name"
-                      >
-                        <Edit2 className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteDepartment(deptIdVal, deptNameVal)}
-                        className="p-1 bg-white dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-red-955 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-rose-600 dark:hover:text-red-400 rounded transition-colors cursor-pointer"
-                        title="Delete Department"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
+            <div className="max-h-56 overflow-y-auto space-y-1.5 pt-1 pr-1 custom-scrollbar">
+              {departments.length > 0 ? (
+                departments.map((dept) => {
+                  const deptIdVal = dept.department_id || dept.id;
+                  const deptNameVal = dept.department_name || dept.name;
+                  return (
+                    <div key={deptIdVal} className="flex justify-between items-center bg-slate-50 dark:bg-slate-955 p-2.5 rounded-xl border border-slate-200 dark:border-slate-850 text-xs">
+                      <span className="font-semibold text-slate-700 dark:text-slate-300 truncate pr-2">{deptNameVal}</span>
+                      <div className="flex gap-1 shrink-0">
+                        <button
+                          onClick={() => openEditDeptModal(dept)}
+                          className="p-1 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg transition-colors cursor-pointer"
+                          title="Edit Department Name"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteDepartment(deptIdVal, deptNameVal)}
+                          className="p-1 bg-white dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-955 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg transition-colors cursor-pointer"
+                          title="Delete Department"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              ) : (
+                <div className="text-center py-6 text-slate-400 italic">
+                  No departments configured.
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         {/* Right Column: User Accounts Table */}
-        <div className="lg:col-span-2 bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-sm h-fit">
+        <div className="lg:col-span-2 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs h-fit">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
             <div>
               <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider">
-                Active Institutional Accounts
+                Active User Accounts
               </h3>
               <span className="text-[10px] font-mono text-slate-500">
-                {whitelist.length} Registered User Accounts
+                {whitelist.length} Authorized Identities
               </span>
             </div>
 
-            <div className="relative w-full sm:w-60">
-              <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+            <div className="relative w-full sm:w-64">
+              <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search email, role, or unit..."
-                className="w-full pl-8 pr-2.5 py-1.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none focus:border-blue-500 text-xs placeholder-slate-400"
+                placeholder="Filter by email, role, or unit..."
+                className="w-full pl-8 pr-3 py-1.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-blue-500 text-xs placeholder-slate-400"
               />
             </div>
           </div>
@@ -609,7 +690,7 @@ export default function UserWhitelisting() {
             {loading ? (
               <div className="text-center py-16 text-slate-500">
                 <RefreshCw className="w-6 h-6 animate-spin mx-auto text-blue-500 mb-2" />
-                <span>Loading accounts...</span>
+                <span>Synchronizing account directory...</span>
               </div>
             ) : filteredWhitelist.length > 0 ? (
               <table className="w-full text-left border-collapse text-xs">
@@ -617,53 +698,81 @@ export default function UserWhitelisting() {
                   <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 text-[10px] uppercase font-bold">
                     <th className="py-2.5 px-3">Email Address</th>
                     <th className="py-2.5 px-3">Role</th>
-                    <th className="py-2.5 px-3">Assigned Unit</th>
+                    <th className="py-2.5 px-3">Assigned Department / Unit</th>
                     <th className="py-2.5 px-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
-                  {filteredWhitelist.map((u) => (
-                    <tr key={u.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-950/30 transition-colors">
-                      <td className="py-3 px-3 font-mono font-semibold text-slate-900 dark:text-slate-200">{u.email}</td>
-                      <td className="py-3 px-3">
-                        <span className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase font-mono border ${
-                          u.role_tag === "ROLE_MIS_ADMIN"
-                            ? "bg-purple-50 dark:bg-purple-950 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400"
-                            : u.role_tag === "ROLE_SUPPLY_USER"
-                            ? "bg-amber-50 dark:bg-amber-950 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-400"
-                            : "bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400"
-                        }`}>
-                          {u.role_tag === "ROLE_MIS_ADMIN" ? "Admin" : u.role_tag === "ROLE_SUPPLY_USER" ? "Supply" : "Dept"}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 text-slate-600 dark:text-slate-400">
-                        {u.department_name || (u.role_tag === "ROLE_MIS_ADMIN" ? "Global Access" : "Unassigned")}
-                      </td>
-                      <td className="py-3 px-3 text-right">
-                        <div className="flex justify-end gap-1.5">
-                          <button
-                            onClick={() => openEditUserModal(u)}
-                            className="p-1.5 bg-slate-100 dark:bg-slate-955 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 rounded cursor-pointer transition-colors"
-                            title="Edit Credentials"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteUser(u.id, u.email)}
-                            className="p-1.5 bg-slate-100 dark:bg-slate-955 hover:bg-rose-100 dark:hover:bg-red-955 border border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-red-400 rounded cursor-pointer transition-colors"
-                            title="Delete Account"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredWhitelist.map((u) => {
+                    const deptLabel = u.department?.name || u.department_name || (u.role_tag === "ROLE_MIS_ADMIN" ? "Global Access" : "Unassigned");
+                    const isSelf = u.email === user?.email || String(u.id) === String(user?.id);
+
+                    return (
+                      <tr key={u.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-950/30 transition-colors">
+                        <td className="py-3 px-3 font-mono font-semibold text-slate-900 dark:text-slate-200">
+                          <div className="flex items-center gap-1.5">
+                            <span>{u.email}</span>
+                            {isSelf && (
+                              <span className="text-[9px] font-sans font-bold px-1.5 py-0.2 bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 rounded-full">
+                                You
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase font-mono border ${
+                            u.role_tag === "ROLE_MIS_ADMIN"
+                              ? "bg-purple-50 dark:bg-purple-950/60 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300"
+                              : u.role_tag === "ROLE_SUPPLY_USER"
+                              ? "bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300"
+                              : "bg-blue-50 dark:bg-blue-950/60 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300"
+                          }`}>
+                            {u.role_tag === "ROLE_MIS_ADMIN" ? (
+                              <><Shield className="w-2.5 h-2.5" /> Admin</>
+                            ) : u.role_tag === "ROLE_SUPPLY_USER" ? (
+                              <><PackageCheck className="w-2.5 h-2.5" /> Supply</>
+                            ) : (
+                              <><UserCheck className="w-2.5 h-2.5" /> Planner</>
+                            )}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-slate-600 dark:text-slate-400">
+                          <div className="flex items-center gap-1.5">
+                            <Building className="w-3 h-3 text-slate-400" />
+                            <span>{deptLabel}</span>
+                          </div>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <div className="flex justify-end gap-1.5">
+                            <button
+                              onClick={() => openEditUserModal(u)}
+                              className="p-1.5 bg-slate-100 dark:bg-slate-955 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg cursor-pointer transition-colors"
+                              title="Edit Credentials & Role"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteUser(u.id, u.email)}
+                              disabled={isSelf}
+                              className={`p-1.5 border rounded-lg transition-colors ${
+                                isSelf 
+                                  ? "opacity-30 border-slate-200 dark:border-slate-800 text-slate-400 cursor-not-allowed" 
+                                  : "bg-slate-100 dark:bg-slate-955 hover:bg-rose-100 dark:hover:bg-rose-955 border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+                              }`}
+                              title={isSelf ? "Self-deletion prohibited" : "Delete Account"}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             ) : (
               <div className="text-center py-16 text-slate-400 dark:text-slate-500 italic">
-                {searchQuery ? "No accounts match your search filter." : "No institutional accounts registered yet. Use the onboarding form on the left to add users."}
+                {searchQuery ? "No accounts match your search filter." : "No institutional accounts registered yet. Use the provisioning form on the left to add users."}
               </div>
             )}
           </div>
@@ -673,9 +782,12 @@ export default function UserWhitelisting() {
       {/* EDIT USER CREDENTIALS MODAL */}
       {editingUser && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-900 dark:text-white text-sm">Edit User Credentials</h3>
+              <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-1.5">
+                <Key className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span>Edit Account Credentials</span>
+              </h3>
               <button 
                 onClick={() => setEditingUser(null)}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer"
@@ -686,20 +798,20 @@ export default function UserWhitelisting() {
 
             <form onSubmit={handleUpdateUser} className="space-y-4">
               <div className="space-y-1">
-                <label className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">Email Address</label>
+                <label className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">Institutional Email</label>
                 <input
                   type="email"
                   required
                   value={editEmail}
                   onChange={(e) => setEditEmail(e.target.value)}
                   placeholder="user@agency.gov.ph"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs"
                 />
               </div>
 
               <div className="space-y-1">
                 <label className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">
-                  Change Password (Leave blank to keep existing)
+                  Rotate Password (Leave blank to keep existing)
                 </label>
                 <div className="relative">
                   <input
@@ -707,12 +819,12 @@ export default function UserWhitelisting() {
                     value={editPassword}
                     onChange={(e) => setEditPassword(e.target.value)}
                     placeholder="Enter new password (min. 8 chars)"
-                    className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs"
+                    className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none focus:border-blue-500 text-xs"
                   />
                   <button
                     type="button"
                     onClick={() => setShowEditPassword(!showEditPassword)}
-                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                    className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
                   >
                     {showEditPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -724,7 +836,7 @@ export default function UserWhitelisting() {
                 <select
                   value={editRole}
                   onChange={(e) => setEditRole(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
                 >
                   <option value="ROLE_DEPT_USER">Department User (Proposals & Needs)</option>
                   <option value="ROLE_SUPPLY_USER">Supply Officer (Annex 1 Master Inventory)</option>
@@ -738,14 +850,18 @@ export default function UserWhitelisting() {
                   <select
                     value={editDeptId}
                     onChange={(e) => setEditDeptId(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
                     required
                   >
-                    {departments.map((dept) => (
-                      <option key={dept.department_id || dept.id} value={String(dept.department_id || dept.id)}>
-                        {dept.department_name || dept.name}
-                      </option>
-                    ))}
+                    {departments.map((dept) => {
+                      const dId = String(dept.department_id || dept.id);
+                      const dName = dept.department_name || dept.name;
+                      return (
+                        <option key={dId} value={dId}>
+                          {dName}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               )}
@@ -753,10 +869,10 @@ export default function UserWhitelisting() {
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-sm text-xs"
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-xs text-xs"
               >
                 <Save className="w-4 h-4" />
-                <span>{submitting ? "Saving..." : "Save Credentials"}</span>
+                <span>{submitting ? "Updating..." : "Save Credential Updates"}</span>
               </button>
             </form>
           </div>
@@ -766,9 +882,12 @@ export default function UserWhitelisting() {
       {/* EDIT DEPARTMENT MODAL */}
       {editingDept && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-900 dark:text-white text-sm">Edit Department Name</h3>
+              <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-1.5">
+                <Landmark className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                <span>Edit Department Name</span>
+              </h3>
               <button 
                 onClick={() => setEditingDept(null)}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer"
@@ -786,14 +905,14 @@ export default function UserWhitelisting() {
                   value={editDeptName}
                   onChange={(e) => setEditDeptName(e.target.value)}
                   placeholder="e.g. Planning & Management Service"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs"
                 />
               </div>
 
               <button
                 type="submit"
                 disabled={creatingDept}
-                className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm text-xs"
+                className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs text-xs"
               >
                 <Save className="w-4 h-4" />
                 <span>{creatingDept ? "Updating..." : "Update Department"}</span>

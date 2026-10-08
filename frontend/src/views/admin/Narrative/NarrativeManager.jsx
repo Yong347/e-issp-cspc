@@ -1,8 +1,15 @@
 // frontend/src/views/admin/Narrative/NarrativeManager.jsx
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
-import { evaluateLifecycleRollover } from "../../../api/admin";
+import { 
+  updateNarrative,
+  activateCycle,
+  resetCycle,
+  evaluateLifecycleRollover 
+} from "../../../api/admin";
+import CompilerSyncButton from "../../../components/common/CompilerSyncButton";
 import { 
   FileText, 
   Save, 
@@ -13,116 +20,114 @@ import {
   Landmark, 
   ShieldAlert, 
   Trash2,
-  ChevronDown, 
-  ChevronRight, 
   Layers, 
   Users, 
   Briefcase, 
   Activity, 
   ShieldCheck, 
-  Database, 
-  Award,
-  Building,
-  Clock,
-  Compass,
-  Network,
+  Clock, 
+  Compass, 
+  Network, 
+  Plus, 
+  ExternalLink, 
+  GraduationCap, 
+  HardDrive, 
+  Sparkles, 
+  Workflow, 
+  Cpu, 
+  Check, 
+  Info, 
+  Calendar, 
+  X, 
+  CheckCircle2, 
   Lock,
-  Plus,
-  Edit,
+  Edit3, 
+  Server,
+  Globe,
+  Building,
   SlidersHorizontal,
-  ExternalLink,
-  GraduationCap,
-  HardDrive,
-  Sparkles,
-  Workflow,
-  Cpu,
-  Check,
-  Info,
-  Calendar,
-  X,
-  Code,
-  CheckCircle2,
-  Shield
+  RotateCcw,
+  ArrowRight,
+  CheckSquare
 } from "lucide-react";
 
-// Official DICT ISSP v.2026 Canonical 29 Cybersecurity Controls Map
-const OFFICIAL_DICT_CONTROLS_MAP = {
-  "Physical Security": {
-    mandatory: ["Perimeter Protection", "Access Control", "Surveillance System"],
-    optional: ["Detection System"]
+// Presets for Standard Public-Sector Stakeholder Groups
+const STAKEHOLDER_PRESETS = [
+  {
+    group: "General Citizens and Service Applicants",
+    incoming: "Online service inquiries, application submissions, and electronic fee settlement",
+    incomingComp: "Simple",
+    outgoing: "Official E-Certificates, clearances, regulatory statements, and validated receipts",
+    outgoingComp: "Simple"
   },
-  "Perimeter Security": {
-    mandatory: ["Next Generation Firewalls", "Intrusion Detection/Prevention Systems (IDS/IPS)", "Web Application Firewalls (WAFs)"],
-    optional: ["Demilitarized Zone (DMZ)"]
+  {
+    group: "Institutional Staff, Planners and Division Heads",
+    incoming: "Budget allotment requests, work programs, procurement requisitions, and leave clearances",
+    incomingComp: "Complex",
+    outgoing: "Disbursement vouchers, approved PRs, compliance endorsements, and performance scorecards",
+    outgoingComp: "Simple"
   },
-  "Network Security": {
-    mandatory: ["Data Encryption"],
-    optional: ["Network Segmentation"]
+  {
+    group: "National Oversight & Regulatory Agencies (DICT, DBM, COA)",
+    incoming: "Statutory circulars, national compliance benchmarks, audit inquiries, and MITHI surveys",
+    incomingComp: "Highly Technical",
+    outgoing: "Certified ISSP documentation, UACS financial matrices, and PREXC accomplishment reports",
+    outgoingComp: "Highly Technical"
   },
-  "Endpoint Security": {
-    mandatory: ["Anti-virus and Anti-malware Software", "Application Control", "BYOD Security"],
-    optional: ["Extended Detection and Response (XDR)"]
+  {
+    group: "Vendors, Contractors and Solution Providers",
+    incoming: "Technical bidding documents, supplier canvas quotations, service level warranties, and billing claims",
+    incomingComp: "Complex",
+    outgoing: "Notice of Award, purchase orders, inspection acceptance reports, and check disbursements",
+    outgoingComp: "Complex"
   },
-  "Data Security": {
-    mandatory: ["Data Classification", "Data Loss Prevention (DLP)", "Data Backups and Recovery"],
-    optional: []
-  },
-  "Application Security": {
-    mandatory: ["Regular Security Scanning and Testing"],
-    optional: []
-  },
-  "Other Measures": {
-    mandatory: [
-      "Vulnerability Assessment", 
-      "Patch Management", 
-      "Strong Password Policies", 
-      "Multi-Factor Authentication (MFA)", 
-      "Access Reviews", 
-      "Security Logs"
-    ],
-    optional: [
-      "Log Analysis", 
-      "Incident Response Plan", 
-      "Security Information and Event Management (SIEM)", 
-      "Penetration Testing", 
-      "Secure Software Development Life Cycle (SDLC)"
-    ]
+  {
+    group: "Partner National Government Agencies & LGUs",
+    incoming: "Joint memorandum requests, inter-agency data synchronization queries, and cross-border API calls",
+    incomingComp: "Highly Technical",
+    outgoing: "Standardized PeGIF API endpoints, validated cross-agency data payloads, and reciprocal status updates",
+    outgoingComp: "Highly Technical"
   }
-};
-
-const STANDARD_DOMAINS = [
-  "Physical Security",
-  "Perimeter Security",
-  "Network Security",
-  "Endpoint Security",
-  "Data Security",
-  "Application Security",
-  "Other Measures"
 ];
 
+function stripHtml(html) {
+  if (!html) return "";
+  return html
+    .replace(/<br\s*[\/]?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<\/li>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+}
+
 export default function NarrativeManager() {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const { activeCycle, fetchActiveCycle } = useCycle();
 
   // Dynamic Institutional Fallbacks
-  const defaultAgencyName = import.meta.env?.VITE_AGENCY_NAME || user?.agency_name || "National Government Agency";
+  const defaultAgencyName = import.meta.env?.VITE_DEFAULT_AGENCY_NAME || import.meta.env?.VITE_AGENCY_NAME || user?.agency_name || "National Government Agency";
   const defaultWebsiteUrl = import.meta.env?.VITE_AGENCY_WEBSITE || "https://agency.gov.ph";
-  const defaultAgencyHeadTitle = import.meta.env?.VITE_AGENCY_HEAD_TITLE || "Head of Agency";
+  const defaultAgencyHeadTitle = import.meta.env?.VITE_DEFAULT_AGENCY_HEAD_TITLE || "Head of Agency";
 
-  // Active Navigation Tab (10 Distinct DICT v.2026 Structural Sections)
+  // Active Navigation Tab
   const [activeTab, setActiveTab] = useState("cycle"); 
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [seedingControls, setSeedingControls] = useState(false);
   const [success, setSuccess] = useState(null);
   const [error, setError] = useState(null);
 
   // Lifecycle Rollover Modal State
   const [rolloverModal, setRolloverModal] = useState({ isOpen: false, data: null });
 
-  // Tab 1: Dynamic Cycle & Scope State (Template Page 1)
-  const [startYear, setStartYear] = useState("2026");
-  const [endYear, setEndYear] = useState("2028");
+  // Tab 1: Dynamic Cycle & Scope State (Default FY 2028-2030)
+  const [startYear, setStartYear] = useState("2028");
+  const [endYear, setEndYear] = useState("2030");
   const [isAmendment, setIsAmendment] = useState(false);
   const [amendmentNumber, setAmendmentNumber] = useState("1st");
 
@@ -134,20 +139,20 @@ export default function NarrativeManager() {
   const [hasRegionalOffices, setHasRegionalOffices] = useState(true);
   const [hasBureaus, setHasBureaus] = useState(false);
 
-  // Tab 2: Part I.A: Mandate, Functions, Vision, Mission
+  // Tab 2: Part I.A Mandate, Functions, Vision, Mission
   const [legalBasis, setLegalBasis] = useState("");
   const [functions, setFunctions] = useState("");
   const [vision, setVision] = useState("");
   const [mission, setMission] = useState("");
   const [presentSituation, setPresentSituation] = useState("");
 
-  // Tab 3: Part III.B: Dynamic Enterprise Architecture Narrative
+  // Tab 3: Part III.B Dynamic Enterprise Architecture Narrative
   const [eaNarrative, setEaNarrative] = useState("");
 
-  // Tab 4: Part I.B.1: Signatories & Leadership Structure
-  const [cioName, setCioName] = useState("");
-  const [cioPosition, setCioPosition] = useState("");
-  const [cioUnit, setCioUnit] = useState("");
+  // Tab 4: Part I.B.1 Signatories & Leadership Structure (Actual Full Human Names)
+  const [cioName, setCioName] = useState("REY T. CORTEZ, MIT");
+  const [cioPosition, setCioPosition] = useState("Chief Information Officer");
+  const [cioUnit, setCioUnit] = useState("ICT Management Service");
   const [cioEmail, setCioEmail] = useState("");
   const [cioContact, setCioContact] = useState("");
 
@@ -157,11 +162,12 @@ export default function NarrativeManager() {
   const [focalEmail, setFocalEmail] = useState("");
   const [focalContact, setFocalContact] = useState("");
 
-  const [headOfAgencyName, setHeadOfAgencyName] = useState("");
+  const [headOfAgencyName, setHeadOfAgencyName] = useState("AMADO A. OLIVA JR, PhD.");
   const [agencyHeadPosition, setAgencyHeadPosition] = useState(defaultAgencyHeadTitle);
 
-  // Tab 5: Part I.B.2: Human Capital Staffing Matrix
+  // Tab 5: Part I.B.2 Human Capital Staffing Matrix
   const [humanCapitals, setHumanCapitals] = useState([]);
+  const [editingHcId, setEditingHcId] = useState(null);
   const [hcForm, setHcForm] = useState({
     employment_status: "Plantilla (Filled)",
     is_proposed: false,
@@ -171,8 +177,9 @@ export default function NarrativeManager() {
     female_count: 0
   });
 
-  // Tab 6: Part I.C: Stakeholder Analysis
+  // Tab 6: Part I.C Stakeholder Analysis (Full Dynamic CRUD)
   const [stakeholders, setStakeholders] = useState([]);
+  const [editingShId, setEditingShId] = useState(null);
   const [shForm, setShForm] = useState({
     stakeholder_group: "",
     transaction_processed_incoming: "",
@@ -181,11 +188,9 @@ export default function NarrativeManager() {
     complexity_outgoing: "Simple"
   });
 
-  // Tab 7: Part II.B & III.A: Network Infrastructure & Cybersecurity Controls
+  // Tab 7: Part II.B.1 & III.A.1 Network Infrastructure Profiles
   const [networkInfraList, setNetworkInfraList] = useState([]);
-  const [cyberControlsList, setCyberControlsList] = useState([]);
-  const [cyberViewProposed, setCyberViewProposed] = useState(false); // false = Existing (II.B.2), true = Proposed (III.A.2)
-  
+  const [editingNetId, setEditingNetId] = useState(null);
   const [netForm, setNetForm] = useState({
     is_proposed: false,
     office_location: "Central Office",
@@ -197,56 +202,14 @@ export default function NarrativeManager() {
     topology_description: ""
   });
 
-  // Cybersecurity Form with Mandatory vs. Optional Section Selector
-  const [cyberForm, setCyberForm] = useState({
-    is_proposed: false,
-    control_domain: "Physical Security",
-    control_tier: "mandatory", // "mandatory" vs "optional"
-    selected_standard: "Perimeter Protection",
-    control_name: "Perimeter Protection",
-    is_implemented: true
-  });
-
-  // Tab 8: Part II.D: E-Government Program Adoption Checklist
-  const [egovChecklists, setEgovChecklists] = useState([]);
-  const [egForm, setEgForm] = useState({
-    program_name: "eGovPay",
-    is_utilized: false,
-    url_or_system_name: "",
-    equivalent_system_details: "",
-    adoption_ratio: "",
-    channels_json: ["Website", "Email", "Mobile", "Social Media"],
-    is_connected_to_portal: false
-  });
-
-  // Tab 9: Annex 2: Disaster Recovery & Continuity (Sections 1–6)
+  // Tab 8: Annex 2 Disaster Recovery & Continuity (Narrative Core)
   const [drbcpApprovalDate, setDrbcpApprovalDate] = useState("");
-  const [drTeam, setDrTeam] = useState([]);
-  const [drTeamForm, setDrTeamForm] = useState({
-    role: "Incident Commander",
-    responsibility: "",
-    contact_person: "",
-    contact_details: ""
-  });
-
-  const [drBia, setDrBia] = useState([]);
-  const [drBiaForm, setDrBiaForm] = useState({
-    system_name: "",
-    classification: "Frontline / Mission-Critical",
-    mtpd_hours: 24,
-    rto_hours: 4,
-    rpo_hours: 1
-  });
-
   const [drAffectedAssets, setDrAffectedAssets] = useState([]);
   const [newAssetGroup, setNewAssetGroup] = useState("");
   const [newAssetDetails, setNewAssetDetails] = useState("");
   const [drRecoveryStrategy, setDrRecoveryStrategy] = useState("");
   const [drSopPhases, setDrSopPhases] = useState("");
 
-  // Tab 9: Annex 2: Section 6 Compliance Policy (4 Pillars + Raw HTML Mode)
-  const [customHtmlMode, setCustomHtmlMode] = useState(false);
-  const [rawSec6Html, setRawSec6Html] = useState("");
   const [sec6CyberIntegration, setSec6CyberIntegration] = useState(
     "Formal cyber-incident response and ransomware recovery procedures are established to sanitize compromised clusters before restoration."
   );
@@ -260,28 +223,16 @@ export default function NarrativeManager() {
     "Continuing costs for GovCloud standby compute, off-site storage, and leased circuits are allocated in Part IV.A of the ISSP."
   );
 
+  // Tab 9: Read-Only Checklists Overview Data (EGP, Cyber, DRT, BIA, KPIs)
+  const [cyberControlsList, setCyberControlsList] = useState([]);
+  const [egovChecklists, setEgovChecklists] = useState([]);
+  const [drTeam, setDrTeam] = useState([]);
+  const [drBia, setDrBia] = useState([]);
   const [drMetrics, setDrMetrics] = useState([]);
-  const [drMetricsForm, setDrMetricsForm] = useState({
-    indicator: "System Availability",
-    target_metric: "99.9% Up-time (excluding planned maintenance)"
-  });
-
-  // Tab 10: Document Structure Tree State
-  const [nodes, setNodes] = useState([]);
-  const [selectedNode, setSelectedNode] = useState(null);
-  const [expandedNodes, setExpandedNodes] = useState({});
-  const [loadingTree, setLoadingTree] = useState(false);
-  const [newNodeName, setNewNodeName] = useState("");
-  const [newNodeType, setNewNodeType] = useState("section");
-  const [nodeTitle, setNodeTitle] = useState("");
-  const [nodeTocLabel, setNodeTocLabel] = useState("");
-  const [nodeOrientation, setNodeOrientation] = useState("landscape");
-  const [nodePageBreak, setNodePageBreak] = useState(false);
-  const [nodeSequence, setNodeSequence] = useState("1.0");
 
   const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
   const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : "");
 
   useEffect(() => {
     if (activeCycle) {
@@ -293,37 +244,16 @@ export default function NarrativeManager() {
     }
   }, [activeCycle]);
 
-  // Synchronize Cybersecurity standard dropdown options when domain or tier changes
-  const availableStandardControls = useMemo(() => {
-    const domainDef = OFFICIAL_DICT_CONTROLS_MAP[cyberForm.control_domain];
-    if (!domainDef) return [];
-    return cyberForm.control_tier === "mandatory" ? domainDef.mandatory : domainDef.optional;
-  }, [cyberForm.control_domain, cyberForm.control_tier]);
+  const parseSection6Text = (rawStr) => {
+    if (!rawStr || typeof rawStr !== "string") return;
+    const clean = stripHtml(rawStr);
 
-  const handleDomainOrTierChange = (newDomain, newTier) => {
-    const domainDef = OFFICIAL_DICT_CONTROLS_MAP[newDomain];
-    const available = domainDef ? (newTier === "mandatory" ? domainDef.mandatory : domainDef.optional) : [];
-    const firstStandard = available.length > 0 ? available[0] : "";
-    
-    setCyberForm(prev => ({
-      ...prev,
-      control_domain: newDomain,
-      control_tier: newTier,
-      selected_standard: firstStandard || "__custom__",
-      control_name: firstStandard || ""
-    }));
-  };
-
-  const parseSection6Html = (htmlString) => {
-    if (!htmlString || typeof htmlString !== "string") return;
-    setRawSec6Html(htmlString);
-
-    const extractPillarText = (keyword) => {
+    const extractPillar = (keyword) => {
       try {
-        const regex = new RegExp(`<strong>${keyword}:?<\\/strong>\\s*([\\s\\S]*?)(?=<\\/li>|<li>|$)`, "i");
-        const match = htmlString.match(regex);
+        const regex = new RegExp(`${keyword}:?\\s*([\\s\\S]*?)(?=\\n\\n|$)`, "i");
+        const match = clean.match(regex);
         if (match && match[1]) {
-          return match[1].replace(/<\/?[^>]+(>|$)/g, "").trim();
+          return match[1].trim();
         }
       } catch (e) {
         console.warn(`Could not parse pillar ${keyword}:`, e);
@@ -331,10 +261,10 @@ export default function NarrativeManager() {
       return null;
     };
 
-    const cyber = extractPillarText("Cybersecurity Integration");
-    const drills = extractPillarText("Testing and Maintenance");
-    const audit = extractPillarText("Audit and Review");
-    const budget = extractPillarText("UACS and Budgeting");
+    const cyber = extractPillar("Cybersecurity Integration");
+    const drills = extractPillar("Testing and Maintenance");
+    const audit = extractPillar("Audit and Review");
+    const budget = extractPillar("UACS and Budgeting");
 
     if (cyber) setSec6CyberIntegration(cyber);
     if (drills) setSec6DrillsTesting(drills);
@@ -342,18 +272,13 @@ export default function NarrativeManager() {
     if (budget) setSec6BudgetSupport(budget);
   };
 
-  const buildSection6Html = () => {
-    if (customHtmlMode && rawSec6Html.trim()) {
-      return rawSec6Html.trim();
-    }
-    return `
-      <ul style="font-size: 8.5pt; line-height: 1.6; margin-bottom: 10px;">
-        <li><strong>Cybersecurity Integration:</strong> ${sec6CyberIntegration.trim()}</li>
-        <li><strong>Testing and Maintenance:</strong> ${sec6DrillsTesting.trim()}</li>
-        <li><strong>Audit and Review:</strong> ${sec6AuditReview.trim()}</li>
-        <li><strong>UACS and Budgeting:</strong> ${sec6BudgetSupport.trim()}</li>
-      </ul>
-    `.trim();
+  const buildSection6Text = () => {
+    return [
+      `Cybersecurity Integration: ${sec6CyberIntegration.trim()}`,
+      `Testing and Maintenance: ${sec6DrillsTesting.trim()}`,
+      `Audit and Review: ${sec6AuditReview.trim()}`,
+      `UACS and Budgeting: ${sec6BudgetSupport.trim()}`
+    ].join("\n\n");
   };
 
   const resolveScopePayload = () => {
@@ -390,14 +315,14 @@ export default function NarrativeManager() {
 
   const hydrateScopeFromData = (choiceStr, jsonBlob) => {
     const json = jsonBlob || {};
-    const c = choiceStr || "Department-Wide";
+    const c = (choiceStr || "Department-Wide").trim().toLowerCase().replace(/_/g, "-");
 
-    if (c.includes("Agency-Wide")) {
+    if (c.includes("agency")) {
       setPrimaryScope("Agency-Wide");
       setAgencySubScope(json.with_regional_offices ? "with_fields" : "central_only");
-    } else if (c.includes("Other Government Entity")) {
+    } else if (c.includes("other")) {
       setPrimaryScope("Other Government Entity");
-    } else if (c.includes("LGU")) {
+    } else if (c.includes("lgu")) {
       setPrimaryScope("LGU");
     } else {
       setPrimaryScope("Department-Wide");
@@ -428,25 +353,33 @@ export default function NarrativeManager() {
         
         hydrateScopeFromData(data.scope_choice, data.scope_json);
 
-        setLegalBasis(data.mandate_html || "");
+        setLegalBasis(data.mandate_text || stripHtml(data.mandate_html) || "");
         setFunctions(data.functions || "");
-        setVision(data.vision_html || "");
-        setMission(data.mission_html || "");
-        setPresentSituation(data.present_situation_html || "");
+        setVision(data.vision_text || stripHtml(data.vision_html) || "");
+        setMission(data.mission_text || stripHtml(data.mission_html) || "");
+        setPresentSituation(data.present_situation_text || stripHtml(data.present_situation_html) || "");
 
         setEaNarrative(data.enterprise_architecture_narrative || "");
 
         setDrbcpApprovalDate(data.drbcp_approval_date || "");
         setDrAffectedAssets(Array.isArray(data.drbcp_affected_assets_json) ? data.drbcp_affected_assets_json : []);
-        setDrRecoveryStrategy(data.drbcp_recovery_strategy_html || "");
-        setDrSopPhases(data.drbcp_sop_phases_html || "");
+        setDrRecoveryStrategy(data.drbcp_recovery_strategy_text || stripHtml(data.drbcp_recovery_strategy_html) || "");
+        setDrSopPhases(data.drbcp_sop_phases_text || stripHtml(data.drbcp_sop_phases_html) || "");
 
-        if (data.drbcp_compliance_narrative_html) {
-          parseSection6Html(data.drbcp_compliance_narrative_html);
+        const sec6Val = data.drbcp_compliance_narrative_text || data.drbcp_compliance_narrative_html;
+        if (sec6Val) {
+          parseSection6Text(sec6Val);
         }
 
-        setCioName(data.cio_name || data.signatory_prepared_by || "");
-        setCioPosition(data.cio_plantilla_position || data.preparer_position || "");
+        // Hydrate Signatories: Ensure clean human full names without generic title fallbacks
+        const rawCio = (data.cio_name || data.signatory_prepared_by || "").trim();
+        if (!rawCio || ["chief information officer", "cio", "none", "null"].includes(rawCio.toLowerCase())) {
+          setCioName("REY T. CORTEZ, MIT");
+        } else {
+          setCioName(rawCio);
+        }
+
+        setCioPosition(data.cio_plantilla_position || data.preparer_position || "Chief Information Officer");
         setCioUnit(data.cio_organizational_unit || "ICT Management Service");
         setCioEmail(data.cio_email || data.preparer_email || "");
         setCioContact(data.cio_contact_no || data.preparer_tel || "");
@@ -457,7 +390,13 @@ export default function NarrativeManager() {
         setFocalEmail(data.focal_email || "");
         setFocalContact(data.focal_contact_no || "");
 
-        setHeadOfAgencyName(data.head_of_agency_name || data.signatory_approved_by || "");
+        const rawHead = (data.head_of_agency_name || data.signatory_approved_by || "").trim();
+        if (!rawHead || ["head of agency", "agency head", "college president", "president", "none", "null"].includes(rawHead.toLowerCase())) {
+          setHeadOfAgencyName("AMADO A. OLIVA JR, PhD.");
+        } else {
+          setHeadOfAgencyName(rawHead);
+        }
+
         setAgencyHeadPosition(data.agency_head_position || defaultAgencyHeadTitle);
       }
     } catch (e) {
@@ -532,20 +471,6 @@ export default function NarrativeManager() {
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
-  const fetchDocumentTree = useCallback(async () => {
-    setLoadingTree(true);
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/issp/document-tree`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) setNodes(await res.json());
-    } catch (e) {
-      console.error("Failed to load document skeleton:", e);
-    } finally {
-      setLoadingTree(false);
-    }
-  }, [apiUrl, token]);
-
   const loadAllData = useCallback(() => {
     if (!token || !activeCycle) return;
     fetchCycleData();
@@ -556,23 +481,25 @@ export default function NarrativeManager() {
     fetchDrTeams();
     fetchDrBias();
     fetchDrMetrics();
-    fetchDocumentTree();
-  }, [token, activeCycle, fetchCycleData, fetchHumanCapitals, fetchStakeholders, fetchNetworkAndCyber, fetchEgovChecklists, fetchDrTeams, fetchDrBias, fetchDrMetrics, fetchDocumentTree]);
+  }, [token, activeCycle, fetchCycleData, fetchHumanCapitals, fetchStakeholders, fetchNetworkAndCyber, fetchEgovChecklists, fetchDrTeams, fetchDrBias, fetchDrMetrics]);
 
   useEffect(() => {
     loadAllData();
   }, [loadAllData]);
 
   const handleSaveNarratives = async (e) => {
-    if (e) e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     setError(null);
     setSuccess(null);
     setSubmitting(true);
 
-    const safeStart = parseInt(startYear, 10) || 2026;
+    const safeStart = parseInt(startYear, 10) || 2028;
     const safeEnd = parseInt(endYear, 10) || (safeStart + 2);
     const { scope_choice, scope_json } = resolveScopePayload();
-    const compiledSec6 = buildSection6Html();
+    const compiledSec6Text = buildSection6Text();
+
+    const cleanCio = (cioName.trim() || "REY T. CORTEZ, MIT");
+    const cleanHead = (headOfAgencyName.trim() || "AMADO A. OLIVA JR, PhD.");
 
     const payload = {
       agency_name: agencyName.trim() || defaultAgencyName,
@@ -584,23 +511,23 @@ export default function NarrativeManager() {
       issp_period_from: safeStart,
       issp_period_to: safeEnd,
 
-      mandate_html: legalBasis.trim(),
+      mandate_text: legalBasis.trim(),
       functions: functions.trim(),
-      vision_html: vision.trim(),
-      mission_html: mission.trim(),
-      present_situation_html: presentSituation.trim(),
+      vision_text: vision.trim(),
+      mission_text: mission.trim(),
+      present_situation_text: presentSituation.trim(),
 
       enterprise_architecture_narrative: eaNarrative.trim(),
 
       drbcp_approval_date: drbcpApprovalDate.trim() || null,
       drbcp_affected_assets_json: drAffectedAssets || [],
-      drbcp_recovery_strategy_html: drRecoveryStrategy.trim(),
-      drbcp_sop_phases_html: drSopPhases.trim(),
-      drbcp_compliance_narrative_html: compiledSec6,
+      drbcp_recovery_strategy_text: drRecoveryStrategy.trim(),
+      drbcp_sop_phases_text: drSopPhases.trim(),
+      drbcp_compliance_narrative_text: compiledSec6Text,
 
-      cio_name: cioName.trim() || null,
-      cio_plantilla_position: cioPosition.trim() || null,
-      cio_organizational_unit: cioUnit.trim() || null,
+      cio_name: cleanCio,
+      cio_plantilla_position: cioPosition.trim() || "Chief Information Officer",
+      cio_organizational_unit: cioUnit.trim() || "ICT Management Service",
       cio_email: cioEmail.trim() || null,
       cio_contact_no: cioContact.trim() || null,
 
@@ -610,37 +537,20 @@ export default function NarrativeManager() {
       focal_email: focalEmail.trim() || null,
       focal_contact_no: focalContact.trim() || null,
 
-      head_of_agency_name: headOfAgencyName.trim() || null,
+      head_of_agency_name: cleanHead,
       agency_head_position: agencyHeadPosition.trim() || defaultAgencyHeadTitle,
-      signatory_prepared_by: cioName.trim() || "Chief Information Officer",
-      signatory_approved_by: headOfAgencyName.trim() || defaultAgencyHeadTitle
+      signatory_prepared_by: cleanCio,
+      signatory_approved_by: cleanHead
     };
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        let detail = errData.detail;
-        if (Array.isArray(detail)) {
-          detail = detail.map(d => `${d.loc ? d.loc.filter(p => p !== "body").join(" -> ") + ": " : ""}${d.msg}`).join(" | ");
-        } else if (typeof detail === "object" && detail !== null) {
-          detail = JSON.stringify(detail);
-        }
-        throw new Error(detail || "Failed to persist primary coversheet parameters.");
-      }
-
-      setSuccess("Primary narrative, statutory mandates, Agency Head title, and DRBCP compliance sections saved successfully.");
+      await updateNarrative(token, activeCycle, payload);
+      setSuccess("Primary narrative, statutory mandates, Signatories, and DRBCP compliance sections saved successfully as structured plain text.");
       fetchCycleData();
+      return true;
     } catch (err) {
       setError(err.message || "Failed to save parameters.");
+      throw err;
     } finally {
       setSubmitting(false);
     }
@@ -669,22 +579,7 @@ export default function NarrativeManager() {
     const targetCycle = `${start}-${end}`;
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(targetCycle)}/activate`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        let detail = err.detail;
-        if (Array.isArray(detail)) {
-          detail = detail.map(d => `${d.loc ? d.loc.filter(p => p !== "body").join(" -> ") + ": " : ""}${d.msg}`).join(" | ");
-        } else if (typeof detail === "object" && detail !== null) {
-          detail = JSON.stringify(detail);
-        }
-        throw new Error(detail || "Failed to activate cycle.");
-      }
-
+      await activateCycle(token, targetCycle);
       setSuccess(`Planning cycle updated and activated to: FY ${targetCycle} (${span}-Year Horizon)`);
       await fetchActiveCycle();
     } catch (err) {
@@ -704,18 +599,7 @@ export default function NarrativeManager() {
     setSubmitting(true);
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/reset`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        let detail = err.detail;
-        if (typeof detail === "object" && detail !== null) detail = JSON.stringify(detail);
-        throw new Error(detail || "Cycle reset aborted.");
-      }
-
+      await resetCycle(token, activeCycle);
       setSuccess("Active cycle successfully reset. Clean state established.");
       await fetchActiveCycle();
     } catch (err) {
@@ -726,7 +610,7 @@ export default function NarrativeManager() {
   };
 
   const handleEvaluateRollover = async (force = false) => {
-    if (force && !window.confirm("FORCE ROLLOVER TEST: Freeze active cycle, compile final snapshot, archive to S3 Glacier, and automatically provision successor cycle?")) {
+    if (force && !window.confirm("FORCE ROLLOVER: Freeze active cycle, compile final certified snapshot, archive to Certified Document Vault, and automatically provision successor cycle?")) {
       return;
     }
     setError(null);
@@ -763,25 +647,62 @@ export default function NarrativeManager() {
     setDrAffectedAssets(prev => prev.filter((_, idx) => idx !== index));
   };
 
-  const handleAddHumanCapital = async (e) => {
+  // --- TAB 5: HUMAN CAPITAL HANDLERS ---
+  const handleStartEditHc = (item) => {
+    setEditingHcId(item.id);
+    setHcForm({
+      employment_status: item.employment_status,
+      is_proposed: Boolean(item.is_proposed),
+      it_positions_count: item.it_positions_count || 0,
+      non_it_positions_count: item.non_it_positions_count || 0,
+      male_count: item.male_count || 0,
+      female_count: item.female_count || 0
+    });
+  };
+
+  const handleCancelEditHc = () => {
+    setEditingHcId(null);
+    setHcForm({
+      employment_status: "Plantilla (Filled)",
+      is_proposed: false,
+      it_positions_count: 0,
+      non_it_positions_count: 0,
+      male_count: 0,
+      female_count: 0
+    });
+  };
+
+  const handleSaveHumanCapital = async (e) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(hcForm)
-      });
-      if (!res.ok) throw new Error("Failed to record human capital matrix entry.");
-      setSuccess("Staffing matrix updated.");
-      setHcForm({ employment_status: "Plantilla (Filled)", is_proposed: false, it_positions_count: 0, non_it_positions_count: 0, male_count: 0, female_count: 0 });
+      if (editingHcId) {
+        const res = await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(editingHcId)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(hcForm)
+        });
+        if (!res.ok) throw new Error("Failed to update human capital matrix entry.");
+        setSuccess("Staffing matrix row updated.");
+        handleCancelEditHc();
+      } else {
+        const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(hcForm)
+        });
+        if (!res.ok) throw new Error("Failed to record human capital matrix entry.");
+        setSuccess("Staffing matrix row added.");
+        setHcForm({ employment_status: "Plantilla (Filled)", is_proposed: false, it_positions_count: 0, non_it_positions_count: 0, male_count: 0, female_count: 0 });
+      }
       fetchHumanCapitals();
     } catch (err) { setError(err.message); } finally { setSubmitting(false); }
   };
 
   const handleDeleteHumanCapital = async (id) => {
+    if (!window.confirm("Permanently delete this staffing matrix entry?")) return;
     try {
       await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -791,25 +712,74 @@ export default function NarrativeManager() {
     } catch (err) { setError(err.message); }
   };
 
-  const handleAddStakeholder = async (e) => {
+  // --- TAB 6: STAKEHOLDER ANALYSIS HANDLERS ---
+  const handleStartEditStakeholder = (item) => {
+    setEditingShId(item.id);
+    setShForm({
+      stakeholder_group: item.stakeholder_group || "",
+      transaction_processed_incoming: item.transaction_processed_incoming || "",
+      transaction_processed_outgoing: item.transaction_processed_outgoing || "",
+      complexity_incoming: item.complexity_incoming || item.incoming_complexity || "Simple",
+      complexity_outgoing: item.complexity_outgoing || item.outgoing_complexity || "Simple"
+    });
+  };
+
+  const handleCancelEditStakeholder = () => {
+    setEditingShId(null);
+    setShForm({
+      stakeholder_group: "",
+      transaction_processed_incoming: "",
+      transaction_processed_outgoing: "",
+      complexity_incoming: "Simple",
+      complexity_outgoing: "Simple"
+    });
+  };
+
+  const handleApplyStakeholderPreset = (preset) => {
+    setShForm({
+      stakeholder_group: preset.group,
+      transaction_processed_incoming: preset.incoming,
+      transaction_processed_outgoing: preset.outgoing,
+      complexity_incoming: preset.incomingComp,
+      complexity_outgoing: preset.outgoingComp
+    });
+  };
+
+  const handleSaveStakeholder = async (e) => {
     e.preventDefault();
+    if (!shForm.stakeholder_group.trim()) {
+      setError("Stakeholder Group is required.");
+      return;
+    }
     setError(null);
     setSuccess(null);
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(shForm)
-      });
-      if (!res.ok) throw new Error("Failed to record stakeholder analysis.");
-      setSuccess("Stakeholder matrix updated.");
-      setShForm({ stakeholder_group: "", transaction_processed_incoming: "", transaction_processed_outgoing: "", complexity_incoming: "Simple", complexity_outgoing: "Simple" });
+      if (editingShId) {
+        const res = await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(editingShId)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(shForm)
+        });
+        if (!res.ok) throw new Error("Failed to update stakeholder analysis.");
+        setSuccess("Stakeholder analysis updated successfully.");
+        handleCancelEditStakeholder();
+      } else {
+        const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(shForm)
+        });
+        if (!res.ok) throw new Error("Failed to record stakeholder analysis.");
+        setSuccess("Stakeholder analysis recorded successfully.");
+        setShForm({ stakeholder_group: "", transaction_processed_incoming: "", transaction_processed_outgoing: "", complexity_incoming: "Simple", complexity_outgoing: "Simple" });
+      }
       fetchStakeholders();
     } catch (err) { setError(err.message); } finally { setSubmitting(false); }
   };
 
-  const handleDeleteStakeholder = async (id) => {
+  const handleDeleteStakeholder = async (id, groupName) => {
+    if (!window.confirm(`Permanently delete stakeholder group '${groupName}'?`)) return;
     try {
       await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -819,34 +789,66 @@ export default function NarrativeManager() {
     } catch (err) { setError(err.message); }
   };
 
-  const handleAddNetworkInfra = async (e) => {
+  // --- TAB 7: NETWORK INFRASTRUCTURE HANDLERS ---
+  const handleStartEditNet = (item) => {
+    setEditingNetId(item.id);
+    setNetForm({
+      is_proposed: Boolean(item.is_proposed),
+      office_location: item.office_location || "Central Office",
+      connectivity_type: item.connectivity_type || "Dedicated Leased Line Fiber Optic",
+      bandwidth_mbps: item.bandwidth_mbps || 100,
+      upload_speed_mbps: item.upload_speed_mbps || item.bandwidth_mbps || 100,
+      download_speed_mbps: item.download_speed_mbps || item.bandwidth_mbps || 100,
+      is_ipv6_ready: Boolean(item.is_ipv6_ready),
+      topology_description: item.topology_description || ""
+    });
+  };
+
+  const handleCancelEditNet = () => {
+    setEditingNetId(null);
+    setNetForm({
+      is_proposed: false,
+      office_location: "Central Office",
+      connectivity_type: "Dedicated Leased Line Fiber Optic",
+      bandwidth_mbps: 100,
+      upload_speed_mbps: 100,
+      download_speed_mbps: 100,
+      is_ipv6_ready: true,
+      topology_description: ""
+    });
+  };
+
+  const handleSaveNetworkInfra = async (e) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(netForm)
-      });
-      if (!res.ok) throw new Error("Failed to register network infrastructure.");
-      setSuccess("Network infrastructure profile saved.");
-      setNetForm({
-        is_proposed: false,
-        office_location: "Central Office",
-        connectivity_type: "Dedicated Leased Line Fiber Optic",
-        bandwidth_mbps: 100,
-        upload_speed_mbps: 100,
-        download_speed_mbps: 100,
-        is_ipv6_ready: true,
-        topology_description: ""
-      });
+      if (editingNetId) {
+        const res = await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(editingNetId)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(netForm)
+        });
+        if (!res.ok) throw new Error("Failed to update network infrastructure.");
+        setSuccess("Network profile updated.");
+        handleCancelEditNet();
+      } else {
+        const res = await fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(netForm)
+        });
+        if (!res.ok) throw new Error("Failed to register network infrastructure.");
+        setSuccess("Network infrastructure profile saved.");
+        handleCancelEditNet();
+      }
       fetchNetworkAndCyber();
     } catch (err) { setError(err.message); } finally { setSubmitting(false); }
   };
 
   const handleDeleteNetworkInfra = async (id) => {
+    if (!window.confirm("Delete this network infrastructure profile?")) return;
     try {
       await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -856,327 +858,11 @@ export default function NarrativeManager() {
     } catch (err) { setError(err.message); }
   };
 
-  // Add Cybersecurity Control with Tier Validation
-  const handleAddCyberControl = async (e) => {
-    e.preventDefault();
-    setError(null);
-    setSuccess(null);
-
-    const nameToSave = cyberForm.selected_standard === "__custom__" 
-      ? cyberForm.control_name.trim() 
-      : (cyberForm.selected_standard || cyberForm.control_name).trim();
-
-    if (!nameToSave) {
-      setError("Control Name cannot be empty.");
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      const payload = {
-        is_proposed: cyberForm.is_proposed,
-        control_domain: cyberForm.control_domain,
-        control_name: nameToSave,
-        is_mandatory: cyberForm.control_tier === "mandatory",
-        is_implemented: cyberForm.is_implemented
-      };
-
-      const res = await fetch(`${apiUrl}/api/admin/cybersecurity-controls?issp_period=${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) throw new Error("Failed to record cybersecurity control.");
-      setSuccess(`Control '${nameToSave}' saved under ${payload.is_mandatory ? "MANDATORY" : "OPTIONAL"} column.`);
-      
-      handleDomainOrTierChange(cyberForm.control_domain, cyberForm.control_tier);
-      fetchNetworkAndCyber();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
-  };
-
-  const handleToggleCyberImplemented = async (item) => {
-    try {
-      await fetch(`${apiUrl}/api/admin/cybersecurity-controls/${encodeURIComponent(item.id)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ ...item, is_implemented: !item.is_implemented })
-      });
-      fetchNetworkAndCyber();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleDeleteCyberControl = async (id) => {
-    try {
-      await fetch(`${apiUrl}/api/admin/cybersecurity-controls/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      fetchNetworkAndCyber();
-    } catch (err) { setError(err.message); }
-  };
-
-  // Seed / Restore All 29 Official DICT Cybersecurity Controls Endpoint Trigger
-  const handleSeedDefaultControls = async () => {
-    setError(null);
-    setSuccess(null);
-    setSeedingControls(true);
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/cybersecurity-controls/seed-defaults?issp_period=${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to initialize standard DICT controls.");
-      }
-      const data = await res.json();
-      setSuccess(data.message || "All 29 Official DICT Cybersecurity Controls initialized successfully.");
-      fetchNetworkAndCyber();
-    } catch (err) {
-      setError(err.message || "Seeding failed.");
-    } finally {
-      setSeedingControls(false);
-    }
-  };
-
-  const handleAddEgov = async (e) => {
-    e.preventDefault();
-    setError(null);
-    setSuccess(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/egov-checklists`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(egForm)
-      });
-      if (!res.ok) throw new Error("Failed to record EGP adoption item.");
-      setSuccess("E-Government Program checklist updated.");
-      setEgForm({ program_name: "eGovPay", is_utilized: false, url_or_system_name: "", equivalent_system_details: "", adoption_ratio: "", channels_json: ["Website", "Email", "Mobile", "Social Media"], is_connected_to_portal: false });
-      fetchEgovChecklists();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
-  };
-
-  const handleDeleteEgov = async (id) => {
-    try {
-      await fetch(`${apiUrl}/api/admin/egov-checklists/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      fetchEgovChecklists();
-    } catch (err) { setError(err.message); }
-  };
-
-  const handleAddDrTeam = async (e) => {
-    e.preventDefault();
-    setError(null);
-    setSuccess(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-teams`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(drTeamForm)
-      });
-      if (!res.ok) throw new Error("Failed to record DRT member.");
-      setSuccess("DRT Member added.");
-      setDrTeamForm({ role: "Incident Commander", responsibility: "", contact_person: "", contact_details: "" });
-      fetchDrTeams();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
-  };
-
-  const handleDeleteDrTeam = async (id) => {
-    try {
-      await fetch(`${apiUrl}/api/admin/dr-teams/${encodeURIComponent(id)}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-      fetchDrTeams();
-    } catch (e) { console.error(e); }
-  };
-
-  const handleAddDrBia = async (e) => {
-    e.preventDefault();
-    setError(null);
-    setSuccess(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-bias`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          ...drBiaForm,
-          mtpd_hours: parseInt(drBiaForm.mtpd_hours, 10),
-          rto_hours: parseInt(drBiaForm.rto_hours, 10),
-          rpo_hours: parseInt(drBiaForm.rpo_hours, 10)
-        })
-      });
-      if (!res.ok) throw new Error("Failed to record BIA targets.");
-      setSuccess("BIA targets preserved.");
-      setDrBiaForm({ system_name: "", classification: "Frontline / Mission-Critical", mtpd_hours: 24, rto_hours: 4, rpo_hours: 1 });
-      fetchDrBias();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
-  };
-
-  const handleDeleteDrBia = async (id) => {
-    try {
-      await fetch(`${apiUrl}/api/admin/dr-bias/${encodeURIComponent(id)}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-      fetchDrBias();
-    } catch (e) { console.error(e); }
-  };
-
-  const handleAddDrMetric = async (e) => {
-    e.preventDefault();
-    setError(null);
-    setSuccess(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-metrics`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(drMetricsForm)
-      });
-      if (!res.ok) throw new Error("Failed to register DR KPI metric.");
-      setSuccess("DR KPI metric added.");
-      setDrMetricsForm({ indicator: "System Availability", target_metric: "99.9% Up-time (excluding planned maintenance)" });
-      fetchDrMetrics();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
-  };
-
-  const handleDeleteDrMetric = async (id) => {
-    try {
-      await fetch(`${apiUrl}/api/admin/dr-metrics/${encodeURIComponent(id)}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-      fetchDrMetrics();
-    } catch (e) { console.error(e); }
-  };
-
-  const handleSelectNode = (node) => {
-    setSelectedNode(node);
-    setNodeTitle(node.vocabulary?.display_title || "");
-    setNodeTocLabel(node.vocabulary?.toc_label || "");
-    setNodeOrientation(node.page_orientation || "landscape");
-    setNodePageBreak(Boolean(node.force_page_break));
-    setNodeSequence(String(node.sequence_order || "1.0"));
-  };
-
-  const handleSaveNode = async (e) => {
-    e.preventDefault();
-    if (!selectedNode) return;
-    setError(null);
-    setSuccess(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/issp/nodes/${encodeURIComponent(selectedNode.id)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          page_orientation: nodeOrientation,
-          force_page_break: nodePageBreak,
-          sequence_order: parseFloat(nodeSequence) || 1.0
-        })
-      });
-      if (!res.ok) throw new Error("Failed to update document node.");
-      setSuccess(`Document node '${nodeTitle}' updated.`);
-      fetchDocumentTree();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
-  };
-
-  const handleCreateChildNode = async (e) => {
-    e.preventDefault();
-    if (!newNodeName.trim() || !selectedNode) return;
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/issp/nodes`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          parent_id: selectedNode.id,
-          node_type: newNodeType,
-          system_key: `NODE_${newNodeName.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`,
-          sequence_order: 1.0,
-          display_title: newNodeName.trim(),
-          toc_label: newNodeName.trim()
-        })
-      });
-      if (!res.ok) throw new Error("Failed to create child node.");
-      setNewNodeName("");
-      fetchDocumentTree();
-    } catch (e) { console.error(e); }
-  };
-
-  const handleDeleteNode = async (id) => {
-    if (!window.confirm("Purge document section node and its descendants?")) return;
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/issp/nodes/${encodeURIComponent(id)}`, { 
-        method: "DELETE", 
-        headers: { Authorization: `Bearer ${token}` } 
-      });
-      if (!res.ok) throw new Error("Failed to delete node.");
-      setSelectedNode(null);
-      fetchDocumentTree();
-    } catch (e) { console.error(e); }
-  };
-
-  const renderTree = (nodesList, depth = 0) => {
-    return (
-      <ul className={`space-y-1 ${depth > 0 ? "pl-4 border-l border-slate-200 dark:border-slate-800" : ""}`}>
-        {nodesList.map(node => {
-          const hasChildren = node.children && node.children.length > 0;
-          const isExpanded = Boolean(expandedNodes[node.id]);
-          const isSelected = selectedNode?.id === node.id;
-
-          return (
-            <li key={node.id} className="space-y-1">
-              <div 
-                className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer group transition-colors ${
-                  isSelected ? "bg-blue-600 text-white font-bold" : "text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                }`}
-                onClick={() => handleSelectNode(node)}
-              >
-                <div className="flex items-center gap-2 truncate">
-                  {hasChildren ? (
-                    <button 
-                      type="button" 
-                      onClick={(e) => { e.stopPropagation(); setExpandedNodes(prev => ({ ...prev, [node.id]: !prev[node.id] })); }}
-                      className="p-0.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded"
-                    >
-                      {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                    </button>
-                  ) : <span className="w-4 h-4" />}
-                  <span className="truncate">{node.vocabulary?.display_title || node.system_key}</span>
-                </div>
-                <button 
-                  onClick={(e) => { e.stopPropagation(); handleDeleteNode(node.id); }}
-                  className="p-1 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              {hasChildren && isExpanded && renderTree(node.children, depth + 1)}
-            </li>
-          );
-        })}
-      </ul>
-    );
-  };
-
-  const calculatedSpan = (parseInt(endYear, 10) || 2028) - (parseInt(startYear, 10) || 2026) + 1;
+  const calculatedSpan = (parseInt(endYear, 10) || 2030) - (parseInt(startYear, 10) || 2028) + 1;
   const totalIT = humanCapitals.reduce((acc, h) => acc + (h.it_positions_count || 0), 0);
   const totalNonIT = humanCapitals.reduce((acc, h) => acc + (h.non_it_positions_count || 0), 0);
   const totalMale = humanCapitals.reduce((acc, h) => acc + (h.male_count || 0), 0);
   const totalFemale = humanCapitals.reduce((acc, h) => acc + (h.female_count || 0), 0);
-
-  // Group cybersecurity controls into 7 official security domains
-  const activeCyberControls = useMemo(() => {
-    return cyberControlsList.filter(c => Boolean(c.is_proposed) === Boolean(cyberViewProposed));
-  }, [cyberControlsList, cyberViewProposed]);
-
-  const uniqueDomains = useMemo(() => {
-    const list = [...STANDARD_DOMAINS];
-    activeCyberControls.forEach(c => {
-      const d = c.control_domain || "Other Measures";
-      if (!list.some(item => item.toLowerCase() === d.toLowerCase())) {
-        list.push(d);
-      }
-    });
-    return list;
-  }, [activeCyberControls]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto text-xs text-slate-800 dark:text-slate-100 select-none font-sans transition-colors duration-200">
@@ -1189,17 +875,27 @@ export default function NarrativeManager() {
             <span>Master ISSP Narrative Studio &amp; Statutory Governance</span>
           </h2>
           <p className="text-slate-500 dark:text-slate-400 mt-1 text-xs">
-            Maintain legal mandates, signatory profiles, human capital matrices, network/cybersecurity controls, and DRBCP continuity frameworks.
+            Maintain legal mandates, signatory profiles, human capital matrices, full stakeholder matrices, network infrastructure, and DRBCP continuity frameworks.
           </p>
         </div>
-        <button
-          onClick={loadAllData}
-          disabled={loading}
-          className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>Sync All</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <CompilerSyncButton
+            moduleName="narratives"
+            activeCycle={activeCycle}
+            token={token}
+            onSaveAndSync={handleSaveNarratives}
+            label="Save &amp; Verify Compiler Pipeline"
+          />
+          <button
+            onClick={loadAllData}
+            disabled={loading}
+            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
+            title="Sync all narrative data"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>Sync</span>
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -1210,25 +906,24 @@ export default function NarrativeManager() {
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
           <CheckCircle className="w-4 h-4 shrink-0" />
           <span>{success}</span>
         </div>
       )}
 
-      {/* Navigation Tabs (10 Sections) */}
+      {/* Navigation Tabs (9 Normalized Sections) */}
       <div className="flex flex-wrap gap-1 p-1 bg-slate-100 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 self-start shadow-xs">
         {[
           { id: "cycle", label: "1. Planning Scope", icon: <CalendarRange className="w-3.5 h-3.5" /> },
           { id: "mandate", label: "2. Mandate & Functions", icon: <Landmark className="w-3.5 h-3.5" /> },
           { id: "ea", label: "3. Enterprise Arch (III.B)", icon: <HardDrive className="w-3.5 h-3.5" /> },
-          { id: "cio_focal", label: "4. CIO & Focal (I.B.1)", icon: <Users className="w-3.5 h-3.5" /> },
+          { id: "cio_focal", label: "4. CIO & Signatories (I.B.1)", icon: <Users className="w-3.5 h-3.5" /> },
           { id: "humancapital", label: "5. Human Capital (I.B.2)", icon: <Briefcase className="w-3.5 h-3.5" /> },
           { id: "stakeholders", label: "6. Stakeholders (I.C)", icon: <Compass className="w-3.5 h-3.5" /> },
-          { id: "network_cyber", label: "7. Network & Cyber (II.B / III.A)", icon: <Network className="w-3.5 h-3.5" /> },
-          { id: "egov", label: "8. EGP Checklist (II.D)", icon: <Activity className="w-3.5 h-3.5" /> },
-          { id: "drbcp", label: "9. DRBCP (Annex 2)", icon: <ShieldAlert className="w-3.5 h-3.5" /> },
-          { id: "tree", label: "10. Document Tree", icon: <Layers className="w-3.5 h-3.5" /> }
+          { id: "network", label: "7. Network Infra (II.B / III.A)", icon: <Network className="w-3.5 h-3.5" /> },
+          { id: "drbcp", label: "8. DRBCP Narrative (Annex 2)", icon: <ShieldAlert className="w-3.5 h-3.5" /> },
+          { id: "checklists", label: "9. Framework Checklists (Overview)", icon: <SlidersHorizontal className="w-3.5 h-3.5" /> }
         ].map(tab => (
           <button
             key={tab.id}
@@ -1254,7 +949,7 @@ export default function NarrativeManager() {
           {activeTab === "cycle" && (
             <div className="space-y-6 animate-fadeIn">
               <form onSubmit={handleSaveNarratives} className="space-y-4">
-                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5">
+                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5 font-serif">
                   <CalendarRange className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                   <span>DICT Template Page 1: Plan Classification, Horizon &amp; Scope</span>
                 </h3>
@@ -1301,10 +996,10 @@ export default function NarrativeManager() {
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Agency / Department Legal Name</label>
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Agency / Institution Legal Name</label>
                     <input
                       type="text" required value={agencyName} onChange={e => setAgencyName(e.target.value)}
-                      placeholder="e.g. Department of Information and Communications Technology"
+                      placeholder="e.g. National Government Agency"
                       className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold outline-none focus:border-blue-500 text-xs"
                     />
                   </div>
@@ -1337,7 +1032,7 @@ export default function NarrativeManager() {
                           onChange={() => setPrimaryScope("Department-Wide")}
                           className="accent-blue-600 w-4 h-4 cursor-pointer"
                         />
-                        <span>Department-Wide &rarr; Department - Central Office / Head Office</span>
+                        <span>Department-Wide &rarr; Central / Head Office</span>
                       </label>
 
                       {primaryScope === "Department-Wide" && (
@@ -1362,7 +1057,7 @@ export default function NarrativeManager() {
                               onChange={() => setDeptSubScope("with_suboffices")}
                               className="accent-blue-600 cursor-pointer"
                             />
-                            <span>With Sub-Offices / Regional Offices / Bureaus</span>
+                            <span>With Sub-Offices / Regional Offices / Field Branches</span>
                           </label>
 
                           {deptSubScope === "with_suboffices" && (
@@ -1374,7 +1069,7 @@ export default function NarrativeManager() {
                                   onChange={e => setHasRegionalOffices(e.target.checked)}
                                   className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
                                 />
-                                <span className="font-semibold text-blue-700 dark:text-blue-300">With Regional / Field Offices</span>
+                                <span className="font-semibold text-blue-700 dark:text-blue-300">With Regional / Field / Branch Offices</span>
                               </label>
                               <label className="flex items-center gap-1.5 cursor-pointer">
                                 <input
@@ -1496,16 +1191,16 @@ export default function NarrativeManager() {
 
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
                 <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-2">
-                  <div className="flex items-center gap-2 text-slate-900 dark:text-white font-bold">
+                  <div className="flex items-center gap-2 text-slate-900 dark:text-white font-bold font-serif">
                     <Workflow className="w-4 h-4 text-blue-500" />
-                    <span>Automated Cycle Rollover &amp; Cold Archival Engine</span>
+                    <span>Automated Cycle Rollover &amp; Official Archival Engine</span>
                   </div>
                   <span className="text-[9px] px-2.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 rounded font-mono font-bold uppercase">
                     Continuous Audit
                   </span>
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 text-xs leading-relaxed">
-                  When calendar year exceeds the plan's end year (e.g. &gt; {endYear}), the system freezes the concluding cycle, compiles and archives its final certified PDF to <strong>AWS S3 Glacier</strong>, and automatically provisions the successor cycle with cloned baselines.
+                  When calendar year exceeds the plan's end year (e.g. &gt; {endYear}), the system freezes the concluding cycle, compiles and archives its final certified PDF to the <strong>Certified Document Vault</strong>, and automatically provisions the successor cycle with cloned baselines.
                 </p>
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
@@ -1547,19 +1242,19 @@ export default function NarrativeManager() {
             </div>
           )}
 
-          {/* TAB 2: PART I.A MANDATES, FUNCTIONS, VISION & MISSION */}
+          {/* TAB 2: PART I.A MANDATES, FUNCTIONS, VISION & MISSION (CLEAN PLAIN TEXT) */}
           {activeTab === "mandate" && (
             <form onSubmit={handleSaveNarratives} className="space-y-4 animate-fadeIn">
-              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5">
+              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5 font-serif">
                 <Landmark className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>Part I.A: Statutory Charter &amp; Institutional Framework</span>
+                <span>Part I.A: Statutory Charter &amp; Institutional Framework (Plain Text)</span>
               </h3>
 
               <div className="space-y-1.5">
                 <label className="text-[10px] uppercase font-bold text-slate-500">A.1 Legal Basis (Enabling Law / Executive Order / Charter)</label>
                 <textarea
                   rows={3} required value={legalBasis} onChange={e => setLegalBasis(e.target.value)}
-                  placeholder="Cite statutory legal basis (e.g., Republic Act No. 10844, Executive Order No. 292, or statutory charter)..."
+                  placeholder="Cite statutory legal basis (e.g., enabling legislative act, executive order, or statutory charter)..."
                   className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs outline-none resize-none focus:border-blue-500"
                 />
               </div>
@@ -1568,7 +1263,7 @@ export default function NarrativeManager() {
                 <label className="text-[10px] uppercase font-bold text-slate-500">A.1 Functions (Directly Derived from Statutory Mandate)</label>
                 <textarea
                   rows={3} required value={functions} onChange={e => setFunctions(e.target.value)}
-                  placeholder="Official public functions, regulatory monitoring, policy formulation, and citizen service delivery..."
+                  placeholder="Official institutional functions, instruction, research, extension, production, and citizen services..."
                   className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500"
                 />
               </div>
@@ -1578,7 +1273,7 @@ export default function NarrativeManager() {
                   <label className="text-[10px] uppercase font-bold text-slate-500">A.2 Vision Statement</label>
                   <textarea
                     rows={3} required value={vision} onChange={e => setVision(e.target.value)}
-                    placeholder="Desired long-term future direction and digital public service excellence..."
+                    placeholder="Desired long-term institutional direction and digital transformation vision..."
                     className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500"
                   />
                 </div>
@@ -1586,7 +1281,7 @@ export default function NarrativeManager() {
                   <label className="text-[10px] uppercase font-bold text-slate-500">A.3 Mission Statement</label>
                   <textarea
                     rows={3} required value={mission} onChange={e => setMission(e.target.value)}
-                    placeholder="Core institutional purpose, digital transformation goals, and citizen-centric governance..."
+                    placeholder="Core institutional mission, operational excellence, and public service delivery..."
                     className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500"
                   />
                 </div>
@@ -1599,23 +1294,24 @@ export default function NarrativeManager() {
                     <span>A.4 Organizational Outcomes / MFO Programs</span>
                   </span>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Statutory outcome categories (OO for NGAs, SO for GOCCs, MFO for SUCs/LGUs) are managed in the dedicated Outcomes console.
+                    Statutory outcome categories (Core Public Services, Research, Extension, Support to Operations, General Administration) are managed in the dedicated Outcomes console.
                   </p>
                 </div>
-                <a
-                  href="/admin/outcomes"
-                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm"
+                <button
+                  type="button"
+                  onClick={() => navigate("/admin/outcomes")}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
                 >
                   <span>Manage Outcomes</span>
                   <ExternalLink className="w-3.5 h-3.5" />
-                </a>
+                </button>
               </div>
 
               <div className="space-y-1.5">
                 <label className="text-[10px] uppercase font-bold text-slate-500">Present ICT Situation &amp; Operational Bottlenecks</label>
                 <textarea
                   rows={4} required value={presentSituation} onChange={e => setPresentSituation(e.target.value)}
-                  placeholder="Summary of existing infrastructure, network bottlenecks, and server vulnerabilities..."
+                  placeholder="Summary of existing infrastructure, network bottlenecks, campus fiber layout, and server room constraints..."
                   className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500"
                 />
               </div>
@@ -1624,7 +1320,7 @@ export default function NarrativeManager() {
                 type="submit" disabled={submitting}
                 className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm text-xs"
               >
-                <Save className="w-4 h-4" /> <span>Save Statutory Mandates</span>
+                <Save className="w-4 h-4" /> <span>Save Statutory Mandates (Plain Text)</span>
               </button>
             </form>
           )}
@@ -1632,15 +1328,15 @@ export default function NarrativeManager() {
           {/* TAB 3: PART III.B ENTERPRISE ARCHITECTURE DYNAMIC STUDIO */}
           {activeTab === "ea" && (
             <form onSubmit={handleSaveNarratives} className="space-y-4 animate-fadeIn">
-              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5">
+              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5 font-serif">
                 <HardDrive className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>Part III.B: Proposed Enterprise Architecture Narrative</span>
+                <span>Part III.B: Proposed Enterprise Architecture Narrative (Plain Text)</span>
               </h3>
 
               <div className="p-3.5 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl text-[10.5px] text-slate-700 dark:text-slate-300 leading-relaxed flex items-start gap-2">
                 <Info className="w-4 h-4 shrink-0 mt-0.5 text-blue-600 dark:text-blue-400" />
                 <span>
-                  <strong>Dynamic PDF Compilation:</strong> This narrative renders under Section III.B alongside the Enterprise Architecture schematic diagram. Detail microservices containerization on GovCloud, PeGIF API gateways, and multi-agency registries.
+                  <strong>Dynamic PDF Compilation:</strong> This narrative renders under Section III.B alongside the Enterprise Architecture schematic diagram. Detail microservices containerization, PeGIF API gateways, and operational data hubs.
                 </span>
               </div>
 
@@ -1651,7 +1347,7 @@ export default function NarrativeManager() {
                   required
                   value={eaNarrative}
                   onChange={e => setEaNarrative(e.target.value)}
-                  placeholder="The proposed Enterprise Architecture rationalizes agency legacy registries into microservices containerized on GovCloud, utilizing PeGIF-compliant API gateways to support interoperability..."
+                  placeholder="The proposed Enterprise Architecture rationalizes agency legacy registries into microservices containerized on secure infrastructure, utilizing PeGIF-compliant API gateways to support interoperability..."
                   className="w-full p-3 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs leading-relaxed outline-none focus:border-blue-500"
                 />
               </div>
@@ -1665,32 +1361,37 @@ export default function NarrativeManager() {
             </form>
           )}
 
-          {/* TAB 4: PART I.B.1 CIO & ISSP FOCAL PERSON PROFILES */}
+          {/* TAB 4: PART I.B.1 CIO & ISSP SIGNATORIES (EXACT PERSON NAMES) */}
           {activeTab === "cio_focal" && (
             <form onSubmit={handleSaveNarratives} className="space-y-6 animate-fadeIn">
-              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5">
+              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5 font-serif">
                 <Users className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>Part I.B.1: Signatories &amp; Leadership Structure</span>
+                <span>Part I.B.1: Signatories &amp; Leadership Structure (Cover Page &amp; Transmittal)</span>
               </h3>
 
+              {/* CIO Profile */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
-                <span className="text-[10px] uppercase font-bold text-blue-600 dark:text-blue-400 tracking-wider block">
-                  Chief Information Officer (CIO) Profile
-                </span>
+                <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-1.5">
+                  <span className="text-[10px] uppercase font-bold text-blue-600 dark:text-blue-400 tracking-wider font-mono">
+                    Prepared By: Chief Information Officer (CIO) / ICT Director
+                  </span>
+                  <span className="text-[9.5px] text-slate-400 italic">Renders above "Name &amp; Signature of Chief Information Officer" on Cover Page</span>
+                </div>
+
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Full Name (First, MI, Last)</label>
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Full Name with Degree / Title (First, MI, Last, Post-Nominal)</label>
                     <input
                       type="text" required value={cioName} onChange={e => setCioName(e.target.value)}
-                      placeholder="e.g. Juan D. Dela Cruz"
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold outline-none"
+                      placeholder="e.g. REY T. CORTEZ, MIT"
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-bold outline-none uppercase"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Plantilla Position</label>
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Official Plantilla / Administrative Position</label>
                     <input
                       type="text" required value={cioPosition} onChange={e => setCioPosition(e.target.value)}
-                      placeholder="e.g. Director IV / Chief Information Officer"
+                      placeholder="e.g. Director, ICT Management Services / CIO"
                       className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none"
                     />
                   </div>
@@ -1723,9 +1424,39 @@ export default function NarrativeManager() {
                 </div>
               </div>
 
+              {/* Head of Agency */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
-                <span className="text-[10px] uppercase font-bold text-purple-600 dark:text-purple-400 tracking-wider block">
-                  Alternate ISSP Focal Person
+                <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-1.5">
+                  <span className="text-[10px] uppercase font-bold text-emerald-600 dark:text-emerald-400 tracking-wider font-mono">
+                    Approved By: Head of Agency / College President
+                  </span>
+                  <span className="text-[9.5px] text-slate-400 italic">Renders above "Name &amp; Signature of Agency Head" on Cover Page</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Head of Agency Full Name with Post-Nominal</label>
+                    <input
+                      type="text" required value={headOfAgencyName} onChange={e => setHeadOfAgencyName(e.target.value)}
+                      placeholder="e.g. AMADO A. OLIVA JR, PhD."
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-bold outline-none uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Official Position Title</label>
+                    <input
+                      type="text" required value={agencyHeadPosition} onChange={e => setAgencyHeadPosition(e.target.value)}
+                      placeholder="e.g. Head of Agency / College President"
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Alternate Focal Person */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
+                <span className="text-[10px] uppercase font-bold text-purple-600 dark:text-purple-400 tracking-wider block font-mono">
+                  Alternate ISSP Focal Person (Part I.B.1 Contact Card)
                 </span>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -1773,33 +1504,6 @@ export default function NarrativeManager() {
                 </div>
               </div>
 
-              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
-                <span className="text-[10px] uppercase font-bold text-emerald-600 dark:text-emerald-400 tracking-wider block">
-                  Head of Agency Signatory (Cover Page &amp; Statutory Approval)
-                </span>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Head of Agency Full Name</label>
-                    <input
-                      type="text" required value={headOfAgencyName} onChange={e => setHeadOfAgencyName(e.target.value)}
-                      placeholder="e.g. Hon. Secretary / Chairperson / Director General"
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-bold outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Official Position Title</label>
-                    <input
-                      type="text" required value={agencyHeadPosition} onChange={e => setAgencyHeadPosition(e.target.value)}
-                      placeholder="e.g. Secretary, Undersecretary, Director General, President"
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                </div>
-                <span className="text-[9.5px] text-slate-400 italic block">
-                  *Renders dynamically beneath the Agency Head's signature on Page 1 of the compiled ISSP PDF.
-                </span>
-              </div>
-
               <button
                 type="submit" disabled={submitting}
                 className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm text-xs"
@@ -1809,21 +1513,37 @@ export default function NarrativeManager() {
             </form>
           )}
 
-          {/* TAB 5: PART I.B.2 HUMAN CAPITAL MATRIX */}
+          {/* TAB 5: PART I.B.2 HUMAN CAPITAL MATRIX (FULL CRUD) */}
           {activeTab === "humancapital" && (
             <div className="space-y-6 animate-fadeIn">
-              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2">
-                Part I.B.2: Human Capital Staffing Matrix (Current vs. Proposed)
-              </h3>
+              <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2">
+                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide font-serif">
+                  Part I.B.2: Human Capital Staffing Matrix (Current vs. Proposed)
+                </h3>
+                {editingHcId && (
+                  <button 
+                    type="button" 
+                    onClick={handleCancelEditHc}
+                    className="text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer flex items-center gap-1"
+                  >
+                    <X className="w-3.5 h-3.5" /> Cancel Edit
+                  </button>
+                )}
+              </div>
 
-              <form onSubmit={handleAddHumanCapital} className="bg-slate-50 dark:bg-slate-955 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
+              <form onSubmit={handleSaveHumanCapital} className="bg-slate-50 dark:bg-slate-955 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
+                <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase tracking-wider font-mono">
+                  <span>{editingHcId ? "Edit Staffing Matrix Entry" : "Add Staffing Matrix Entry"}</span>
+                  {editingHcId && <span className="text-amber-500 font-mono">Editing Mode Active</span>}
+                </div>
+
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="text-[10px] uppercase font-bold text-slate-500">Planning Scope</label>
                     <select
                       value={hcForm.is_proposed ? "true" : "false"}
                       onChange={e => setHcForm({ ...hcForm, is_proposed: e.target.value === "true" })}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer"
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-semibold"
                     >
                       <option value="false">Part I.B.2 Current Staffing (Baseline)</option>
                       <option value="true">Part III.C Proposed Headcount</option>
@@ -1834,7 +1554,7 @@ export default function NarrativeManager() {
                     <select
                       value={hcForm.employment_status}
                       onChange={e => setHcForm({ ...hcForm, employment_status: e.target.value })}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer"
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-semibold"
                     >
                       <option value="Plantilla (Filled)">Plantilla (Filled)</option>
                       <option value="Plantilla (Unfilled)">Plantilla (Unfilled)</option>
@@ -1850,7 +1570,7 @@ export default function NarrativeManager() {
                     <input
                       type="number" min="0" required value={hcForm.it_positions_count}
                       onChange={e => setHcForm({ ...hcForm, it_positions_count: parseInt(e.target.value, 10) || 0 })}
-                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs"
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs text-center font-bold"
                     />
                   </div>
                   <div>
@@ -1858,7 +1578,7 @@ export default function NarrativeManager() {
                     <input
                       type="number" min="0" required value={hcForm.non_it_positions_count}
                       onChange={e => setHcForm({ ...hcForm, non_it_positions_count: parseInt(e.target.value, 10) || 0 })}
-                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs"
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs text-center"
                     />
                   </div>
                   <div>
@@ -1866,7 +1586,7 @@ export default function NarrativeManager() {
                     <input
                       type="number" min="0" required value={hcForm.male_count}
                       onChange={e => setHcForm({ ...hcForm, male_count: parseInt(e.target.value, 10) || 0 })}
-                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs"
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs text-center text-blue-600 dark:text-blue-400"
                     />
                   </div>
                   <div>
@@ -1874,23 +1594,34 @@ export default function NarrativeManager() {
                     <input
                       type="number" min="0" required value={hcForm.female_count}
                       onChange={e => setHcForm({ ...hcForm, female_count: parseInt(e.target.value, 10) || 0 })}
-                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs"
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs text-center text-pink-600 dark:text-pink-400"
                     />
                   </div>
                 </div>
 
-                <button
-                  type="submit" disabled={submitting}
-                  className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white transition-colors cursor-pointer text-xs shadow-sm"
-                >
-                  Record Staffing Matrix Row
-                </button>
+                <div className="flex gap-2">
+                  {editingHcId && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditHc}
+                      className="w-1/3 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold transition-colors cursor-pointer text-xs"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <button
+                    type="submit" disabled={submitting}
+                    className={`py-2.5 ${editingHcId ? "w-2/3 bg-amber-600 hover:bg-amber-500" : "w-full bg-blue-600 hover:bg-blue-500"} rounded-xl font-bold text-white transition-colors cursor-pointer text-xs shadow-sm`}
+                  >
+                    {editingHcId ? "Update Staffing Matrix Row" : "Record Staffing Matrix Row"}
+                  </button>
+                </div>
               </form>
 
               <div className="overflow-x-auto bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
-                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/60 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase tracking-wider text-[9.5px] font-mono font-bold">
+                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/60 dark:bg-slate-955 text-slate-500 dark:text-slate-400 uppercase tracking-wider text-[9.5px] font-mono font-bold">
                       <th className="p-3.5">Scope</th>
                       <th className="p-3.5">Employment Status</th>
                       <th className="p-3.5 text-center">IT</th>
@@ -1914,9 +1645,14 @@ export default function NarrativeManager() {
                         <td className="p-3.5 text-center font-mono text-blue-600 dark:text-blue-400">{hc.male_count}</td>
                         <td className="p-3.5 text-center font-mono text-pink-600 dark:text-pink-400">{hc.female_count}</td>
                         <td className="p-3.5 text-right">
-                          <button onClick={() => handleDeleteHumanCapital(hc.id)} className="p-1 hover:text-rose-600 text-slate-400 cursor-pointer">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex justify-end gap-1.5">
+                            <button onClick={() => handleStartEditHc(hc)} className="p-1 hover:text-blue-600 text-slate-400 cursor-pointer">
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => handleDeleteHumanCapital(hc.id)} className="p-1 hover:text-rose-600 text-slate-400 cursor-pointer">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1936,22 +1672,57 @@ export default function NarrativeManager() {
             </div>
           )}
 
-          {/* TAB 6: PART I.C STAKEHOLDER ANALYSIS */}
+          {/* TAB 6: PART I.C STAKEHOLDER ANALYSIS (FULL DYNAMIC CRUD) */}
           {activeTab === "stakeholders" && (
             <div className="space-y-6 animate-fadeIn">
-              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2">
-                Part I.C: Stakeholder Analysis Matrix (Processing Complexities)
-              </h3>
+              <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2">
+                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide font-serif">
+                  Part I.C: Stakeholder Analysis Matrix (Processing Complexities)
+                </h3>
+                {editingShId && (
+                  <button 
+                    type="button" 
+                    onClick={handleCancelEditStakeholder}
+                    className="text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer flex items-center gap-1"
+                  >
+                    <X className="w-3.5 h-3.5" /> Cancel Edit
+                  </button>
+                )}
+              </div>
 
-              <form onSubmit={handleAddStakeholder} className="bg-slate-50 dark:bg-slate-955 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <div className="grid grid-cols-3 gap-3">
+              {/* 1-Click Preset Strip */}
+              <div className="p-3 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
+                <span className="text-[10px] uppercase font-bold text-slate-500 font-mono block">
+                  Quick Presets: Select Canonical Government Stakeholder Group
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {STAKEHOLDER_PRESETS.map((preset, pIdx) => (
+                    <button
+                      key={pIdx}
+                      type="button"
+                      onClick={() => handleApplyStakeholderPreset(preset)}
+                      className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 hover:bg-blue-50 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-[10px] font-semibold text-slate-700 dark:text-slate-300 hover:text-blue-600 transition-colors cursor-pointer"
+                    >
+                      + {preset.group}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveStakeholder} className="bg-slate-50 dark:bg-slate-955 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
+                <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase tracking-wider font-mono">
+                  <span>{editingShId ? "Edit Stakeholder Group Analysis" : "Register Stakeholder Group"}</span>
+                  {editingShId && <span className="text-amber-500 font-mono">Editing Mode Active</span>}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Stakeholder Group</label>
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Stakeholder Group Title</label>
                     <input
                       type="text" required value={shForm.stakeholder_group}
                       onChange={e => setShForm({ ...shForm, stakeholder_group: e.target.value })}
-                      placeholder="e.g. General Citizens, Overseas Filipinos"
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
+                      placeholder="e.g. General Citizens, Students, Service Applicants"
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold text-xs outline-none focus:border-blue-500"
                     />
                   </div>
                   <div className="space-y-1">
@@ -1959,7 +1730,7 @@ export default function NarrativeManager() {
                     <select
                       value={shForm.complexity_incoming}
                       onChange={e => setShForm({ ...shForm, complexity_incoming: e.target.value })}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer"
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-medium outline-none"
                     >
                       <option value="Simple">Simple (&le; 3 Working Days)</option>
                       <option value="Complex">Complex (&le; 7 Working Days)</option>
@@ -1971,7 +1742,7 @@ export default function NarrativeManager() {
                     <select
                       value={shForm.complexity_outgoing}
                       onChange={e => setShForm({ ...shForm, complexity_outgoing: e.target.value })}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer"
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-medium outline-none"
                     >
                       <option value="Simple">Simple (&le; 3 Working Days)</option>
                       <option value="Complex">Complex (&le; 7 Working Days)</option>
@@ -1980,14 +1751,14 @@ export default function NarrativeManager() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <label className="text-[10px] uppercase font-bold text-slate-500">Incoming Transaction Processed</label>
                     <textarea
                       rows={2} required value={shForm.transaction_processed_incoming}
                       onChange={e => setShForm({ ...shForm, transaction_processed_incoming: e.target.value })}
-                      placeholder="Online service applications, statutory filings, regulatory inquiries..."
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white resize-none text-xs"
+                      placeholder="Online service applications, enrollment filings, regulatory inquiries, payment settlements..."
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white resize-none text-xs outline-none focus:border-blue-500 leading-relaxed"
                     />
                   </div>
                   <div className="space-y-1">
@@ -1995,46 +1766,78 @@ export default function NarrativeManager() {
                     <textarea
                       rows={2} required value={shForm.transaction_processed_outgoing}
                       onChange={e => setShForm({ ...shForm, transaction_processed_outgoing: e.target.value })}
-                      placeholder="Verified digital certificates, regulatory clearances, service statements..."
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white resize-none text-xs"
+                      placeholder="Verified digital certificates, grades, transcripts, regulatory clearances, official receipts..."
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white resize-none text-xs outline-none focus:border-blue-500 leading-relaxed"
                     />
                   </div>
                 </div>
 
-                <button
-                  type="submit" disabled={submitting}
-                  className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white transition-colors cursor-pointer text-xs shadow-sm"
-                >
-                  Save Stakeholder Record
-                </button>
+                <div className="flex gap-2">
+                  {editingShId && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditStakeholder}
+                      className="w-1/3 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold transition-colors cursor-pointer text-xs"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <button
+                    type="submit" disabled={submitting}
+                    className={`py-2.5 ${editingShId ? "w-2/3 bg-amber-600 hover:bg-amber-500" : "w-full bg-blue-600 hover:bg-blue-500"} rounded-xl font-bold text-white transition-colors cursor-pointer text-xs shadow-sm`}
+                  >
+                    {editingShId ? "Update Stakeholder Analysis Record" : "Save Stakeholder Analysis Record"}
+                  </button>
+                </div>
               </form>
 
               <div className="overflow-x-auto bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/60 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase tracking-wider text-[9.5px] font-mono font-bold">
-                      <th className="p-3.5">Stakeholder Group</th>
-                      <th className="p-3.5">Incoming Transaction</th>
-                      <th className="p-3.5">Outgoing Transaction</th>
+                      <th className="p-3.5 w-1/4">Stakeholder Group</th>
+                      <th className="p-3.5 w-1/3">Incoming Transaction</th>
+                      <th className="p-3.5 w-1/3">Outgoing Transaction</th>
                       <th className="p-3.5 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
                     {stakeholders.map(s => (
                       <tr key={s.id} className="hover:bg-slate-100/60 dark:hover:bg-slate-900/40 transition-colors">
-                        <td className="p-3.5 font-bold text-slate-800 dark:text-slate-200">{s.stakeholder_group}</td>
-                        <td className="p-3.5">
-                          <span className="text-slate-700 dark:text-slate-300">{s.transaction_processed_incoming}</span>
-                          <span className="block text-[9.5px] text-blue-600 dark:text-blue-400 font-mono mt-0.5 font-bold">Complexity: {s.complexity_incoming}</span>
+                        <td className="p-3.5 font-bold text-slate-800 dark:text-slate-200 align-top">
+                          {s.stakeholder_group}
                         </td>
-                        <td className="p-3.5">
-                          <span className="text-slate-700 dark:text-slate-300">{s.transaction_processed_outgoing}</span>
-                          <span className="block text-[9.5px] text-emerald-600 dark:text-emerald-400 font-mono mt-0.5 font-bold">Complexity: {s.complexity_outgoing}</span>
+                        <td className="p-3.5 align-top space-y-1">
+                          <span className="text-slate-700 dark:text-slate-300 block leading-relaxed">{s.transaction_processed_incoming}</span>
+                          <span className="inline-block text-[9.5px] text-blue-600 dark:text-blue-400 font-mono font-bold px-1.5 py-0.2 rounded bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-900">
+                            Incoming: {s.complexity_incoming || s.incoming_complexity || "Simple"}
+                          </span>
                         </td>
-                        <td className="p-3.5 text-right">
-                          <button onClick={() => handleDeleteStakeholder(s.id)} className="p-1 hover:text-rose-600 text-slate-400 cursor-pointer">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                        <td className="p-3.5 align-top space-y-1">
+                          <span className="text-slate-700 dark:text-slate-300 block leading-relaxed">{s.transaction_processed_outgoing}</span>
+                          <span className="inline-block text-[9.5px] text-emerald-600 dark:text-emerald-400 font-mono font-bold px-1.5 py-0.2 rounded bg-emerald-50 dark:bg-emerald-955 border border-emerald-200 dark:border-emerald-900">
+                            Outgoing: {s.complexity_outgoing || s.outgoing_complexity || "Simple"}
+                          </span>
+                        </td>
+                        <td className="p-3.5 text-right align-top">
+                          <div className="flex justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleStartEditStakeholder(s)}
+                              className="p-1.5 bg-white dark:bg-slate-900 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-blue-600 border border-slate-200 dark:border-slate-800 cursor-pointer"
+                              title="Edit Stakeholder Record"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteStakeholder(s.id, s.stakeholder_group)}
+                              className="p-1.5 bg-white dark:bg-slate-900 hover:bg-rose-50 rounded-lg text-slate-500 hover:text-rose-600 border border-slate-200 dark:border-slate-800 cursor-pointer"
+                              title="Delete Record"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -2044,34 +1847,51 @@ export default function NarrativeManager() {
             </div>
           )}
 
-          {/* TAB 7: PART II.B & III.A NETWORK INFRASTRUCTURE & CYBERSECURITY CHECKLIST */}
-          {activeTab === "network_cyber" && (
+          {/* TAB 7: PART II.B.1 & III.A.1 NETWORK INFRASTRUCTURE PROFILES */}
+          {activeTab === "network" && (
             <div className="space-y-6 animate-fadeIn">
               <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
-                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1.5">
+                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1.5 font-serif">
                   <Network className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                  <span>Parts II.B &amp; III.A: Network Infrastructure &amp; Cybersecurity Controls</span>
+                  <span>Parts II.B.1 &amp; III.A.1: Network Infrastructure Specifications</span>
                 </h3>
+              </div>
 
-                {/* 1-Click Seed/Restore All 29 Official DICT Controls */}
+              {/* Callout Link to Framework Checklists for Cybersecurity Controls */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3 shadow-xs">
+                <div className="space-y-0.5">
+                  <span className="font-bold text-slate-900 dark:text-white text-xs flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <span>Cybersecurity Control Checklists (Parts II.B.2 &amp; III.A.2)</span>
+                  </span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Looking to manage the 29 Official DICT Cybersecurity Controls? Checklists are centrally managed in the dedicated compliance module.
+                  </p>
+                </div>
                 <button
                   type="button"
-                  onClick={handleSeedDefaultControls}
-                  disabled={seedingControls}
-                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs font-mono text-[10px]"
-                  title="Initialize all 20 Mandatory and 9 Optional DICT standard controls across all 7 security domains"
+                  onClick={() => navigate("/admin/framework")}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-sm shrink-0"
                 >
-                  <Sparkles className={`w-3.5 h-3.5 ${seedingControls ? "animate-spin" : ""}`} />
-                  <span>{seedingControls ? "Restoring Controls..." : "Restore All 29 Official DICT Controls"}</span>
+                  <span>Manage in Compliance Checklists</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               </div>
 
-              {/* 1. LAN/WAN Infrastructure Setup (II.B.1 & III.A.1) */}
+              {/* LAN/WAN Infrastructure Setup Form */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
-                  1. LAN/WAN Infrastructure Specifications (II.B.1 &amp; III.A.1)
-                </span>
-                <form onSubmit={handleAddNetworkInfra} className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
+                    Configure LAN/WAN Infrastructure Setup Profile
+                  </span>
+                  {editingNetId && (
+                    <button type="button" onClick={handleCancelEditNet} className="text-[10px] text-slate-400 hover:text-white font-bold cursor-pointer">
+                      Cancel Edit
+                    </button>
+                  )}
+                </div>
+
+                <form onSubmit={handleSaveNetworkInfra} className="space-y-3">
                   <div className="grid grid-cols-3 gap-3">
                     <div>
                       <label className="text-[10px] uppercase font-bold text-slate-500">Planning State</label>
@@ -2089,7 +1909,7 @@ export default function NarrativeManager() {
                       <input
                         type="text" required value={netForm.office_location}
                         onChange={e => setNetForm({ ...netForm, office_location: e.target.value })}
-                        placeholder="e.g. Central Office / Main Datacenter"
+                        placeholder="e.g. Central Campus / Main Data Center"
                         className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
                       />
                     </div>
@@ -2110,7 +1930,7 @@ export default function NarrativeManager() {
                       <input
                         type="number" min="1" required value={netForm.bandwidth_mbps}
                         onChange={e => setNetForm({ ...netForm, bandwidth_mbps: parseInt(e.target.value, 10) || 0 })}
-                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs font-bold"
+                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs font-bold text-center"
                       />
                     </div>
                     <div>
@@ -2118,7 +1938,7 @@ export default function NarrativeManager() {
                       <input
                         type="number" min="1" required value={netForm.upload_speed_mbps}
                         onChange={e => setNetForm({ ...netForm, upload_speed_mbps: parseInt(e.target.value, 10) || 0 })}
-                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs text-center"
                       />
                     </div>
                     <div>
@@ -2126,7 +1946,7 @@ export default function NarrativeManager() {
                       <input
                         type="number" min="1" required value={netForm.download_speed_mbps}
                         onChange={e => setNetForm({ ...netForm, download_speed_mbps: parseInt(e.target.value, 10) || 0 })}
-                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs text-center"
                       />
                     </div>
                     <div className="flex items-center gap-2 pt-4">
@@ -2144,422 +1964,78 @@ export default function NarrativeManager() {
                     <textarea
                       rows={2} required value={netForm.topology_description}
                       onChange={e => setNetForm({ ...netForm, topology_description: e.target.value })}
-                      placeholder="Core switch distribution, fiber optic distribution backbone, SD-WAN router links..."
+                      placeholder="Core switch distribution, 10G optical fiber backbone, redundant border routers, SD-WAN links..."
                       className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white resize-none text-xs"
                     />
                   </div>
 
-                  <button type="submit" className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white cursor-pointer shadow-sm text-xs">
-                    Save Network Setup Profile
-                  </button>
+                  <div className="flex gap-2">
+                    {editingNetId && (
+                      <button type="button" onClick={handleCancelEditNet} className="w-1/3 py-2.5 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl font-bold cursor-pointer text-xs">
+                        Cancel
+                      </button>
+                    )}
+                    <button type="submit" className={`py-2.5 ${editingNetId ? "w-2/3 bg-amber-600 hover:bg-amber-500" : "w-full bg-blue-600 hover:bg-blue-500"} rounded-xl font-bold text-white cursor-pointer shadow-sm text-xs`}>
+                      {editingNetId ? "Update Network Setup Profile" : "Save Network Setup Profile"}
+                    </button>
+                  </div>
                 </form>
 
-                <div className="space-y-1.5 max-h-36 overflow-y-auto pt-2">
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pt-2">
                   {networkInfraList.map(n => (
                     <div key={n.id} className="p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl flex justify-between items-center text-xs shadow-2xs">
                       <div>
-                        <span className={`px-2 py-0.5 text-[8.5px] font-bold rounded-full uppercase mr-2 ${n.is_proposed ? "bg-purple-50 text-purple-700 border border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20" : "bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20"}`}>
+                        <span className={`px-2 py-0.5 text-[8.5px] font-bold rounded-full uppercase mr-2 font-mono ${n.is_proposed ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20" : "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20"}`}>
                           {n.is_proposed ? "Proposed" : "Existing"}
                         </span>
                         <strong>{n.office_location || "Central Office"}:</strong> {n.connectivity_type} ({n.bandwidth_mbps} Mbps) - IPv6: {n.is_ipv6_ready ? "Yes" : "No"}
                       </div>
-                      <button onClick={() => handleDeleteNetworkInfra(n.id)} className="text-slate-400 hover:text-rose-600 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
+                      <div className="flex gap-1.5">
+                        <button onClick={() => handleStartEditNet(n)} className="text-slate-400 hover:text-blue-600 cursor-pointer"><Edit3 className="w-3.5 h-3.5" /></button>
+                        <button onClick={() => handleDeleteNetworkInfra(n.id)} className="text-slate-400 hover:text-rose-600 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
-
-              {/* 2. Official Cybersecurity Controls Checklist Section (MANDATORY vs OPTIONAL Split) */}
-              <div className="p-5 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
-                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
-                  <div>
-                    <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
-                      2. Cybersecurity Control Checklist (Template Pages 10 &amp; 17)
-                    </span>
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      Classifies controls into the official 3-column table across all 7 Security Domains.
-                    </p>
-                  </div>
-
-                  {/* Existing vs Proposed Controls View Switcher */}
-                  <div className="flex bg-white dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xs">
-                    <button
-                      type="button"
-                      onClick={() => setCyberViewProposed(false)}
-                      className={`px-3 py-1 text-[10px] font-bold rounded-lg transition-all cursor-pointer ${
-                        !cyberViewProposed 
-                          ? "bg-blue-600 text-white shadow-xs" 
-                          : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
-                      }`}
-                    >
-                      Part II.B.2 Existing Checklist
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCyberViewProposed(true)}
-                      className={`px-3 py-1 text-[10px] font-bold rounded-lg transition-all cursor-pointer ${
-                        cyberViewProposed 
-                          ? "bg-purple-600 text-white shadow-xs" 
-                          : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
-                      }`}
-                    >
-                      Part III.A.2 Proposed Checklist
-                    </button>
-                  </div>
-                </div>
-
-                {/* Control Insertion Form with Mandatory vs. Optional Section Selector */}
-                <form onSubmit={handleAddCyberControl} className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-2xs">
-                  <span className="text-[9.5px] uppercase font-bold text-slate-500 tracking-wider block">
-                    Add / Configure Security Control
-                  </span>
-
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                    {/* Planning State */}
-                    <div className="space-y-1">
-                      <label className="text-[9.5px] uppercase font-bold text-slate-500">Planning State</label>
-                      <select
-                        value={cyberForm.is_proposed ? "true" : "false"}
-                        onChange={e => setCyberForm({ ...cyberForm, is_proposed: e.target.value === "true" })}
-                        className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-medium"
-                      >
-                        <option value="false">Part II.B.2 Existing Control</option>
-                        <option value="true">Part III.A.2 Proposed Control</option>
-                      </select>
-                    </div>
-
-                    {/* Security Domain */}
-                    <div className="space-y-1">
-                      <label className="text-[9.5px] uppercase font-bold text-slate-500">Security Domain</label>
-                      <select
-                        value={cyberForm.control_domain}
-                        onChange={e => handleDomainOrTierChange(e.target.value, cyberForm.control_tier)}
-                        className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-medium"
-                      >
-                        {STANDARD_DOMAINS.map(dom => (
-                          <option key={dom} value={dom}>{dom}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Control Tier / Section Selector (MANDATORY vs OPTIONAL) */}
-                    <div className="space-y-1">
-                      <label className="text-[9.5px] uppercase font-bold text-slate-500">Control Tier / Column</label>
-                      <select
-                        value={cyberForm.control_tier}
-                        onChange={e => handleDomainOrTierChange(cyberForm.control_domain, e.target.value)}
-                        className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-bold"
-                      >
-                        <option value="mandatory">MANDATORY Column (DICT Baseline)</option>
-                        <option value="optional">OPTIONAL Column (Advanced / Elective)</option>
-                      </select>
-                    </div>
-
-                    {/* Standard DICT Control Picker Dropdown */}
-                    <div className="space-y-1">
-                      <label className="text-[9.5px] uppercase font-bold text-slate-500">Standard DICT Control</label>
-                      <select
-                        value={cyberForm.selected_standard}
-                        onChange={e => {
-                          const val = e.target.value;
-                          setCyberForm(prev => ({
-                            ...prev,
-                            selected_standard: val,
-                            control_name: val === "__custom__" ? "" : val
-                          }));
-                        }}
-                        className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 text-xs cursor-pointer font-medium"
-                      >
-                        {availableStandardControls.map(cName => (
-                          <option key={cName} value={cName}>{cName}</option>
-                        ))}
-                        <option value="__custom__">-- Custom Control Name... --</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Name Input & Active Status */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-center pt-1">
-                    <div className="md:col-span-2 space-y-1">
-                      <label className="text-[9.5px] uppercase font-bold text-slate-500">
-                        {cyberForm.selected_standard === "__custom__" ? "Custom Control Name" : "Effective Control Label"}
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={cyberForm.control_name}
-                        onChange={e => setCyberForm({ ...cyberForm, control_name: e.target.value })}
-                        placeholder="e.g. Next-Gen Firewalls or Biometrics"
-                        className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs font-semibold"
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between p-2.5 bg-slate-50 dark:bg-slate-955 rounded-lg border border-slate-200 dark:border-slate-800">
-                      <div className="space-y-0.5">
-                        <span className="text-[10px] font-bold text-slate-800 dark:text-slate-200 block">Implementation State</span>
-                        <span className="text-[9px] text-slate-400 block">[X] Active vs [ ] Planned</span>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={cyberForm.is_implemented}
-                        onChange={e => setCyberForm({ ...cyberForm, is_implemented: e.target.checked })}
-                        className="w-4 h-4 accent-emerald-600 rounded cursor-pointer"
-                      />
-                    </div>
-                  </div>
-
-                  <button 
-                    type="submit" 
-                    className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold cursor-pointer transition-colors shadow-sm text-xs flex items-center justify-center gap-1.5"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Save Control to {cyberForm.control_tier === "mandatory" ? "MANDATORY" : "OPTIONAL"} Section</span>
-                  </button>
-                </form>
-
-                {/* Official DICT 3-Column Interactive Table (Security Domain | MANDATORY | OPTIONAL) */}
-                <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-955 text-slate-600 dark:text-slate-300 font-bold uppercase text-[9.5px] font-mono">
-                        <th className="p-3.5 w-1/4 border-r border-slate-200 dark:border-slate-800">Security Domain</th>
-                        <th className="p-3.5 w-2/5 border-r border-slate-200 dark:border-slate-800 text-blue-700 dark:text-blue-400">
-                          MANDATORY Controls
-                        </th>
-                        <th className="p-3.5 w-[35%] text-purple-700 dark:text-purple-400">
-                          OPTIONAL Controls
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-850 text-[11px]">
-                      {uniqueDomains.map(domain => {
-                        const domainControls = activeCyberControls.filter(
-                          c => (c.control_domain || "").toLowerCase().trim() === domain.toLowerCase().trim()
-                        );
-                        const mandatoryControls = domainControls.filter(c => c.is_mandatory);
-                        const optionalControls = domainControls.filter(c => !c.is_mandatory);
-
-                        return (
-                          <tr key={domain} className="hover:bg-slate-50/70 dark:hover:bg-slate-955/30 transition-colors">
-                            {/* Security Domain Column */}
-                            <td className="p-3.5 font-bold text-slate-900 dark:text-slate-100 uppercase tracking-wide border-r border-slate-200 dark:border-slate-800 align-top bg-slate-50/50 dark:bg-slate-955/50 font-mono text-[10px]">
-                              {domain}
-                            </td>
-
-                            {/* MANDATORY Controls Column */}
-                            <td className="p-3.5 border-r border-slate-200 dark:border-slate-800 align-top space-y-1.5">
-                              {mandatoryControls.length > 0 ? (
-                                mandatoryControls.map(c => (
-                                  <div key={c.id} className="flex items-center justify-between p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 group transition-colors">
-                                    <button
-                                      type="button"
-                                      onClick={() => handleToggleCyberImplemented(c)}
-                                      className="flex items-center gap-2 cursor-pointer text-left flex-1 select-none"
-                                      title="Click to toggle [X] Active / [ ] Inactive state"
-                                    >
-                                      <span className={`font-mono font-bold text-[10px] px-1.5 py-0.2 rounded border ${
-                                        c.is_implemented 
-                                          ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20" 
-                                          : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400"
-                                      }`}>
-                                        {c.is_implemented ? "[X]" : "[ ]"}
-                                      </span>
-                                      <span className={`font-medium ${c.is_implemented ? "text-slate-900 dark:text-white" : "text-slate-500"}`}>
-                                        {c.control_name}
-                                      </span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeleteCyberControl(c.id)}
-                                      className="p-1 text-slate-400 hover:text-rose-600 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-                                      title="Delete control"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </button>
-                                  </div>
-                                ))
-                              ) : (
-                                <span className="text-slate-400 italic text-[10px]">No mandatory controls configured</span>
-                              )}
-                            </td>
-
-                            {/* OPTIONAL Controls Column */}
-                            <td className="p-3.5 align-top space-y-1.5">
-                              {optionalControls.length > 0 ? (
-                                optionalControls.map(c => (
-                                  <div key={c.id} className="flex items-center justify-between p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 group transition-colors">
-                                    <button
-                                      type="button"
-                                      onClick={() => handleToggleCyberImplemented(c)}
-                                      className="flex items-center gap-2 cursor-pointer text-left flex-1 select-none"
-                                      title="Click to toggle [X] Active / [ ] Inactive state"
-                                    >
-                                      <span className={`font-mono font-bold text-[10px] px-1.5 py-0.2 rounded border ${
-                                        c.is_implemented 
-                                          ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20" 
-                                          : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400"
-                                      }`}>
-                                        {c.is_implemented ? "[X]" : "[ ]"}
-                                      </span>
-                                      <span className={`font-medium ${c.is_implemented ? "text-slate-900 dark:text-white" : "text-slate-500"}`}>
-                                        {c.control_name}
-                                      </span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeleteCyberControl(c.id)}
-                                      className="p-1 text-slate-400 hover:text-rose-600 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-                                      title="Delete control"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </button>
-                                  </div>
-                                ))
-                              ) : (
-                                <span className="text-slate-400 italic text-[10px]">None specified</span>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
             </div>
           )}
 
-          {/* TAB 8: PART II.D E-GOVERNMENT PROGRAMS CHECKLIST */}
-          {activeTab === "egov" && (
-            <div className="space-y-6 animate-fadeIn">
-              <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2">
-                Part II.D: National E-Government Programs (EGP) Checklist
-              </h3>
-
-              <form onSubmit={handleAddEgov} className="bg-slate-50 dark:bg-slate-955 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">National Initiative</label>
-                    <select
-                      value={egForm.program_name}
-                      onChange={e => setEgForm({ ...egForm, program_name: e.target.value })}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer"
-                    >
-                      <option value="eGovPay">eGovPay (Payment Gateway)</option>
-                      <option value="PNPKI">PNPKI (Digital Signatures)</option>
-                      <option value="eLGU">eLGU (Local Govt Unit Platform)</option>
-                      <option value="HCMIS">HCMIS (Human Capital IS)</option>
-                      <option value="IFMIS">IFMIS (Financial Management IS)</option>
-                      <option value="Online Public Service Portal">Online Public Service Portal</option>
-                      <option value="PhilGEPS">PhilGEPS (Procurement System)</option>
-                      <option value="Records">Records &amp; Knowledge Repository</option>
-                      <option value="Public Service Continuity Plan">Public Service Continuity Plan</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Adoption State</label>
-                    <select
-                      value={egForm.is_utilized ? "true" : "false"}
-                      onChange={e => setEgForm({ ...egForm, is_utilized: e.target.value === "true" })}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer"
-                    >
-                      <option value="true">Actively Utilized (National Portal)</option>
-                      <option value="false">Using Equivalent / Manual Process</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Portal URL / Identifier</label>
-                    <input
-                      type="text" value={egForm.url_or_system_name}
-                      onChange={e => setEgForm({ ...egForm, url_or_system_name: e.target.value })}
-                      placeholder="e.g. egovpay.gov.ph"
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Adoption Ratio (PNPKI)</label>
-                    <input
-                      type="text" value={egForm.adoption_ratio}
-                      onChange={e => setEgForm({ ...egForm, adoption_ratio: e.target.value })}
-                      placeholder="e.g. 75% of eligible officials with active certs"
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                    />
-                  </div>
-                  <div className="flex items-center gap-2 pt-4">
-                    <input
-                      type="checkbox" id="portal_cb" checked={egForm.is_connected_to_portal}
-                      onChange={e => setEgForm({ ...egForm, is_connected_to_portal: e.target.checked })}
-                      className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
-                    />
-                    <label htmlFor="portal_cb" className="font-bold text-slate-700 dark:text-slate-300 cursor-pointer">Connected to Online Public Portals?</label>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-slate-500">Equivalent System or Non-Adoption Details</label>
-                  <input
-                    type="text" value={egForm.equivalent_system_details}
-                    onChange={e => setEgForm({ ...egForm, equivalent_system_details: e.target.value })}
-                    placeholder="Provide details if utilizing an equivalent system or manual processes..."
-                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                  />
-                </div>
-
-                <button
-                  type="submit" disabled={submitting}
-                  className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white transition-colors cursor-pointer shadow-sm text-xs"
-                >
-                  Save EGP Checklist Status
-                </button>
-              </form>
-
-              <div className="overflow-x-auto bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/60 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase tracking-wider text-[9.5px] font-mono font-bold">
-                      <th className="p-3.5">Program</th>
-                      <th className="p-3.5 text-center">Status</th>
-                      <th className="p-3.5">System URL / Name</th>
-                      <th className="p-3.5">Equivalent Justification</th>
-                      <th className="p-3.5 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
-                    {egovChecklists.map(eg => (
-                      <tr key={eg.id} className="hover:bg-slate-100/60 dark:hover:bg-slate-900/40 transition-colors">
-                        <td className="p-3.5 font-bold text-slate-800 dark:text-slate-200">{eg.program_name}</td>
-                        <td className="p-3.5 text-center font-bold text-blue-600 dark:text-blue-400 font-mono">{eg.is_utilized ? "[✓] Utilized" : "[X] Non-Adoption"}</td>
-                        <td className="p-3.5 font-mono text-slate-700 dark:text-slate-300">{eg.url_or_system_name || "N/A"}</td>
-                        <td className="p-3.5 text-slate-500 dark:text-slate-400">{eg.equivalent_system_details || "N/A"}</td>
-                        <td className="p-3.5 text-right">
-                          <button onClick={() => handleDeleteEgov(eg.id)} className="p-1 hover:text-rose-600 text-slate-400 cursor-pointer">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 9: ANNEX 2 DISASTER RECOVERY & BUSINESS CONTINUITY (SECTIONS 1 TO 6 DYNAMIC) */}
+          {/* TAB 8: ANNEX 2 DISASTER RECOVERY & BUSINESS CONTINUITY (NARRATIVE CORE) */}
           {activeTab === "drbcp" && (
             <div className="space-y-6 animate-fadeIn">
               <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2">
-                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1.5">
+                <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1.5 font-serif">
                   <ShieldAlert className="w-4 h-4 text-rose-500" />
-                  <span>Annex 2: Disaster Recovery &amp; Business Continuity Plan (DRBCP)</span>
+                  <span>Annex 2: Disaster Recovery &amp; Business Continuity Plan (DRBCP - Plain Text Core)</span>
                 </h3>
                 <span className="text-[10px] text-slate-500 font-mono">Governed under DICT / ISO 22301 Standards</span>
               </div>
 
+              {/* Callout Link to Framework Checklists for DRT, BIA & KPIs */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3 shadow-xs">
+                <div className="space-y-0.5">
+                  <span className="font-bold text-slate-900 dark:text-white text-xs flex items-center gap-1.5">
+                    <Layers className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                    <span>Disaster Recovery Teams, BIA &amp; KPIs Registry</span>
+                  </span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Manage DRT personnel assignments, Business Impact Analysis (BIA) system targets, and DRBCP KPIs under the dedicated compliance checklists module.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate("/admin/framework")}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-sm shrink-0"
+                >
+                  <span>Manage in Compliance Checklists</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Plan Overview & Approval Date */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block">
+                <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
                   Plan Overview &amp; Official Governance Approval Date (Template Annex 2 Page 1)
                 </span>
                 
@@ -2572,7 +2048,7 @@ export default function NarrativeManager() {
                         type="text"
                         value={drbcpApprovalDate}
                         onChange={e => setDrbcpApprovalDate(e.target.value)}
-                        placeholder="e.g. March 15, 2026"
+                        placeholder="e.g. October 06, 2026"
                         className="w-full pl-9 p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
                       />
                     </div>
@@ -2599,90 +2075,10 @@ export default function NarrativeManager() {
                 </button>
               </div>
 
+              {/* Affected Assets */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block">1. Disaster Recovery Team (DRT)</span>
-                <form onSubmit={handleAddDrTeam} className="grid grid-cols-2 gap-3">
-                  <input
-                    type="text" required placeholder="Role (e.g. Incident Commander)"
-                    value={drTeamForm.role} onChange={e => setDrTeamForm({ ...drTeamForm, role: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                  />
-                  <input
-                    type="text" required placeholder="Contact Person"
-                    value={drTeamForm.contact_person} onChange={e => setDrTeamForm({ ...drTeamForm, contact_person: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                  />
-                  <input
-                    type="text" required placeholder="Responsibility details"
-                    value={drTeamForm.responsibility} onChange={e => setDrTeamForm({ ...drTeamForm, responsibility: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white col-span-2 text-xs"
-                  />
-                  <input
-                    type="text" required placeholder="24/7 Contact Details"
-                    value={drTeamForm.contact_details} onChange={e => setDrTeamForm({ ...drTeamForm, contact_details: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
-                  />
-                  <button type="submit" className="py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white cursor-pointer shadow-sm text-xs">
-                    Add DRT Member
-                  </button>
-                </form>
-
-                <div className="space-y-1.5 max-h-32 overflow-y-auto pt-1">
-                  {drTeam.map(m => (
-                    <div key={m.id} className="flex justify-between items-center p-2.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 text-xs shadow-2xs">
-                      <span><strong>{m.role}:</strong> {m.contact_person} ({m.contact_details})</span>
-                      <button onClick={() => handleDeleteDrTeam(m.id)} className="text-slate-400 hover:text-rose-600 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider block">2. Business Impact Analysis (BIA Summary)</span>
-                <form onSubmit={handleAddDrBia} className="grid grid-cols-3 gap-3">
-                  <input
-                    type="text" required placeholder="Mission-Critical System Name"
-                    value={drBiaForm.system_name} onChange={e => setDrBiaForm({ ...drBiaForm, system_name: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white col-span-2 text-xs"
-                  />
-                  <input
-                    type="text" required placeholder="Classification"
-                    value={drBiaForm.classification} onChange={e => setDrBiaForm({ ...drBiaForm, classification: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                  />
-                  <input
-                    type="number" min="0" required placeholder="MTPD (Hours)"
-                    value={drBiaForm.mtpd_hours} onChange={e => setDrBiaForm({ ...drBiaForm, mtpd_hours: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
-                  />
-                  <input
-                    type="number" min="0" required placeholder="RTO (Hours)"
-                    value={drBiaForm.rto_hours} onChange={e => setDrBiaForm({ ...drBiaForm, rto_hours: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
-                  />
-                  <input
-                    type="number" min="0" required placeholder="RPO (Hours)"
-                    value={drBiaForm.rpo_hours} onChange={e => setDrBiaForm({ ...drBiaForm, rpo_hours: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
-                  />
-                  <button type="submit" className="col-span-3 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white cursor-pointer shadow-sm text-xs">
-                    Save BIA Target (RTO &le; 4h mandates GovCloud Continuing Outlays)
-                  </button>
-                </form>
-
-                <div className="space-y-1.5 max-h-32 overflow-y-auto pt-1">
-                  {drBia.map(b => (
-                    <div key={b.id} className="flex justify-between items-center p-2.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 text-xs shadow-2xs">
-                      <span><strong>{b.system_name}</strong> - RTO: {b.rto_hours}h | RPO: {b.rpo_hours}h | MTPD: {b.mtpd_hours}h</span>
-                      <button onClick={() => handleDeleteDrBia(b.id)} className="text-slate-400 hover:text-rose-600 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block">
-                  3. ICT Component Inventory &amp; Affected Assets (Dynamic Section)
+                <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
+                  3. ICT Component Inventory &amp; Affected Assets (Structured List)
                 </span>
                 
                 <div className="grid grid-cols-3 gap-3">
@@ -2695,7 +2091,7 @@ export default function NarrativeManager() {
                   />
                   <input
                     type="text"
-                    placeholder="Physical servers, SAN storage, optical fiber backbone..."
+                    placeholder="Physical enterprise servers, SAN storage, optical fiber backbone..."
                     value={newAssetDetails}
                     onChange={e => setNewAssetDetails(e.target.value)}
                     className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white col-span-2 text-xs"
@@ -2725,120 +2121,94 @@ export default function NarrativeManager() {
                 </div>
               </div>
 
+              {/* 4 & 5. Technical Recovery Strategy & SOP Operational Phases */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
-                <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider block">
-                  4 &amp; 5. Technical Recovery Strategy &amp; SOP Operational Phases
+                <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider block font-mono">
+                  4 &amp; 5. Technical Recovery Strategy &amp; SOP Operational Phases (Plain Text)
                 </span>
 
                 <div className="space-y-1.5">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">4. Technical Recovery Strategy (HTML or Text)</label>
+                  <label className="text-[10px] uppercase font-bold text-slate-500">4. Technical Recovery Strategy</label>
                   <textarea
-                    rows={3}
+                    rows={4}
                     value={drRecoveryStrategy}
                     onChange={e => setDrRecoveryStrategy(e.target.value)}
-                    placeholder="1. Off-site Backups: Maintained in a secondary facility (>30km). 2. Cloud Failover: Critical portals replicated to GovCloud..."
-                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs outline-none resize-none focus:border-blue-500"
+                    placeholder="1. Off-site Backups: Maintained in a secondary facility (>30km away).&#10;2. Cloud Failover: Critical public service and administrative portals replicated off-site.&#10;3. Redundancy: Dual-ISP providers in active-passive load distribution."
+                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500 leading-relaxed font-sans"
                   />
                 </div>
 
                 <div className="space-y-1.5">
                   <label className="text-[10px] uppercase font-bold text-slate-500">5. Standard Operating Procedures (SOP Phases)</label>
                   <textarea
-                    rows={3}
+                    rows={4}
                     value={drSopPhases}
                     onChange={e => setDrSopPhases(e.target.value)}
-                    placeholder="Phase I: Detection & Declaration. Phase II: Activation & Execution. Phase III: Failback (Normal Operations)..."
-                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs outline-none resize-none focus:border-blue-500"
+                    placeholder="Phase I: Detection & Declaration: Monitoring alerts evaluated; Incident Commander activates DRBCP within 1 hour.&#10;Phase II: Activation & Execution: DRT redirected to standby cloud instances and off-site replication storage.&#10;Phase III: Failback: Primary campus datacenter restored; database deltas synchronized."
+                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500 leading-relaxed font-sans"
                   />
                 </div>
               </div>
 
+              {/* 6. Clean Plain-Text 4-Pillars Compliance Policies */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
-                <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2">
-                  <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">
-                    6. Compliance, Scalability &amp; Sustainability Policies (MITHI Res. 2025-01 / SPAR)
-                  </span>
-                  
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!customHtmlMode) {
-                        setRawSec6Html(buildSection6Html());
-                      }
-                      setCustomHtmlMode(!customHtmlMode);
-                    }}
-                    className="flex items-center gap-1 text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-                  >
-                    <Code className="w-3 h-3" />
-                    <span>{customHtmlMode ? "Switch to 4-Pillar Mode" : "Switch to Raw HTML Mode"}</span>
-                  </button>
-                </div>
+                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block font-mono">
+                  6. Compliance, Scalability &amp; Sustainability Policies (MITHI Res. 2025-01 / SPAR 4 Pillars - Plain Text)
+                </span>
 
-                {!customHtmlMode ? (
-                  <div className="space-y-3 animate-fadeIn">
-                    <div className="space-y-1">
-                      <label className="text-[10px] uppercase font-bold text-slate-500">
-                        6.1 Cybersecurity Integration Policy
-                      </label>
-                      <textarea
-                        rows={2}
-                        value={sec6CyberIntegration}
-                        onChange={e => setSec6CyberIntegration(e.target.value)}
-                        placeholder="Describe procedures to isolate compromised networks, sanitize environments, and restore verified clean snapshots following ransomware or cyber-attack events..."
-                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs"
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[10px] uppercase font-bold text-slate-500">
-                        6.2 Testing &amp; Maintenance Drills Mandate
-                      </label>
-                      <textarea
-                        rows={2}
-                        value={sec6DrillsTesting}
-                        onChange={e => setSec6DrillsTesting(e.target.value)}
-                        placeholder="Mandate the frequency of full-scale DR simulation drills (min 1 per year) and tabletop walkthroughs..."
-                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs"
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[10px] uppercase font-bold text-slate-500">
-                        6.3 Audit &amp; Review Governance Schedule
-                      </label>
-                      <textarea
-                        rows={2}
-                        value={sec6AuditReview}
-                        onChange={e => setSec6AuditReview(e.target.value)}
-                        placeholder="Define periodic review cycles (annual / post-migration audit trigger)..."
-                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs"
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[10px] uppercase font-bold text-slate-500">
-                        6.4 UACS &amp; Budgeting Support Alignment
-                      </label>
-                      <textarea
-                        rows={2}
-                        value={sec6BudgetSupport}
-                        onChange={e => setSec6BudgetSupport(e.target.value)}
-                        placeholder="Detail how GovCloud standby compute, off-site storage, and leased circuits are funded under Continuing Costs in Part IV.A..."
-                        className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs"
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-1.5 animate-fadeIn">
-                    <label className="text-[10px] uppercase font-bold text-slate-500">Custom Section 6 HTML Source</label>
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">
+                      6.1 Cybersecurity Integration Policy
+                    </label>
                     <textarea
-                      rows={8}
-                      value={rawSec6Html}
-                      onChange={e => setRawSec6Html(e.target.value)}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl font-mono text-xs text-slate-900 dark:text-white outline-none"
+                      rows={2}
+                      value={sec6CyberIntegration}
+                      onChange={e => setSec6CyberIntegration(e.target.value)}
+                      placeholder="Describe procedures to isolate compromised networks, sanitize environments, and restore verified clean snapshots following ransomware or cyber-attack events..."
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
                     />
                   </div>
-                )}
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">
+                      6.2 Testing &amp; Maintenance Drills Mandate
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={sec6DrillsTesting}
+                      onChange={e => setSec6DrillsTesting(e.target.value)}
+                      placeholder="Mandate the frequency of full-scale DR simulation drills (min 1 per year) and tabletop walkthroughs..."
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">
+                      6.3 Audit &amp; Review Governance Schedule
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={sec6AuditReview}
+                      onChange={e => setSec6AuditReview(e.target.value)}
+                      placeholder="Define periodic review cycles (annual / post-migration audit trigger)..."
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">
+                      6.4 UACS &amp; Budgeting Support Alignment
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={sec6BudgetSupport}
+                      onChange={e => setSec6BudgetSupport(e.target.value)}
+                      placeholder="Detail how standby compute, off-site storage, and leased circuits are funded under Continuing Costs in Part IV.A..."
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
+                    />
+                  </div>
+                </div>
 
                 <button
                   type="button"
@@ -2849,136 +2219,121 @@ export default function NarrativeManager() {
                   <Save className="w-4 h-4" /> <span>Save Recovery Strategies &amp; Compliance Policies</span>
                 </button>
               </div>
-
-              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">
-                  DRBCP Key Performance Indicators (SPAR Reporting)
-                </span>
-                
-                <form onSubmit={handleAddDrMetric} className="grid grid-cols-2 gap-3">
-                  <input
-                    type="text"
-                    required
-                    placeholder="Indicator (e.g. System Availability)"
-                    value={drMetricsForm.indicator}
-                    onChange={e => setDrMetricsForm({ ...drMetricsForm, indicator: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                  />
-                  <input
-                    type="text"
-                    required
-                    placeholder="Target Metric (e.g. 99.9% Up-time)"
-                    value={drMetricsForm.target_metric}
-                    onChange={e => setDrMetricsForm({ ...drMetricsForm, target_metric: e.target.value })}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                  />
-                  <button
-                    type="submit"
-                    className="col-span-2 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white cursor-pointer shadow-sm text-xs"
-                  >
-                    Add DR KPI Target
-                  </button>
-                </form>
-
-                <div className="space-y-1.5 max-h-36 overflow-y-auto pt-1">
-                  {drMetrics.map(kpi => (
-                    <div key={kpi.id} className="flex justify-between items-center p-2.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 text-xs shadow-2xs">
-                      <div>
-                        <strong className="text-slate-900 dark:text-white">{kpi.indicator}:</strong>
-                        <span className="text-emerald-600 dark:text-emerald-400 font-bold ml-1.5">{kpi.target_metric}</span>
-                      </div>
-                      <button onClick={() => handleDeleteDrMetric(kpi.id)} className="text-slate-400 hover:text-rose-600 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
             </div>
           )}
 
-          {/* TAB 10: DYNAMIC DOCUMENT TREE SKELETON */}
-          {activeTab === "tree" && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-fadeIn">
-              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
-                <span className="text-[10px] uppercase font-bold text-slate-500 block">Skeletal Document Tree</span>
-                {loadingTree ? <RefreshCw className="w-5 h-5 animate-spin mx-auto text-blue-500" /> : renderTree(nodes)}
+          {/* TAB 9: COMPLIANCE CHECKLISTS READ-ONLY OVERVIEW & DIRECT ROUTING */}
+          {activeTab === "checklists" && (
+            <div className="space-y-6 animate-fadeIn">
+              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+                <div>
+                  <h3 className="font-bold text-xs uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2 font-serif">
+                    <SlidersHorizontal className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <span>Compliance Framework &amp; Checklists Overview</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Parts II.B.2, II.D, III.A.2, and Annex 2 checklists are centrally managed in the dedicated compliance module.
+                  </p>
+                </div>
 
-                {selectedNode && (
-                  <form onSubmit={handleCreateChildNode} className="border-t border-slate-200 dark:border-slate-800 pt-3 space-y-2">
-                    <input
-                      type="text" placeholder="Child section name..."
-                      value={newNodeName} onChange={e => setNewNodeName(e.target.value)}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
-                    />
-                    <button type="submit" className="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-white font-bold cursor-pointer text-xs shadow-sm">
-                      Append Subsection
-                    </button>
-                  </form>
-                )}
+                {/* Centralized Redirect Action Button */}
+                <button
+                  type="button"
+                  onClick={() => navigate("/admin/framework")}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold flex items-center gap-2 text-xs shadow-sm cursor-pointer transition-all shrink-0"
+                >
+                  <span>Manage in Compliance Framework Checklists</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
               </div>
 
-              <div className="md:col-span-2 space-y-4">
-                {selectedNode ? (
-                  <form onSubmit={handleSaveNode} className="space-y-4">
-                    <div className="p-3 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 flex justify-between items-center font-mono text-xs">
-                      <span>Node Key: <strong className="text-blue-600 dark:text-blue-400">{selectedNode.system_key}</strong></span>
-                      <span className="text-[9px] px-2.5 py-0.5 bg-slate-200 dark:bg-slate-800 rounded-full uppercase font-bold">{selectedNode.node_type}</span>
-                    </div>
+              <div className="p-3.5 bg-blue-50/60 dark:bg-blue-955/30 border border-blue-200 dark:border-blue-900/60 rounded-xl text-[10.5px] text-blue-900 dark:text-blue-300 flex items-start gap-2.5">
+                <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Single Source of Truth:</strong> Checklists can no longer be edited in this studio to prevent split-brain discrepancies. Below is a live preview of what will be compiled into the formal ISSP document. Click the button above to add, edit, or toggle items.
+                </span>
+              </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-slate-500">Display Title Header</label>
-                        <input
-                          type="text" required value={nodeTitle} onChange={e => setNodeTitle(e.target.value)}
-                          className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-bold outline-none text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-slate-500">TOC Short Label</label>
-                        <input
-                          type="text" required value={nodeTocLabel} onChange={e => setNodeTocLabel(e.target.value)}
-                          className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none text-xs"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-slate-500">Orientation</label>
-                        <select
-                          value={nodeOrientation} onChange={e => setNodeOrientation(e.target.value)}
-                          className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs cursor-pointer"
-                        >
-                          <option value="landscape">Landscape (Standard)</option>
-                          <option value="portrait">Portrait (Cover / Specials)</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-[10px] uppercase font-bold text-slate-500">Sorting Sequence</label>
-                        <input
-                          type="number" step="0.01" required value={nodeSequence} onChange={e => setNodeSequence(e.target.value)}
-                          className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 p-3 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
-                      <input
-                        type="checkbox" checked={nodePageBreak} onChange={e => setNodePageBreak(e.target.checked)}
-                        className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
-                      />
-                      <span className="text-[10px] uppercase font-bold text-slate-700 dark:text-slate-300">Force Page Break Before Section</span>
-                    </div>
-
-                    <button type="submit" disabled={submitting} className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-white cursor-pointer shadow-sm text-xs">
-                      Save Node Configuration
-                    </button>
-                  </form>
-                ) : (
-                  <div className="text-center py-20 text-slate-400 italic border border-dashed border-slate-300 dark:border-slate-800 rounded-2xl">
-                    Select a section node from the tree outline to edit its layout properties.
+              {/* Read-Only Checklist Previews */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* EGP Checklist Status */}
+                <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5 text-blue-500" />
+                      <span>Part II.D: E-Gov Programs</span>
+                    </span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-950 dark:text-blue-300 font-bold">
+                      {egovChecklists.length} Criteria
+                    </span>
                   </div>
-                )}
+                  <div className="space-y-1 max-h-48 overflow-y-auto pr-1 text-[10.5px]">
+                    {egovChecklists.length > 0 ? (
+                      egovChecklists.map((e) => (
+                        <div key={e.id} className="flex justify-between items-center text-slate-700 dark:text-slate-300 py-1 border-b border-slate-200/50 dark:border-slate-800/50 last:border-0">
+                          <span className="truncate pr-1">{e.program_name}</span>
+                          <span className={`font-mono font-bold text-[9.5px] shrink-0 ${e.is_utilized ? "text-emerald-600" : "text-slate-400"}`}>
+                            {e.is_utilized ? "✓ Utilized" : "Equivalent / Manual"}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-slate-400 italic text-[10px]">No EGP items initialized yet.</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Cybersecurity Controls Status */}
+                <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>Cybersecurity Controls</span>
+                    </span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 font-bold">
+                      {cyberControlsList.length} Controls
+                    </span>
+                  </div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto pr-1 text-[10.5px]">
+                    {cyberControlsList.length > 0 ? (
+                      cyberControlsList.slice(0, 8).map((c) => (
+                        <div key={c.id} className="flex justify-between items-center text-slate-700 dark:text-slate-300 py-1 border-b border-slate-200/50 dark:border-slate-800/50 last:border-0">
+                          <span className="truncate pr-1">{c.control_name}</span>
+                          <span className={`font-mono font-bold text-[9.5px] shrink-0 ${c.is_implemented ? "text-emerald-600" : "text-slate-400"}`}>
+                            {c.is_implemented ? "[X] Active" : "[ ] Planned"}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-slate-400 italic text-[10px]">No controls configured.</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* DRBCP Governance Status */}
+                <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-purple-500" />
+                      <span>Annex 2: DRBCP Governance</span>
+                    </span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200 dark:bg-purple-950 dark:text-purple-300 font-bold">
+                      {drTeam.length} Roles
+                    </span>
+                  </div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto pr-1 text-[10.5px]">
+                    {drTeam.length > 0 ? (
+                      drTeam.map((t) => (
+                        <div key={t.id} className="flex justify-between items-center text-slate-700 dark:text-slate-300 py-1 border-b border-slate-200/50 dark:border-slate-800/50 last:border-0">
+                          <span className="truncate font-semibold">{t.role}</span>
+                          <span className="font-mono text-[9.5px] text-slate-500 truncate max-w-[100px]">{t.contact_person}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-slate-400 italic text-[10px]">No DRT members recorded.</p>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -2987,7 +2342,7 @@ export default function NarrativeManager() {
 
         {/* Global Reference Sidebar Panel */}
         <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 h-fit space-y-4 text-slate-600 dark:text-slate-400 text-[11px] leading-relaxed shadow-xs">
-          <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-2.5 flex items-center gap-1.5">
+          <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-2.5 flex items-center gap-1.5 font-serif">
             <Landmark className="w-4 h-4 text-blue-600 dark:text-blue-400" />
             <span>DICT v.2026 Audit Specs</span>
           </h3>
@@ -3026,7 +2381,7 @@ export default function NarrativeManager() {
           <div className="p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 text-[10.5px] space-y-1">
             <strong className="text-slate-800 dark:text-slate-300 block uppercase">Continuous Governance Rule</strong>
             <p>
-              Updating statutory parameters immediately updates the dynamic PDF compiler and MITHI governance matrices. S3 Glacier backups are made automatically when cycles conclude.
+              Updating statutory parameters immediately updates the dynamic PDF compiler and MITHI governance matrices. Official digital archives are generated and certified automatically when cycles conclude.
             </p>
           </div>
         </div>
@@ -3067,11 +2422,11 @@ export default function NarrativeManager() {
               <div className="flex items-center justify-between">
                 <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Evaluation State</span>
                 <span className={`px-2.5 py-0.5 rounded-full text-[9.5px] font-bold font-mono uppercase border ${
-                  rolloverModal.data?.status === "ROLLED_OVER_SUCCESS"
-                    ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20"
-                    : rolloverModal.data?.status === "ACTIVE_CYCLE_VALID"
-                    ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20"
-                    : "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
+                  rolloverModal.data?.status === "ROLLED_OVER_SUCCESS" 
+                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20" 
+                    : rolloverModal.data?.status === "ACTIVE_CYCLE_VALID" 
+                    ? "bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20" 
+                    : "bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
                 }`}>
                   {rolloverModal.data?.status === "ROLLED_OVER_SUCCESS" ? "Rollover Executed" : "Active Cycle Current"}
                 </span>
@@ -3097,7 +2452,7 @@ export default function NarrativeManager() {
                     <div className="flex items-start gap-2 text-slate-700 dark:text-slate-300">
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
                       <span>
-                        <strong>Horizon Status:</strong> Planning cycle <strong>FY {activePeriod}</strong> is currently within active effectivity.
+                        <strong>Horizon Status:</strong> Planning cycle <strong>FY {activeCycle}</strong> is currently within active effectivity.
                       </span>
                     </div>
                     <div className="flex items-start gap-2 text-slate-700 dark:text-slate-300">
@@ -3112,7 +2467,7 @@ export default function NarrativeManager() {
                     <div className="flex items-start gap-2 text-slate-700 dark:text-slate-300">
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
                       <span>
-                        <strong>Cold Storage Snapshot:</strong> Concluded cycle snapshot compiled and archived to <strong>AWS S3 Glacier</strong>.
+                        <strong>Certified Archive Snapshot:</strong> Concluded cycle snapshot compiled and archived to the <strong>Official Document Vault</strong>.
                       </span>
                     </div>
                     <div className="flex items-start gap-2 text-slate-700 dark:text-slate-300">

@@ -1,15 +1,31 @@
 # app/admin/router.py
 import os
+import io
+import csv
 import html
 import uuid
+import json
 import logging
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
-import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form, Request
-from sqlalchemy import func, or_, String, cast
+from typing import List, Optional, Dict, Any, Union
+
+from fastapi import (
+    APIRouter, 
+    Depends, 
+    HTTPException, 
+    status, 
+    Query, 
+    UploadFile, 
+    File, 
+    Form, 
+    Request
+)
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func, or_, and_, String, cast, text
 from sqlalchemy.orm import Session, joinedload, selectinload
+from pydantic import BaseModel, Field
+import bcrypt
 
 from app.config import settings
 from app.database.session import get_db
@@ -26,6 +42,9 @@ from app.database.models import (
     FundSource,
     OfficeLocation,
     UacsObjectCode,
+    StrategicCategory,
+    UacsCatalogItem,
+    SystemTaxonomy,
     SystemClassification,
     SystemHostingType,
     DevelopmentStrategy,
@@ -38,7 +57,6 @@ from app.database.models import (
     CatalogItem,
     SystemSetting,
     User,
-    Campus,
     StrategicConcern,
     NeedsAssessment,
     InformationSystem,
@@ -47,12 +65,8 @@ from app.database.models import (
     CybersecurityControl,
     GlossaryTerm,
     GeneralInstruction,
-    ServerCapacityTrack,
-    ClientOsCensus,
-    OfficeSoftwareCensus,
     CrossAgencyProject,
     PerformanceMetric,
-    AnnualCostBreakdown,
     IctStaffPosition,
     HumanCapital,
     StakeholderAnalysis,
@@ -61,16 +75,9 @@ from app.database.models import (
     BusinessImpactAnalysis,
     DRBCPMetric,
     ExistingInventory,
-    IsspNode,
-    IsspVocabulary,
-    IsspContent,
-    IsspAsset,
-    NodeType,
-    PageOrientation,
-    ContentType,
-    AssetRole,
     RoleTag,
-    ScopeChoice
+    ScopeChoice,
+    DynamicChecklistCriteria
 )
 from app.schemas import (
     AdminOverridePayload,
@@ -91,8 +98,6 @@ from app.schemas import (
     WhitelistedUserUpdate,
     WhitelistedUserResponse,
     AuditLogEntryResponse,
-    CampusCreate,
-    CampusResponse,
     StrategicConcernCreate,
     StrategicConcernResponse,
     NeedsAssessmentResponse,
@@ -114,44 +119,43 @@ from app.schemas import (
     GlossaryTermResponse,
     GeneralInstructionCreate,
     GeneralInstructionResponse,
-    ServerCapacityCreate,
-    ServerCapacityResponse,
-    ClientOsCensusCreate,
-    ClientOsCensusResponse,
-    OfficeSoftwareCreate,
-    OfficeSoftwareResponse,
     CrossAgencyProjectCreate,
     CrossAgencyProjectResponse,
-    AnnualCostBreakdownCreate,
-    AnnualCostBreakdownResponse,
     IctStaffPositionCreate,
     IctStaffPositionResponse,
     OrganizationalOutcomeCreate,
     OrganizationalOutcomeResponse,
-    IsspNodeResponse,
-    IsspNodeCreate,
-    IsspNodeUpdate,
-    IsspNodeReorderPayload,
-    IsspVocabularyResponse,
-    IsspVocabularyCreate,
-    IsspContentResponse,
-    IsspContentCreate,
-    IsspAssetResponse,
-    IsspAssetCreate,
     HumanCapitalCreate,
     HumanCapitalResponse,
     StakeholderAnalysisCreate,
+    StakeholderAnalysisUpdate,
     StakeholderAnalysisResponse,
     EGovernmentChecklistCreate,
+    EGovernmentChecklistUpdate,
     EGovernmentChecklistResponse,
     DisasterRecoveryTeamCreate,
     DisasterRecoveryTeamResponse,
     BusinessImpactAnalysisCreate,
     BusinessImpactAnalysisResponse,
     DRBCPMetricCreate,
-    DRBCPMetricResponse
+    DRBCPMetricResponse,
+    StrategicCategoryCreate,
+    StrategicCategoryUpdate,
+    StrategicCategoryResponse,
+    UacsCatalogItemCreate,
+    UacsCatalogItemResponse,
+    PolicySettingsResponse,
+    PolicySettingsUpdate,
+    InflationSettingsResponse,
+    InflationSettingsUpdate,
+    BatchApprovePayload,
+    HarmonizationCriterionCreate,
+    HarmonizationCriterionUpdate,
+    HarmonizationCriterionResponse,
+    DevelopmentStrategyCreate,
+    DevelopmentStrategyResponse
 )
-from app.auth.router import require_admin, require_user
+from app.auth.router import require_admin, require_user, require_supply_or_admin
 from app.tasks.pdf_tasks import compile_issp_document
 from app.storage.s3_client import storage_client
 from app.utils.helpers import (
@@ -159,9 +163,14 @@ from app.utils.helpers import (
     get_s3_key_from_url,
     get_active_issp_period,
     validate_active_years_alignment,
+    align_and_validate_years,
     calculate_financial_summaries,
     classify_uacs_and_expenditure,
-    log_audit_event
+    log_audit_event,
+    get_cycle_year_range,
+    get_governance_policy,
+    get_adjusted_unit_cost_for_year,
+    sanitize_for_json
 )
 
 logger = logging.getLogger(__name__)
@@ -169,190 +178,1142 @@ router = APIRouter(prefix="/api/admin", tags=["Admin & Governance Subsystem"])
 
 
 # ==========================================================
-# 0. DOCUMENT TREE ARCHITECTURE APIS
+# PYDANTIC INTAKE SCHEMAS FOR ADMIN ACTIONS
 # ==========================================================
 
-@router.get("/issp/document-tree", response_model=List[IsspNodeResponse])
-def get_issp_document_tree(
+class SystemApprovalPayload(BaseModel):
+    strategic_concern_id: Optional[Union[uuid.UUID, str]] = None
+    project_id: Optional[Union[uuid.UUID, str]] = None
+    status: str = Field(default="For Development", description="Operational | For Development | For Enhancement")
+    action: str = Field(default="APPROVE", description="APPROVE | RETURN")
+    rejection_reason: Optional[str] = None
+
+
+class ProjectLinksPayload(BaseModel):
+    proposal_ids: List[Union[uuid.UUID, str]] = Field(default_factory=list)
+    system_ids: List[Union[uuid.UUID, str]] = Field(default_factory=list)
+
+
+# ==========================================================
+# 1. CORE DASHBOARD METRICS & ANALYTICS
+# ==========================================================
+
+@router.get("/dashboard-metrics")
+def get_dashboard_metrics(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        all_nodes = db.query(IsspNode).options(
-            joinedload(IsspNode.vocabulary),
-            selectinload(IsspNode.contents),
-            selectinload(IsspNode.assets)
-        ).order_by(IsspNode.sequence_order.asc()).all()
-        
-        return [node for node in all_nodes if node.parent_id is None]
-    except Exception as e:
-        logger.error(f"Failed to query document tree: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to load document skeleton tree.")
+    active_period = get_active_issp_period(db)
+    
+    global_ceiling_row = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
+    global_ceiling = float(global_ceiling_row.value) if global_ceiling_row else float(settings.GLOBAL_BUDGET_CEILING)
+
+    # Calculate spent strictly on project-bound or authorized standalone operational proposals
+    non_project_cats = db.query(StrategicCategory.name).filter(
+        StrategicCategory.is_project_linked == False,
+        StrategicCategory.is_active == True
+    ).all()
+    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
+    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
+        if default_cat not in standalone_cat_names:
+            standalone_cat_names.append(default_cat)
+
+    total_spent = db.query(func.sum(Proposal.total_cost)).filter(
+        Proposal.issp_period == active_period,
+        func.lower(cast(Proposal.status, String)) == "approved",
+        or_(
+            Proposal.project_id.isnot(None),
+            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
+        ),
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).scalar() or 0.0
+
+    pending_count = db.query(Proposal).filter(
+        Proposal.issp_period == active_period,
+        func.lower(cast(Proposal.status, String)) == "submitted",
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).count()
+
+    approved_count = db.query(Proposal).filter(
+        Proposal.issp_period == active_period,
+        func.lower(cast(Proposal.status, String)) == "approved",
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).count()
+
+    return {
+        "global_ceiling": global_ceiling,
+        "total_spent": float(total_spent),
+        "pending_count": pending_count,
+        "approved_count": approved_count,
+        "active_cycle": active_period
+    }
 
 
-@router.put("/issp/reorder")
-def reorder_issp_nodes(
-    payload: IsspNodeReorderPayload,
+@router.get("/department-analytics", response_model=List[DepartmentAnalyticsResponse])
+def get_department_analytics(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        node = db.query(IsspNode).filter(IsspNode.id == payload.node_id).first()
-        if not node:
-            raise HTTPException(status_code=404, detail="Document node not found.")
+    active_period = get_active_issp_period(db)
+    depts = db.query(Department).all()
+    results = []
 
-        node.parent_id = payload.parent_id if payload.parent_id != 0 else None
-        node.sequence_order = payload.sequence_order
+    for d in depts:
+        props = db.query(Proposal).filter(
+            Proposal.department_id == d.id,
+            Proposal.issp_period == active_period,
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+        ).all()
+
+        total = len(props)
+        custom = sum(1 for p in props if not p.item_key or p.item_key == "other")
+        ratio = (custom / total * 100.0) if total > 0 else 0.0
+        missing_canvas = sum(
+            1 for p in props 
+            if (not p.item_key or p.item_key == "other") 
+            and not p.created_by_students 
+            and not p.is_in_house_turnover 
+            and not p.canvas_evidence_url
+        )
+        abuse = ratio > 20.0
+
+        results.append(DepartmentAnalyticsResponse(
+            department_id=d.id,
+            department_name=d.name,
+            total_proposals=total,
+            custom_proposals=custom,
+            custom_ratio_percent=round(ratio, 2),
+            missing_canvas_count=missing_canvas,
+            requires_review_abuse=abuse
+        ))
+
+    return results
+
+
+@router.get("/audit-logs", response_model=List[AuditLogEntryResponse])
+def get_audit_logs(
+    module: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    query = db.query(AuditTrail).options(joinedload(AuditTrail.user))
+    if module and module.strip().lower() != "all":
+        query = query.filter(AuditTrail.module == module.strip().upper())
+    
+    logs = query.order_by(AuditTrail.timestamp.desc()).limit(limit).all()
+    out = []
+    for l in logs:
+        out.append(AuditLogEntryResponse(
+            id=l.id,
+            proposal_id=l.proposal_id,
+            department_id=l.department_id,
+            module=l.module,
+            action=l.action,
+            ip_address=l.ip_address,
+            user_id=l.user_id,
+            operator_email=l.user.email if l.user else "System/Cron",
+            operator_role=l.user.role_tag.value if l.user else "SYSTEM",
+            timestamp=l.timestamp,
+            old_value=l.old_value,
+            new_value=l.new_value
+        ))
+    return out
+
+
+# ==========================================================
+# 2. DEPARTMENTS & USER WHITELISTING
+# ==========================================================
+
+@router.get("/departments")
+def get_departments_list(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_user)
+):
+    depts = db.query(Department).order_by(Department.name.asc()).all()
+    return [{"department_id": d.id, "department_name": d.name, "id": d.id, "name": d.name} for d in depts]
+
+
+@router.post("/departments", status_code=status.HTTP_201_CREATED)
+def create_department(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    name = (payload.get("name") or payload.get("department_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Department name is required.")
+    
+    existing = db.query(Department).filter(func.lower(Department.name) == name.lower()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Department '{name}' already exists.")
+    
+    dept = Department(name=name)
+    db.add(dept)
+    db.commit()
+    db.refresh(dept)
+    return {"department_id": dept.id, "department_name": dept.name, "id": dept.id, "name": dept.name}
+
+
+@router.put("/departments/{dept_id}")
+def update_department(
+    dept_id: int,
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    dept = db.query(Department).filter(Department.id == dept_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    
+    name = (payload.get("name") or payload.get("department_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Department name is required.")
+
+    dept.name = name
+    db.commit()
+    return {"department_id": dept.id, "department_name": dept.name, "id": dept.id, "name": dept.name}
+
+
+@router.delete("/departments/{dept_id}")
+def delete_department(
+    dept_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    dept = db.query(Department).filter(Department.id == dept_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    
+    linked_proposals = db.query(Proposal).filter(Proposal.department_id == dept_id).count()
+    if linked_proposals > 0:
+        raise HTTPException(status_code=400, detail=f"Cannot delete department. {linked_proposals} proposals are currently linked to it.")
+
+    db.delete(dept)
+    db.commit()
+    return {"status": "success", "message": f"Department '{dept.name}' deleted."}
+
+
+@router.get("/users/whitelist", response_model=List[WhitelistedUserResponse])
+def get_whitelisted_users(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    users = db.query(User).options(joinedload(User.department)).all()
+    return users
+
+
+@router.post("/users/whitelist", response_model=WhitelistedUserResponse, status_code=status.HTTP_201_CREATED)
+def add_whitelisted_user(
+    payload: WhitelistedUserCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    email = payload.email.strip().lower()
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"User with email '{email}' already registered.")
+
+    hashed_pw = bcrypt.hashpw(payload.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    
+    new_user = User(
+        email=email,
+        password_hash=hashed_pw,
+        role_tag=payload.role_tag,
+        department_id=payload.assigned_department_id,
+        is_whitelisted=True
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+@router.put("/users/whitelist/{user_id}", response_model=WhitelistedUserResponse)
+def update_whitelisted_user(
+    user_id: int,
+    payload: WhitelistedUserUpdate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if payload.email:
+        target.email = payload.email.strip().lower()
+    if payload.role_tag:
+        target.role_tag = payload.role_tag
+    if payload.assigned_department_id is not None:
+        target.department_id = payload.assigned_department_id
+    if payload.password and payload.password.strip():
+        target.password_hash = bcrypt.hashpw(payload.password.strip().encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@router.delete("/users/whitelist/{user_id}")
+def delete_whitelisted_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    
+    if target.id == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete your active administrative session.")
+
+    db.delete(target)
+    db.commit()
+    return {"status": "success", "message": f"User '{target.email}' deleted."}
+
+
+# ==========================================================
+# 3. REFERENCE PRICING CATALOG
+# ==========================================================
+
+@router.get("/catalog", response_model=List[CatalogItemResponse])
+def get_catalog_items(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    return db.query(CatalogItem).all()
+
+
+@router.post("/catalog", response_model=CatalogItemResponse, status_code=status.HTTP_201_CREATED)
+def create_catalog_item(
+    payload: CatalogItemCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    existing = db.query(CatalogItem).filter(CatalogItem.item_key == payload.item_key).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Catalog item key '{payload.item_key}' already exists.")
+
+    item = CatalogItem(**payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/catalog/{item_id}", response_model=CatalogItemResponse)
+def update_catalog_item(
+    item_id: uuid.UUID,
+    payload: CatalogItemUpdate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(CatalogItem).filter(CatalogItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Catalog item not found.")
+
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(item, k, v)
+
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/catalog/{item_id}")
+def delete_catalog_item(
+    item_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(CatalogItem).filter(CatalogItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Catalog item not found.")
+
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Catalog item removed."}
+
+
+# ==========================================================
+# 4. GLOSSARY & INSTRUCTIONS REGISTRIES
+# ==========================================================
+
+@router.get("/glossary", response_model=List[GlossaryTermResponse])
+def get_glossary(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    return db.query(GlossaryTerm).order_by(GlossaryTerm.order_index.asc()).all()
+
+
+@router.post("/glossary", response_model=GlossaryTermResponse, status_code=status.HTTP_201_CREATED)
+def create_glossary_term(
+    payload: GlossaryTermCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    term_clean = payload.term.strip()
+    existing = db.query(GlossaryTerm).filter(func.lower(GlossaryTerm.term) == term_clean.lower()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Glossary term '{term_clean}' already exists.")
+
+    max_idx = db.query(func.max(GlossaryTerm.order_index)).scalar() or 0
+    item = GlossaryTerm(
+        term=term_clean,
+        definition=payload.definition.strip(),
+        order_index=max_idx + 1
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/glossary/{term_id}", response_model=GlossaryTermResponse)
+def update_glossary_term(
+    term_id: int,
+    payload: GlossaryTermCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(GlossaryTerm).filter(GlossaryTerm.id == term_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Glossary term not found.")
+
+    item.term = payload.term.strip()
+    item.definition = payload.definition.strip()
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/glossary/{term_id}")
+def delete_glossary_term(
+    term_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(GlossaryTerm).filter(GlossaryTerm.id == term_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Glossary term not found.")
+
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Glossary term deleted."}
+
+
+@router.get("/instructions", response_model=List[GeneralInstructionResponse])
+def get_instructions(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    return db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
+
+
+@router.post("/instructions", response_model=GeneralInstructionResponse, status_code=status.HTTP_201_CREATED)
+def create_instruction(
+    payload: GeneralInstructionCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    existing = db.query(GeneralInstruction).filter(GeneralInstruction.step_number == payload.step_number).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Step number {payload.step_number} already exists.")
+
+    item = GeneralInstruction(**payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/instructions/{inst_id}", response_model=GeneralInstructionResponse)
+def update_instruction(
+    inst_id: int,
+    payload: GeneralInstructionCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(GeneralInstruction).filter(GeneralInstruction.id == inst_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Instruction not found.")
+
+    item.step_number = payload.step_number
+    item.instruction_text = payload.instruction_text
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/instructions/{inst_id}")
+def delete_instruction(
+    inst_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(GeneralInstruction).filter(GeneralInstruction.id == inst_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Instruction not found.")
+
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Instruction removed."}
+
+
+# ==========================================================
+# 5. BUDGET CEILINGS & GOVERNANCE LIMITS
+# ==========================================================
+
+@router.get("/budget-ceilings", response_model=List[BudgetCeilingResponse])
+def get_budget_ceilings(
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    target_period = issp_period or get_active_issp_period(db)
+    
+    global_row = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
+    global_limit = Decimal(global_row.value) if global_row else Decimal(str(settings.GLOBAL_BUDGET_CEILING))
+
+    depts = db.query(Department).all()
+    results = []
+
+    for d in depts:
+        ceiling = db.query(BudgetCeiling).filter(
+            BudgetCeiling.department_id == d.id,
+            BudgetCeiling.issp_period == target_period
+        ).first()
+
+        capex = ceiling.allocated_capex if ceiling else Decimal("0.00")
+        mooe = ceiling.allocated_mooe if ceiling else Decimal("0.00")
+        annual_map = ceiling.annual_allocations if ceiling else {}
+
+        spent = db.query(func.sum(Proposal.total_cost)).filter(
+            Proposal.department_id == d.id,
+            Proposal.issp_period == target_period,
+            func.lower(cast(Proposal.status, String)).in_(["submitted", "approved"]),
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+        ).scalar() or Decimal("0.00")
+
+        results.append(BudgetCeilingResponse(
+            department_id=d.id,
+            department_name=d.name,
+            allocated_capex=capex,
+            allocated_mooe=mooe,
+            sub_ceiling=capex + mooe,
+            global_ceiling=global_limit,
+            current_spent=spent,
+            annual_allocations=annual_map
+        ))
+
+    return results
+
+
+@router.post("/budget-ceilings")
+def update_budget_ceiling_allocation(
+    payload: UpdateCeilingPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    active_period = get_active_issp_period(db)
+    ceiling = db.query(BudgetCeiling).filter(
+        BudgetCeiling.department_id == payload.department_id,
+        BudgetCeiling.issp_period == active_period
+    ).first()
+
+    old_vals = {}
+    if not ceiling:
+        ceiling = BudgetCeiling(
+            department_id=payload.department_id,
+            issp_period=active_period,
+            allocated_capex=payload.allocated_capex,
+            allocated_mooe=payload.allocated_mooe,
+            annual_allocations=payload.annual_allocations or {}
+        )
+        db.add(ceiling)
+    else:
+        old_vals = {
+            "allocated_capex": float(ceiling.allocated_capex),
+            "allocated_mooe": float(ceiling.allocated_mooe),
+            "sub_ceiling": float(ceiling.sub_ceiling)
+        }
+        ceiling.allocated_capex = payload.allocated_capex
+        ceiling.allocated_mooe = payload.allocated_mooe
+        if payload.annual_allocations:
+            ceiling.annual_allocations = payload.annual_allocations
+
+    log_audit_event(
+        db=db,
+        action="SYSTEM_BUDGET_CEILING_UPDATED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        department_id=payload.department_id,
+        ip_address=request.client.host if request.client else None,
+        old_value=old_vals,
+        new_value={
+            "department_id": payload.department_id,
+            "allocated_capex": float(payload.allocated_capex),
+            "allocated_mooe": float(payload.allocated_mooe),
+            "sub_ceiling": float(payload.allocated_capex + payload.allocated_mooe)
+        }
+    )
+
+    db.commit()
+    return {"status": "success", "message": "Department sub-ceiling updated."}
+
+
+@router.post("/global-budget-ceiling")
+def update_global_budget_ceiling(
+    payload: UpdateGlobalCeilingPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
+    old_val = setting.value if setting else str(settings.GLOBAL_BUDGET_CEILING)
+
+    if not setting:
+        db.add(SystemSetting(key="global_budget_ceiling", value=str(payload.global_ceiling)))
+    else:
+        setting.value = str(payload.global_ceiling)
+
+    log_audit_event(
+        db=db,
+        action="GLOBAL_CEILING_UPDATED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        ip_address=request.client.host if request.client else None,
+        old_value={"global_ceiling": old_val},
+        new_value={"global_ceiling": str(payload.global_ceiling)}
+    )
+
+    db.commit()
+    return {"status": "success", "global_ceiling": float(payload.global_ceiling)}
+
+
+@router.get("/budget-validation")
+def validate_budget_preflight(
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    target_period = issp_period or get_active_issp_period(db)
+    ceilings = db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == target_period).all()
+    
+    breaches = []
+    for c in ceilings:
+        spent = db.query(func.sum(Proposal.total_cost)).filter(
+            Proposal.department_id == c.department_id,
+            Proposal.issp_period == target_period,
+            func.lower(cast(Proposal.status, String)).in_(["submitted", "approved"]),
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+        ).scalar() or Decimal("0.00")
+
+        if spent > c.sub_ceiling:
+            dept = db.query(Department).filter(Department.id == c.department_id).first()
+            breaches.append({
+                "department_id": c.department_id,
+                "department_name": dept.name if dept else f"Dept {c.department_id}",
+                "allocated_sub_ceiling_php": float(c.sub_ceiling),
+                "committed_spent_php": float(spent),
+                "budget_overage_php": float(spent - c.sub_ceiling)
+            })
+
+    return {
+        "issp_period": target_period,
+        "validation_passed": len(breaches) == 0,
+        "total_violations_detected": len(breaches),
+        "breaches": breaches
+    }
+
+
+# ==========================================================
+# 6. MASTER NARRATIVES & COVERSHEET MANAGEMENT
+# ==========================================================
+
+@router.get("/narratives/{issp_period}", response_model=MasterNarrativeResponse)
+def get_master_narrative(
+    issp_period: str,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        parts = issp_period.split("-")
+        start = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 2026
+        end = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 2028
+        narrative = MasterNarrative(
+            issp_period=issp_period,
+            agency_name=settings.DEFAULT_AGENCY_NAME,
+            issp_period_from=start,
+            issp_period_to=end,
+            agency_website_url=settings.DEFAULT_AGENCY_WEBSITE,
+            is_active=True
+        )
+        db.add(narrative)
         db.commit()
-        return {"status": "success", "message": "Document node hierarchy reordered successfully."}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to reorder issp nodes: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during node reordering.")
+        db.refresh(narrative)
+
+    return MasterNarrativeResponse.model_validate(narrative)
 
 
-@router.post("/issp/assets", response_model=IsspAssetResponse)
-async def upload_issp_asset(
-    node_id: int = Query(...),
-    asset_role: AssetRole = Query(...),
-    custom_title: Optional[str] = Query(None),
-    aspect_ratio_preserve: bool = Query(True),
+@router.post("/narratives/{issp_period}", response_model=MasterNarrativeResponse)
+def update_master_narrative(
+    issp_period: str,
+    payload: Dict[str, Any],
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        parts = issp_period.split("-")
+        start = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 2026
+        end = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 2028
+        narrative = MasterNarrative(issp_period=issp_period, issp_period_from=start, issp_period_to=end)
+        db.add(narrative)
+
+    for k, v in payload.items():
+        if hasattr(narrative, k) and v is not None:
+            # Case-insensitive normalization for scope_choice
+            if k == "scope_choice" and isinstance(v, str):
+                v_clean = v.strip().lower().replace("_", "-")
+                if "department" in v_clean:
+                    v = "Department-Wide"
+                elif "agency" in v_clean:
+                    v = "Agency-Wide"
+                elif "lgu" in v_clean:
+                    v = "LGU"
+                elif "other" in v_clean:
+                    v = "Other Government Entity"
+            setattr(narrative, k, v)
+
+    log_audit_event(
+        db=db,
+        action="NARRATIVE_STUDIO_UPDATED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        ip_address=request.client.host if request.client else None,
+        new_value={"issp_period": issp_period}
+    )
+
+    db.commit()
+    db.refresh(narrative)
+    return MasterNarrativeResponse.model_validate(narrative)
+
+
+@router.post("/narratives/{issp_period}/activate")
+def activate_planning_cycle(
+    issp_period: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    parts = issp_period.split("-")
+    start = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 2026
+    end = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 2028
+
+    db.query(MasterNarrative).update({"is_active": False}, synchronize_session=False)
+
+    target = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not target:
+        target = MasterNarrative(
+            issp_period=issp_period,
+            agency_name=settings.DEFAULT_AGENCY_NAME,
+            issp_period_from=start,
+            issp_period_to=end,
+            agency_website_url=settings.DEFAULT_AGENCY_WEBSITE,
+            is_active=True
+        )
+        db.add(target)
+    else:
+        target.is_active = True
+        target.issp_period_from = start
+        target.issp_period_to = end
+
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "issp_active_cycle").first()
+    if not setting:
+        db.add(SystemSetting(key="issp_active_cycle", value=issp_period))
+    else:
+        setting.value = issp_period
+
+    db.commit()
+    return {"status": "success", "active_cycle": issp_period}
+
+
+@router.post("/narratives/{issp_period}/upload-diagram")
+async def upload_narrative_diagram(
+    issp_period: str,
+    category: str = Query(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
-        if not node:
-            raise HTTPException(status_code=404, detail="Target document node not found.")
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        raise HTTPException(status_code=404, detail="Planning cycle narrative not found.")
 
-        file_bytes = await file.read()
-        is_valid_file = (
-            file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or
-            file_bytes.startswith(b"\xff\xd8\xff") or
-            file_bytes.startswith(b"GIF8") or
-            file_bytes.startswith(b"%PDF-")
-        )
-        if not is_valid_file:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Security Violation: Invalid format. Only PNG, JPG, or PDF files are permitted."
-            )
+    file_bytes = await file.read()
+    safe_name = secure_filename(file.filename)
+    key = f"diagrams/{issp_period}/{category}_{safe_name}"
 
-        safe_filename = secure_filename(file.filename)
-        key = storage_client.get_diagram_key(asset_role.value, safe_filename)
-        success = storage_client.upload_canvas_evidence(file_bytes, key)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to write diagram asset to storage.")
+    uploaded = storage_client.upload_binary(file_bytes, key)
+    if not uploaded:
+        raise HTTPException(status_code=500, detail="Failed to upload schematic to storage.")
 
-        download_url = storage_client.generate_download_url(key)
-        if asset_role == AssetRole.FULL_PAGE_DIAGRAM:
-            node.force_page_break = True
+    url = storage_client.generate_download_url(key)
 
-        new_asset = IsspAsset(
-            node_id=node_id,
-            file_path=download_url,
-            asset_role=asset_role,
-            custom_title=custom_title,
-            aspect_ratio_preserve=aspect_ratio_preserve
-        )
-        db.add(new_asset)
+    col_map = {
+        "agency_logo": "agency_logo_url",
+        "network_diagram": "network_diagram_url",
+        "fiber_backbone": "fiber_backbone_url",
+        "system_architecture": "system_architecture_url",
+        "existing_ict_org": "existing_ict_org_url",
+        "proposed_ict_org": "proposed_ict_org_url",
+        "site_development_plan": "site_development_plan_url",
+        "process_flow_diagram": "process_flow_diagram_url"
+    }
+
+    target_col = col_map.get(category, f"{category}_url")
+    if hasattr(narrative, target_col):
+        setattr(narrative, target_col, url)
         db.commit()
-        db.refresh(new_asset)
-        return new_asset
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to upload asset: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during asset uploading.")
 
-
-@router.post("/issp/nodes", response_model=IsspNodeResponse, status_code=status.HTTP_201_CREATED)
-def create_issp_node(
-    payload: IsspNodeCreate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        new_node = IsspNode(
-            parent_id=payload.parent_id,
-            node_type=payload.node_type,
-            system_key=payload.system_key,
-            sequence_order=payload.sequence_order,
-            page_orientation=payload.page_orientation,
-            force_page_break=payload.force_page_break
-        )
-        db.add(new_node)
-        db.commit()
-        db.refresh(new_node)
-        return new_node
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to create document node: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during node creation.")
-
-
-@router.put("/issp/nodes/{node_id}", response_model=IsspNodeResponse)
-def update_issp_node(
-    node_id: int,
-    payload: IsspNodeUpdate,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
-        if not node:
-            raise HTTPException(status_code=404, detail="Document node not found.")
-
-        if payload.node_type is not None:
-            node.node_type = payload.node_type
-        if payload.system_key is not None:
-            node.system_key = payload.system_key
-        if payload.sequence_order is not None:
-            node.sequence_order = payload.sequence_order
-        if payload.page_orientation is not None:
-            node.page_orientation = payload.page_orientation
-        if payload.force_page_break is not None:
-            node.force_page_break = payload.force_page_break
-        if payload.parent_id is not None:
-            node.parent_id = payload.parent_id if payload.parent_id != 0 else None
-
-        db.commit()
-        db.refresh(node)
-        return node
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update document node: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during node updates.")
-
-
-@router.delete("/issp/nodes/{node_id}")
-def delete_issp_node(
-    node_id: int,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        node = db.query(IsspNode).filter(IsspNode.id == node_id).first()
-        if not node:
-            raise HTTPException(status_code=404, detail="Document node not found.")
-
-        db.delete(node)
-        db.commit()
-        return {"status": "success", "message": "Document node deleted successfully."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete document node: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database failure during node deletion.")
+    return {"status": "success", "file_url": url, "category": category}
 
 
 # ==========================================================
-# PART I.A.4: ORGANIZATIONAL OUTCOMES (Rule 6 - Broader Scope)
+# 7. DRBCP TEAMS, BIA & METRICS
+# ==========================================================
+
+@router.get("/narratives/{issp_period}/dr-teams", response_model=List[DisasterRecoveryTeamResponse])
+def get_dr_teams(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.issp_period == issp_period).all()
+
+
+@router.post("/narratives/{issp_period}/dr-teams", response_model=DisasterRecoveryTeamResponse, status_code=status.HTTP_201_CREATED)
+def create_dr_team(issp_period: str, payload: DisasterRecoveryTeamCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = DisasterRecoveryTeam(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/dr-teams/{id}", response_model=DisasterRecoveryTeamResponse)
+def update_dr_team(id: int, payload: DisasterRecoveryTeamCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="DR Team member not found.")
+    for k, v in payload.model_dump().items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/dr-teams/{id}")
+def delete_dr_team(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="DR Team member not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "DR Team member removed."}
+
+
+@router.get("/narratives/{issp_period}/dr-bias", response_model=List[BusinessImpactAnalysisResponse])
+def get_dr_bias(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.issp_period == issp_period).all()
+
+
+@router.post("/narratives/{issp_period}/dr-bias", response_model=BusinessImpactAnalysisResponse, status_code=status.HTTP_201_CREATED)
+def create_dr_bia(issp_period: str, payload: BusinessImpactAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = BusinessImpactAnalysis(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/dr-bias/{id}", response_model=BusinessImpactAnalysisResponse)
+def update_dr_bia(id: int, payload: BusinessImpactAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="BIA record not found.")
+    for k, v in payload.model_dump().items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/dr-bias/{id}")
+def delete_dr_bia(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="BIA record not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "BIA record deleted."}
+
+
+@router.get("/narratives/{issp_period}/dr-metrics", response_model=List[DRBCPMetricResponse])
+def get_dr_metrics(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(DRBCPMetric).filter(DRBCPMetric.issp_period == issp_period).all()
+
+
+@router.post("/narratives/{issp_period}/dr-metrics", response_model=DRBCPMetricResponse, status_code=status.HTTP_201_CREATED)
+def create_dr_metric(issp_period: str, payload: DRBCPMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = DRBCPMetric(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/dr-metrics/{id}", response_model=DRBCPMetricResponse)
+def update_dr_metric(id: int, payload: DRBCPMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(DRBCPMetric).filter(DRBCPMetric.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="DR Metric not found.")
+    for k, v in payload.model_dump().items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/dr-metrics/{id}")
+def delete_dr_metric(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(DRBCPMetric).filter(DRBCPMetric.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="DR Metric not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "DR Metric removed."}
+
+
+# ==========================================================
+# 8. STAKEHOLDERS, HUMAN CAPITALS & STAFF
+# ==========================================================
+
+@router.get("/narratives/{issp_period}/stakeholders", response_model=List[StakeholderAnalysisResponse])
+def get_stakeholders_by_cycle(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(StakeholderAnalysis).filter(StakeholderAnalysis.issp_period == issp_period).all()
+
+
+@router.get("/stakeholders", response_model=List[StakeholderAnalysisResponse])
+def get_stakeholders_default(issp_period: Optional[str] = Query(None), db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    period = issp_period or get_active_issp_period(db)
+    return db.query(StakeholderAnalysis).filter(StakeholderAnalysis.issp_period == period).all()
+
+
+@router.post("/narratives/{issp_period}/stakeholders", response_model=StakeholderAnalysisResponse, status_code=status.HTTP_201_CREATED)
+def create_stakeholder_by_cycle(issp_period: str, payload: StakeholderAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = StakeholderAnalysis(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.post("/stakeholders", response_model=StakeholderAnalysisResponse, status_code=status.HTTP_201_CREATED)
+def create_stakeholder_default(payload: StakeholderAnalysisCreate, issp_period: Optional[str] = Query(None), db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    period = issp_period or get_active_issp_period(db)
+    item = StakeholderAnalysis(issp_period=period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/stakeholders/{id}", response_model=StakeholderAnalysisResponse)
+def update_stakeholder(id: int, payload: StakeholderAnalysisUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(StakeholderAnalysis).filter(StakeholderAnalysis.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Stakeholder not found.")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/stakeholders/{id}")
+def delete_stakeholder(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(StakeholderAnalysis).filter(StakeholderAnalysis.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Stakeholder not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Stakeholder removed."}
+
+
+@router.get("/narratives/{issp_period}/human-capitals", response_model=List[HumanCapitalResponse])
+def get_human_capitals(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(HumanCapital).filter(HumanCapital.issp_period == issp_period).all()
+
+
+@router.post("/narratives/{issp_period}/human-capitals", response_model=HumanCapitalResponse, status_code=status.HTTP_201_CREATED)
+def create_human_capital(issp_period: str, payload: HumanCapitalCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = HumanCapital(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/human-capitals/{id}", response_model=HumanCapitalResponse)
+def update_human_capital(id: int, payload: HumanCapitalCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(HumanCapital).filter(HumanCapital.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Human Capital entry not found.")
+    for k, v in payload.model_dump().items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/human-capitals/{id}")
+def delete_human_capital(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(HumanCapital).filter(HumanCapital.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Human Capital entry not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Human Capital entry removed."}
+
+
+@router.get("/narratives/{issp_period}/staff-positions", response_model=List[IctStaffPositionResponse])
+def get_staff_positions(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
+
+
+@router.post("/narratives/{issp_period}/staff-positions", response_model=IctStaffPositionResponse, status_code=status.HTTP_201_CREATED)
+def create_staff_position(issp_period: str, payload: IctStaffPositionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = IctStaffPosition(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/staff-positions/{id}", response_model=IctStaffPositionResponse)
+def update_staff_position(id: uuid.UUID, payload: IctStaffPositionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(IctStaffPosition).filter(IctStaffPosition.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Staff Position not found.")
+    for k, v in payload.model_dump().items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/staff-positions/{id}")
+def delete_staff_position(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(IctStaffPosition).filter(IctStaffPosition.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Staff Position not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Staff Position deleted."}
+
+
+@router.get("/narratives/{issp_period}/egov-checklists", response_model=List[EGovernmentChecklistResponse])
+def get_egov_checklists_by_cycle(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == issp_period).order_by(EGovernmentChecklist.id.asc()).all()
+
+
+@router.get("/egov-checklists", response_model=List[EGovernmentChecklistResponse])
+def get_egov_checklists_default(issp_period: Optional[str] = Query(None), db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    period = issp_period or get_active_issp_period(db)
+    return db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == period).order_by(EGovernmentChecklist.id.asc()).all()
+
+
+@router.post("/narratives/{issp_period}/egov-checklists", response_model=EGovernmentChecklistResponse, status_code=status.HTTP_201_CREATED)
+def create_egov_checklist_by_cycle(issp_period: str, payload: EGovernmentChecklistCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = EGovernmentChecklist(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.post("/egov-checklists", response_model=EGovernmentChecklistResponse, status_code=status.HTTP_201_CREATED)
+def create_egov_checklist_default(payload: EGovernmentChecklistCreate, issp_period: Optional[str] = Query(None), db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    period = issp_period or get_active_issp_period(db)
+    item = EGovernmentChecklist(issp_period=period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/egov-checklists/{id}", response_model=EGovernmentChecklistResponse)
+def update_egov_checklist(id: int, payload: EGovernmentChecklistUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="EGP item not found.")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/egov-checklists/{id}")
+def delete_egov_checklist(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="EGP item not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "EGP item removed."}
+
+
+@router.get("/narratives/{issp_period}/cross-projects", response_model=List[CrossAgencyProjectResponse])
+def get_cross_projects(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
+
+
+@router.post("/narratives/{issp_period}/cross-projects", response_model=CrossAgencyProjectResponse, status_code=status.HTTP_201_CREATED)
+def create_cross_project(issp_period: str, payload: CrossAgencyProjectCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = CrossAgencyProject(issp_period=issp_period, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/cross-projects/{id}", response_model=CrossAgencyProjectResponse)
+def update_cross_project(id: uuid.UUID, payload: CrossAgencyProjectCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(CrossAgencyProject).filter(CrossAgencyProject.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Cross Project not found.")
+    for k, v in payload.model_dump().items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/cross-projects/{id}")
+def delete_cross_project(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(CrossAgencyProject).filter(CrossAgencyProject.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Cross Project not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "Cross Project deleted."}
+
+
+# ==========================================================
+# PART I.A.4: ORGANIZATIONAL OUTCOMES (Broader Scope)
 # ==========================================================
 
 @router.get("/outcomes", response_model=List[OrganizationalOutcomeResponse])
@@ -372,16 +1333,40 @@ def create_organizational_outcome(
     admin: dict = Depends(require_admin)
 ):
     period = get_active_issp_period(db)
+    type_label_clean = (payload.type_label or "Organizational Outcome").strip()
+    outcome_name_clean = payload.outcome_name.strip()
     db_outcome = OrganizationalOutcome(
         issp_period=period,
-        type_label=payload.type_label,
-        outcome_name=payload.outcome_name,
-        description=payload.description
+        type_label=type_label_clean,
+        outcome_name=outcome_name_clean,
+        program_name=outcome_name_clean,
+        description=payload.description.strip() if payload.description else None
     )
     db.add(db_outcome)
     db.commit()
     db.refresh(db_outcome)
     return db_outcome
+
+
+@router.put("/outcomes/{outcome_id}", response_model=OrganizationalOutcomeResponse)
+def update_organizational_outcome(
+    outcome_id: int,
+    payload: OrganizationalOutcomeCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == outcome_id).first()
+    if not outcome:
+        raise HTTPException(status_code=404, detail="Organizational Outcome not found.")
+
+    outcome.type_label = (payload.type_label or "Organizational Outcome").strip()
+    outcome.outcome_name = payload.outcome_name.strip()
+    outcome.program_name = payload.outcome_name.strip()
+    outcome.description = payload.description.strip() if payload.description else None
+
+    db.commit()
+    db.refresh(outcome)
+    return outcome
 
 
 @router.delete("/outcomes/{outcome_id}")
@@ -479,6 +1464,10 @@ def delete_strategic_concern(
             na.is_aggregated = False
             na.strategic_concern_id = None
 
+    if concern.information_systems:
+        for sys in concern.information_systems:
+            sys.strategic_concern_id = None
+
     db.delete(concern)
     db.commit()
     return {"status": "success", "message": "Strategic concern purged."}
@@ -491,10 +1480,6 @@ def get_all_needs_assessments(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Returns all departmental Needs Assessments across all organizational units.
-    Enables MIS Admin to review and aggregate them into Part II.A Strategic Concerns.
-    """
     query = db.query(NeedsAssessment).options(joinedload(NeedsAssessment.department)).filter(
         NeedsAssessment.is_archived == False
     )
@@ -519,12 +1504,6 @@ def aggregate_needs_into_strategic_concern(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Converts/Aggregates a department Needs Assessment into an official Part II.A Strategic Concern.
-    Establishes bidirectional provenance:
-    NeedsAssessment.strategic_concern_id = concern.id
-    NeedsAssessment.is_aggregated = True
-    """
     period = issp_period or get_active_issp_period(db)
     na = db.query(NeedsAssessment).filter(NeedsAssessment.id == payload.needs_assessment_id).first()
     if not na:
@@ -563,19 +1542,6 @@ def get_network_infrastructures(
 ):
     period = issp_period or get_active_issp_period(db)
     query = db.query(NetworkInfrastructure).filter(NetworkInfrastructure.issp_period == period)
-    if is_proposed is not None:
-        query = query.filter(NetworkInfrastructure.is_proposed == is_proposed)
-    return query.all()
-
-
-@router.get("/narratives/{issp_period}/network-infrastructures", response_model=List[NetworkInfrastructureResponse])
-def get_narrative_network_infrastructures(
-    issp_period: str,
-    is_proposed: Optional[bool] = Query(None),
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    query = db.query(NetworkInfrastructure).filter(NetworkInfrastructure.issp_period == issp_period)
     if is_proposed is not None:
         query = query.filter(NetworkInfrastructure.is_proposed == is_proposed)
     return query.all()
@@ -639,24 +1605,8 @@ def get_cybersecurity_controls(
     query = db.query(CybersecurityControl).filter(CybersecurityControl.issp_period == period)
     if is_proposed is not None:
         query = query.filter(CybersecurityControl.is_proposed == is_proposed)
-    if control_domain:
-        query = query.filter(CybersecurityControl.control_domain == control_domain)
-    return query.all()
-
-
-@router.get("/narratives/{issp_period}/cybersecurity-controls", response_model=List[CybersecurityControlResponse])
-def get_narrative_cybersecurity_controls(
-    issp_period: str,
-    is_proposed: Optional[bool] = Query(None),
-    control_domain: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    query = db.query(CybersecurityControl).filter(CybersecurityControl.issp_period == issp_period)
-    if is_proposed is not None:
-        query = query.filter(CybersecurityControl.is_proposed == is_proposed)
-    if control_domain:
-        query = query.filter(CybersecurityControl.control_domain == control_domain)
+    if control_domain and control_domain.strip().lower() != "all":
+        query = query.filter(CybersecurityControl.control_domain == control_domain.strip())
     return query.all()
 
 
@@ -712,96 +1662,125 @@ def seed_default_cybersecurity_controls(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Seeds all 29 official DICT Cybersecurity Controls (20 Mandatory and 9 Optional)
-    across all 7 Security Domains for both Part II.B.2 (Existing) and Part III.A.2 (Proposed) if missing.
-    """
+    """Seeds the 29 canonical DICT Cybersecurity Controls across all 7 Security Domains."""
     period = issp_period or get_active_issp_period(db)
     
-    OFFICIAL_DICT_CONTROLS = [
-        # 1. PHYSICAL SECURITY
-        {"domain": "Physical Security", "name": "Perimeter Protection", "mandatory": True},
-        {"domain": "Physical Security", "name": "Access Control", "mandatory": True},
-        {"domain": "Physical Security", "name": "Surveillance System", "mandatory": True},
-        {"domain": "Physical Security", "name": "Detection System", "mandatory": False},
-
-        # 2. PERIMETER SECURITY
-        {"domain": "Perimeter Security", "name": "Next Generation Firewalls", "mandatory": True},
-        {"domain": "Perimeter Security", "name": "Intrusion Detection/Prevention Systems (IDS/IPS)", "mandatory": True},
-        {"domain": "Perimeter Security", "name": "Web Application Firewalls (WAFs)", "mandatory": True},
-        {"domain": "Perimeter Security", "name": "Demilitarized Zone (DMZ)", "mandatory": False},
-
-        # 3. NETWORK SECURITY
-        {"domain": "Network Security", "name": "Data Encryption", "mandatory": True},
-        {"domain": "Network Security", "name": "Network Segmentation", "mandatory": False},
-
-        # 4. ENDPOINT SECURITY
-        {"domain": "Endpoint Security", "name": "Anti-virus and Anti-malware Software", "mandatory": True},
-        {"domain": "Endpoint Security", "name": "Application Control", "mandatory": True},
-        {"domain": "Endpoint Security", "name": "BYOD Security", "mandatory": True},
-        {"domain": "Endpoint Security", "name": "Extended Detection and Response (XDR)", "mandatory": False},
-
-        # 5. DATA SECURITY
-        {"domain": "Data Security", "name": "Data Classification", "mandatory": True},
-        {"domain": "Data Security", "name": "Data Loss Prevention (DLP)", "mandatory": True},
-        {"domain": "Data Security", "name": "Data Backups and Recovery", "mandatory": True},
-
-        # 6. APPLICATION SECURITY
-        {"domain": "Application Security", "name": "Regular Security Scanning and Testing", "mandatory": True},
-
-        # 7. OTHER MEASURES
-        {"domain": "Other Measures", "name": "Vulnerability Assessment", "mandatory": True},
-        {"domain": "Other Measures", "name": "Patch Management", "mandatory": True},
-        {"domain": "Other Measures", "name": "Strong Password Policies", "mandatory": True},
-        {"domain": "Other Measures", "name": "Multi-Factor Authentication (MFA)", "mandatory": True},
-        {"domain": "Other Measures", "name": "Access Reviews", "mandatory": True},
-        {"domain": "Other Measures", "name": "Security Logs", "mandatory": True},
-        {"domain": "Other Measures", "name": "Log Analysis", "mandatory": False},
-        {"domain": "Other Measures", "name": "Incident Response Plan", "mandatory": False},
-        {"domain": "Other Measures", "name": "Security Information and Event Management (SIEM)", "mandatory": False},
-        {"domain": "Other Measures", "name": "Penetration Testing", "mandatory": False},
-        {"domain": "Other Measures", "name": "Secure Software Development Life Cycle (SDLC)", "mandatory": False}
+    canonical_controls = [
+        ("Physical Security", "Perimeter Protection", True),
+        ("Physical Security", "Access Control", True),
+        ("Physical Security", "Surveillance System", True),
+        ("Physical Security", "Detection System", False),
+        ("Perimeter Security", "Next Generation Firewalls", True),
+        ("Perimeter Security", "Intrusion Detection/Prevention Systems (IDS/IPS)", True),
+        ("Perimeter Security", "Web Application Firewalls (WAFs)", True),
+        ("Perimeter Security", "Demilitarized Zone (DMZ)", False),
+        ("Network Security", "Data Encryption", True),
+        ("Network Security", "Network Segmentation", False),
+        ("Endpoint Security", "Anti-virus and Anti-malware Software", True),
+        ("Endpoint Security", "Application Control", True),
+        ("Endpoint Security", "BYOD Security", True),
+        ("Endpoint Security", "Extended Detection and Response (XDR)", False),
+        ("Data Security", "Data Classification", True),
+        ("Data Security", "Data Loss Prevention (DLP)", True),
+        ("Data Security", "Data Backups and Recovery", True),
+        ("Application Security", "Regular Security Scanning and Testing", True),
+        ("Other Measures", "Vulnerability Assessment", True),
+        ("Other Measures", "Patch Management", True),
+        ("Other Measures", "Strong Password Policies", True),
+        ("Other Measures", "Multi-Factor Authentication (MFA)", True),
+        ("Other Measures", "Access Reviews", True),
+        ("Other Measures", "Security Logs", True),
+        ("Other Measures", "Log Analysis", False),
+        ("Other Measures", "Incident Response Plan", False),
+        ("Other Measures", "Security Information and Event Management (SIEM)", False),
+        ("Other Measures", "Penetration Testing", False),
+        ("Other Measures", "Secure Software Development Life Cycle (SDLC)", False),
     ]
 
-    added = 0
-    for is_proposed in [False, True]:
-        for c in OFFICIAL_DICT_CONTROLS:
+    added_count = 0
+    for is_prop in [False, True]:
+        for domain, name, is_mand in canonical_controls:
             exists = db.query(CybersecurityControl).filter(
                 CybersecurityControl.issp_period == period,
-                CybersecurityControl.is_proposed == is_proposed,
-                CybersecurityControl.control_name == c["name"]
+                CybersecurityControl.is_proposed == is_prop,
+                CybersecurityControl.control_domain == domain,
+                CybersecurityControl.control_name == name
             ).first()
             if not exists:
-                db.add(CybersecurityControl(
+                ctrl = CybersecurityControl(
                     issp_period=period,
-                    is_proposed=is_proposed,
-                    control_domain=c["domain"],
-                    control_name=c["name"],
-                    is_mandatory=c["mandatory"],
+                    is_proposed=is_prop,
+                    control_domain=domain,
+                    control_name=name,
+                    is_mandatory=is_mand,
                     is_implemented=False
-                ))
-                added += 1
+                )
+                db.add(ctrl)
+                added_count += 1
 
     db.commit()
-    return {"status": "success", "message": f"Successfully initialized {added} standard DICT cybersecurity controls."}
+    return {"status": "success", "message": f"Seeded {added_count} canonical cybersecurity controls for cycle {period}."}
 
 
 # ==========================================================
-# PART II.C & III.D: INFORMATION SYSTEMS REGISTER (SINGULARITY)
+# PART II.C & III.D: INFORMATION SYSTEMS REGISTER & INTAKE
 # ==========================================================
 
 @router.get("/information-systems", response_model=List[InformationSystemResponse])
 def get_information_systems(
     issp_period: Optional[str] = Query(None),
-    status_filter: Optional[SystemStatus] = Query(None),
+    status_filter: Optional[str] = Query(None),
+    submission_status: Optional[str] = Query(None),
+    dept_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
     period = issp_period or get_active_issp_period(db)
     query = db.query(InformationSystem).filter(InformationSystem.issp_period == period)
-    if status_filter:
-        query = query.filter(InformationSystem.status == status_filter)
-    return query.all()
+    
+    if dept_id:
+        query = query.filter(InformationSystem.department_id == dept_id)
+
+    if submission_status and submission_status.strip().lower() != "all":
+        query = query.filter(func.lower(cast(InformationSystem.submission_status, String)) == submission_status.strip().lower())
+
+    if status_filter and status_filter.strip().lower() != "all":
+        clean = status_filter.strip().lower()
+        if clean in ["operational", "existing", "ii.c"]:
+            query = query.filter(func.lower(cast(InformationSystem.status, String)) == "operational")
+        elif clean in ["proposed", "iii.d", "for development / for enhancement"]:
+            query = query.filter(func.lower(cast(InformationSystem.status, String)) != "operational")
+        else:
+            query = query.filter(func.lower(cast(InformationSystem.status, String)) == clean)
+
+    systems = query.options(
+        joinedload(InformationSystem.department),
+        joinedload(InformationSystem.needs_assessment),
+        joinedload(InformationSystem.project_parent),
+        joinedload(InformationSystem.strategic_concern)
+    ).all()
+
+    results = []
+    for sys in systems:
+        resp = InformationSystemResponse.model_validate(sys)
+        if sys.department:
+            resp.department_name = sys.department.name
+        elif sys.system_owner_office:
+            resp.department_name = sys.system_owner_office
+        if sys.needs_assessment:
+            resp.needs_assessment_title = sys.needs_assessment.title
+            
+        if getattr(sys, "project_id", None):
+            resp.project_id = sys.project_id
+            if getattr(sys, "project_parent", None):
+                resp.project_title = sys.project_parent.project_title
+        elif sys.projects and len(sys.projects) > 0:
+            resp.project_id = sys.projects[0].id
+            resp.project_title = sys.projects[0].project_title
+
+        results.append(resp)
+            
+    return results
 
 
 @router.post("/information-systems", response_model=InformationSystemResponse, status_code=status.HTTP_201_CREATED)
@@ -811,14 +1790,62 @@ def create_information_system(
     admin: dict = Depends(require_admin)
 ):
     period = get_active_issp_period(db)
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(InformationSystem, k)}
+    
+    c_str = str(dumped.get("classification", "")).lower()
+    is_support = dumped.get("is_support_to_operations")
+    if is_support is None:
+        is_support = "support" in c_str
+        
+    is_admin = dumped.get("is_general_administrative")
+    if is_admin is None:
+        is_admin = "administrative" in c_str or "admin" in c_str
+        
+    is_ops = dumped.get("is_operations")
+    if is_ops is None:
+        is_ops = "operations" in c_str or not (is_support or is_admin)
+
+    is_frontline = dumped.get("is_frontline_service")
+    if is_frontline is None:
+        is_frontline = "frontline" in c_str and "non-frontline" not in c_str
+
+    is_non_frontline = dumped.get("is_non_frontline_service")
+    if is_non_frontline is None:
+        is_non_frontline = "non-frontline" in c_str
+
+    dumped["is_support_to_operations"] = bool(is_support)
+    dumped["is_general_administrative"] = bool(is_admin)
+    dumped["is_operations"] = bool(is_ops)
+    dumped["is_frontline_service"] = bool(is_frontline)
+    dumped["is_non_frontline_service"] = bool(is_non_frontline)
+    dumped["frontline_hosting_type"] = dumped.get("frontline_hosting_type") or dumped.get("hosting_type") or "Online"
+    dumped["submission_status"] = "Approved"
+
+    if payload.project_id:
+        try:
+            dumped["project_id"] = uuid.UUID(str(payload.project_id))
+        except ValueError:
+            dumped["project_id"] = payload.project_id
+
     db_system = InformationSystem(
         issp_period=period,
-        **payload.model_dump()
+        **dumped
     )
     db.add(db_system)
     db.commit()
     db.refresh(db_system)
-    return db_system
+
+    resp = InformationSystemResponse.model_validate(db_system)
+    if db_system.department:
+        resp.department_name = db_system.department.name
+    elif db_system.system_owner_office:
+        resp.department_name = db_system.system_owner_office
+    if db_system.needs_assessment:
+        resp.needs_assessment_title = db_system.needs_assessment.title
+    if db_system.project_parent:
+        resp.project_id = db_system.project_id
+        resp.project_title = db_system.project_parent.project_title
+    return resp
 
 
 @router.put("/information-systems/{system_id}", response_model=InformationSystemResponse)
@@ -834,11 +1861,245 @@ def update_information_system(
 
     update_data = payload.model_dump(exclude_unset=True)
     for key, value in update_data.items():
-        setattr(db_system, key, value)
+        if hasattr(db_system, key):
+            if key == "project_id" and value:
+                try:
+                    setattr(db_system, key, uuid.UUID(str(value)))
+                except ValueError:
+                    setattr(db_system, key, value)
+            else:
+                setattr(db_system, key, value)
+
+    if "classification" in update_data:
+        c_str = str(db_system.classification).lower()
+        if "is_support_to_operations" not in update_data:
+            db_system.is_support_to_operations = "support" in c_str
+        if "is_general_administrative" not in update_data:
+            db_system.is_general_administrative = "administrative" in c_str or "admin" in c_str
+        if "is_operations" not in update_data:
+            db_system.is_operations = "operations" in c_str or not (db_system.is_support_to_operations or db_system.is_general_administrative)
+        if "is_frontline_service" not in update_data:
+            db_system.is_frontline_service = ("frontline" in c_str and "non-frontline" not in c_str)
+        if "is_non_frontline_service" not in update_data:
+            db_system.is_non_frontline_service = ("non-frontline" in c_str)
+
+    if "hosting_type" in update_data and "frontline_hosting_type" not in update_data:
+        db_system.frontline_hosting_type = update_data["hosting_type"] or "Online"
 
     db.commit()
     db.refresh(db_system)
-    return db_system
+
+    resp = InformationSystemResponse.model_validate(db_system)
+    if db_system.department:
+        resp.department_name = db_system.department.name
+    elif db_system.system_owner_office:
+        resp.department_name = db_system.system_owner_office
+    if db_system.needs_assessment:
+        resp.needs_assessment_title = db_system.needs_assessment.title
+    if db_system.project_parent:
+        resp.project_id = db_system.project_id
+        resp.project_title = db_system.project_parent.project_title
+    return resp
+
+
+@router.put("/information-systems/{system_id}/review", response_model=InformationSystemResponse)
+def review_and_classify_system(
+    system_id: uuid.UUID,
+    payload: SystemApprovalPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Administrative Review Endpoint:
+    Allows MIS Admin to approve or return proposed systems submitted by department end-users,
+    formally binding them to a Strategic Concern (Part II.A) and an ICT Project (Part III.E).
+    When approved, updates the existing proposal or creates a linked line item ensuring NO double counting!
+    """
+    system = db.query(InformationSystem).filter(InformationSystem.id == system_id).first()
+    if not system:
+        raise HTTPException(status_code=404, detail="Information System record not found.")
+
+    action_upper = (payload.action or "APPROVE").strip().upper()
+
+    if action_upper == "RETURN":
+        system.submission_status = "Returned"
+        system.rejection_reason = payload.rejection_reason or "Proposal requires revision or additional technical details."
+        
+        log_audit_event(
+            db=db,
+            action="SYSTEM_PROPOSAL_RETURNED",
+            module="GOVERNANCE",
+            user_id=admin["id"],
+            department_id=system.department_id,
+            ip_address=request.client.host if request.client else None,
+            new_value={"system_name": system.name, "reason": system.rejection_reason}
+        )
+        db.commit()
+        db.refresh(system)
+
+        resp = InformationSystemResponse.model_validate(system)
+        if system.department:
+            resp.department_name = system.department.name
+        elif system.system_owner_office:
+            resp.department_name = system.system_owner_office
+        if system.needs_assessment:
+            resp.needs_assessment_title = system.needs_assessment.title
+        return resp
+
+    # APPROVE & CLASSIFY
+    system.submission_status = "Approved"
+    system.status = payload.status
+    system.rejection_reason = None
+
+    if payload.strategic_concern_id:
+        sc_val = str(payload.strategic_concern_id).strip()
+        if sc_val and sc_val.lower() not in ("none", "null", ""):
+            try:
+                system.strategic_concern_id = uuid.UUID(sc_val)
+            except ValueError:
+                system.strategic_concern_id = sc_val
+
+    # Resolve target project
+    proj_uuid = None
+    target_project = None
+    raw_pid = payload.project_id or system.project_id
+    if raw_pid:
+        pid_clean = str(raw_pid).strip()
+        if pid_clean and pid_clean.lower() not in ("none", "null", ""):
+            try:
+                proj_uuid = uuid.UUID(pid_clean)
+            except ValueError:
+                proj_uuid = pid_clean
+            target_project = db.query(IctProject).filter(IctProject.id == proj_uuid).first()
+
+    if target_project:
+        target_project.system_id = system.id
+        system.project_id = target_project.id
+        strat_cat_name = str(getattr(target_project.project_category, "value", target_project.project_category) or "Internal ICT Projects")
+        fund_source_val = str(getattr(target_project.funding_source, "value", target_project.funding_source) or "General Appropriations Act (GAA)")
+    else:
+        strat_cat_name = "Internal ICT Projects"
+        fund_source_val = "General Appropriations Act (GAA)"
+
+    sc_obj = db.query(StrategicCategory).filter(
+        func.lower(StrategicCategory.name) == func.lower(strat_cat_name)
+    ).first()
+    strat_cat_id = sc_obj.id if sc_obj else None
+
+    # Resolve Target Program Outcome
+    target_outcome_id = None
+    if system.strategic_concern_id:
+        concern = db.query(StrategicConcern).filter(StrategicConcern.id == system.strategic_concern_id).first()
+        if concern and concern.outcome_id:
+            target_outcome_id = concern.outcome_id
+    
+    if not target_outcome_id:
+        default_outcome = db.query(OrganizationalOutcome).filter(
+            OrganizationalOutcome.issp_period == system.issp_period
+        ).first()
+        if default_outcome:
+            target_outcome_id = default_outcome.id
+
+    # Update or Bind matching Proposal line item in Part IV.A
+    linked_props = db.query(Proposal).filter(
+        Proposal.issp_period == system.issp_period,
+        or_(
+            func.lower(Proposal.item_name) == func.lower(f"Software Engineering: {system.name}"),
+            func.lower(Proposal.item_name) == func.lower(f"Software Development: {system.name}"),
+            func.lower(Proposal.item_name) == func.lower(f"Information System Outlay: {system.name}"),
+            func.lower(Proposal.item_name) == func.lower(system.name),
+            and_(
+                Proposal.needs_assessment_id.isnot(None),
+                Proposal.needs_assessment_id == system.needs_assessment_id
+            ) if system.needs_assessment_id else False
+        )
+    ).all()
+
+    proposed_cost = getattr(system, "proposed_cost", Decimal("0.00")) or Decimal("0.00")
+
+    for p in linked_props:
+        if proj_uuid:
+            p.project_id = proj_uuid
+        p.strategic_category = strat_cat_name
+        p.strategic_category_id = strat_cat_id or p.strategic_category_id
+        p.fund_source = fund_source_val
+        if proposed_cost > Decimal("0.00") and p.unit_cost != proposed_cost:
+            p.unit_cost = proposed_cost
+            p.total_cost = proposed_cost
+        if not p.outcome_id and target_outcome_id:
+            p.outcome_id = target_outcome_id
+        p.status = "Approved"
+
+    if not linked_props and proposed_cost > Decimal("0.00"):
+        start_yr = str(system.issp_period.split("-")[0]) if "-" in system.issp_period else "2026"
+        target_dept_id = system.department_id or 1
+        dept = db.query(Department).filter(Department.id == target_dept_id).first()
+        automated_office = dept.name if dept else (system.system_owner_office or "Central Office")
+
+        uacs_code, exp_class = classify_uacs_and_expenditure(
+            item_name=f"Software Development: {system.name}",
+            unit_cost=proposed_cost,
+            strategic_category=strat_cat_name,
+            category="Software",
+            created_by_students=False,
+            db=db
+        )
+
+        new_prop = Proposal(
+            department_id=target_dept_id,
+            issp_period=system.issp_period,
+            outcome_id=target_outcome_id,
+            project_id=proj_uuid,
+            needs_assessment_id=system.needs_assessment_id,
+            strategic_category_id=strat_cat_id,
+            category="Software",
+            strategic_category=strat_cat_name,
+            office_location=automated_office,
+            fund_source=fund_source_val,
+            uacs_object_code=uacs_code,
+            expenditure_class=exp_class,
+            status="Approved",
+            item_name=f"Software Development: {system.name}",
+            unit_cost=proposed_cost,
+            yearly_quantities={start_yr: 1, "Year 1": 1},
+            total_qty=1,
+            total_cost=proposed_cost,
+            justification=f"Approved development and implementation outlay for {system.name}.",
+            system_development_status=system.status,
+            target_office_automated=automated_office
+        )
+        db.add(new_prop)
+
+    log_audit_event(
+        db=db,
+        action="SYSTEM_PROPOSAL_APPROVED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        department_id=system.department_id,
+        ip_address=request.client.host if request.client else None,
+        new_value={
+            "system_name": system.name, 
+            "status": system.status, 
+            "strategic_concern_id": str(system.strategic_concern_id) if system.strategic_concern_id else None,
+            "project_id": str(proj_uuid) if proj_uuid else None
+        }
+    )
+
+    db.commit()
+    db.refresh(system)
+
+    resp = InformationSystemResponse.model_validate(system)
+    if db_system_dept := system.department:
+        resp.department_name = db_system_dept.name
+    elif system.system_owner_office:
+        resp.department_name = system.system_owner_office
+    if system.needs_assessment:
+        resp.needs_assessment_title = system.needs_assessment.title
+    if system.project_parent:
+        resp.project_id = system.project_id
+        resp.project_title = system.project_parent.project_title
+    return resp
 
 
 @router.delete("/information-systems/{system_id}")
@@ -851,12 +2112,19 @@ def delete_information_system(
     if not db_system:
         raise HTTPException(status_code=404, detail="Information System not found.")
 
-    linked_projects = db.query(IctProject).filter(IctProject.system_id == system_id).count()
+    linked_projects = db.query(IctProject).filter(
+        or_(
+            IctProject.system_id == system_id,
+            IctProject.id == db_system.project_id
+        )
+    ).count()
     if linked_projects > 0:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot delete system '{db_system.name}'. There are {linked_projects} ICT projects linked to it."
         )
+
+    db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.system_id == system_id).delete(synchronize_session=False)
 
     db.delete(db_system)
     db.commit()
@@ -876,108 +2144,93 @@ def get_ict_projects(
 ):
     try:
         period = issp_period or get_active_issp_period(db)
-        
-        base_projects = db.query(IctProject).filter(IctProject.issp_period == period).all()
+        base_projects = db.query(IctProject).options(
+            selectinload(IctProject.resource_items),
+            selectinload(IctProject.linked_systems),
+            joinedload(IctProject.information_system)
+        ).filter(IctProject.issp_period == period).all()
 
         if category_filter and category_filter.strip().lower() != "all":
             cat_clean = category_filter.strip().lower()
-            filtered_projects = []
-            for p in base_projects:
-                p_cat_val = str(getattr(p.project_category, "value", p.project_category) or "").lower()
-                p_cat_name = str(getattr(p.project_category, "name", "") or "").lower()
-                p_cat_raw = str(p.project_category or "").lower()
-
-                if (
-                    cat_clean == p_cat_val or
-                    cat_clean == p_cat_name or
-                    cat_clean in p_cat_val or
-                    cat_clean in p_cat_raw or
-                    cat_clean.replace(" ", "_") == p_cat_name or
-                    cat_clean.replace("-", "_") in p_cat_name or
-                    ("cross" in cat_clean and "cross" in p_cat_val)
-                ):
-                    filtered_projects.append(p)
+            filtered_projects = [
+                p for p in base_projects 
+                if cat_clean in str(getattr(p.project_category, "value", p.project_category) or "").lower()
+            ]
             projects = filtered_projects
         else:
             projects = base_projects
 
-        total_costs_map = {}
-        try:
-            cost_proposals = (
-                db.query(
-                    Proposal.project_id,
-                    Proposal.total_cost,
-                    Proposal.year_1_qty,
-                    Proposal.year_2_qty,
-                    Proposal.year_3_qty,
-                    Proposal.unit_cost
-                )
-                .filter(
-                    Proposal.issp_period == period,
-                    Proposal.project_id.isnot(None),
-                    or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-                )
-                .all()
-            )
-            for row in cost_proposals:
-                pid = row[0]
-                if not pid:
-                    continue
-                pid_str = str(pid).strip()
-                cost = row[1]
-                if cost is None:
-                    q = (row[2] or 0) + (row[3] or 0) + (row[4] or 0)
-                    u = row[5] or Decimal("0.00")
-                    cost = Decimal(q) * Decimal(str(u))
-                else:
-                    cost = Decimal(str(cost))
-
-                total_costs_map[pid_str] = total_costs_map.get(pid_str, Decimal("0.00")) + cost
-                total_costs_map[pid] = total_costs_map.get(pid, Decimal("0.00")) + cost
-        except Exception as cost_map_err:
-            db.rollback()
-            logger.warning(f"Could not batch compute project total costs: {cost_map_err}")
-
         results = []
         for proj in projects:
-            try:
-                pid = proj.id
-                pid_str = str(pid).strip() if pid else ""
-                total_cost = total_costs_map.get(pid_str) or total_costs_map.get(pid) or Decimal("0.00")
+            pid_str = str(proj.id)
 
-                results.append({
-                    "id": str(pid),
-                    "issp_period": str(proj.issp_period or period),
-                    "system_id": str(proj.system_id) if proj.system_id else None,
-                    "project_title": str(proj.project_title or ""),
-                    "project_category": str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects"),
-                    "description": str(proj.description or ""),
-                    "objectives": str(proj.objectives or ""),
-                    "aligns_pip": bool(getattr(proj, "aligns_pip", False)),
-                    "aligns_ncsp": bool(getattr(proj, "aligns_ncsp", False)),
-                    "aligns_egmp": bool(getattr(proj, "aligns_egmp", False)),
-                    "aligns_pcb": bool(getattr(proj, "aligns_pcb", False)),
-                    "aligns_others": bool(getattr(proj, "aligns_others", False)),
-                    "aligns_others_specify": getattr(proj, "aligns_others_specify", None),
-                    "harmonizes_national_priority": bool(getattr(proj, "harmonizes_national_priority", False)),
-                    "harmonizes_resource_optimization": bool(getattr(proj, "harmonizes_resource_optimization", False)),
-                    "harmonizes_pegif": bool(getattr(proj, "harmonizes_pegif", False)),
-                    "harmonizes_cross_collaboration": bool(getattr(proj, "harmonizes_cross_collaboration", False)),
-                    "harmonizes_scalability": bool(getattr(proj, "harmonizes_scalability", False)),
-                    "duration_start_year": int(getattr(proj, "duration_start_year", 2026) or 2026),
-                    "duration_end_year": int(getattr(proj, "duration_end_year", 2028) or 2028),
-                    "annual_deliverables": getattr(proj, "annual_deliverables", {}) or {},
-                    "year_1_deliverables": str(getattr(proj, "year_1_deliverables", "") or ""),
-                    "year_2_deliverables": str(getattr(proj, "year_2_deliverables", "") or ""),
-                    "year_3_deliverables": str(getattr(proj, "year_3_deliverables", "") or ""),
-                    "implementing_unit": str(getattr(proj, "implementing_unit", "") or "ICT Management Office"),
-                    "funding_source": str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)"),
-                    "lead_agency": str(proj.lead_agency) if proj.lead_agency else None,
-                    "partner_agencies": str(proj.partner_agencies) if proj.partner_agencies else None,
-                    "computed_total_project_cost": float(total_cost)
+            linked_items = []
+            for item in proj.resource_items:
+                if not getattr(item, "is_archived", False):
+                    linked_items.append({
+                        "id": str(item.id),
+                        "item_name": item.item_name,
+                        "category": str(getattr(item.category, "value", item.category) or "Hardware"),
+                        "strategic_category": str(getattr(item.strategic_category, "value", item.strategic_category) or ""),
+                        "uacs_object_code": str(getattr(item.uacs_object_code, "value", item.uacs_object_code) or ""),
+                        "expenditure_class": str(getattr(item.expenditure_class, "value", item.expenditure_class) or ""),
+                        "unit_cost": float(item.unit_cost or 0),
+                        "total_qty": int(item.total_qty or 0),
+                        "total_cost": float(item.total_cost or 0),
+                        "status": str(getattr(item.status, "value", item.status) or "Draft"),
+                        "office_location": item.target_office_automated or item.office_location or "Central Office"
+                    })
+
+            linked_sys_list = []
+            all_systems = list(proj.linked_systems or [])
+            if proj.information_system and proj.information_system not in all_systems:
+                all_systems.append(proj.information_system)
+
+            for s in all_systems:
+                linked_sys_list.append({
+                    "id": str(s.id),
+                    "name": s.name,
+                    "status": str(getattr(s.status, "value", s.status) or "Operational"),
+                    "proposed_cost": float(s.proposed_cost or 0),
+                    "classification": str(getattr(s.classification, "value", s.classification) or "")
                 })
-            except Exception as item_err:
-                logger.error(f"Error serializing ICT project {getattr(proj, 'id', '')}: {item_err}", exc_info=True)
+
+            total_project_cost = float(proj.computed_total_project_cost)
+
+            results.append({
+                "id": pid_str,
+                "issp_period": str(proj.issp_period or period),
+                "system_id": str(proj.system_id) if proj.system_id else None,
+                "project_title": str(proj.project_title or ""),
+                "project_category": str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects"),
+                "description": str(proj.description or ""),
+                "objectives": str(proj.objectives or ""),
+                "aligns_pip": bool(getattr(proj, "aligns_pip", False)),
+                "aligns_ncsp": bool(getattr(proj, "aligns_ncsp", False)),
+                "aligns_egmp": bool(getattr(proj, "aligns_egmp", False)),
+                "aligns_pcb": bool(getattr(proj, "aligns_pcb", False)),
+                "aligns_others": bool(getattr(proj, "aligns_others", False)),
+                "aligns_others_specify": getattr(proj, "aligns_others_specify", None),
+                "harmonization_criteria": getattr(proj, "harmonization_criteria", {}) or {},
+                "harmonizes_national_priority": bool(getattr(proj, "harmonizes_national_priority", False)),
+                "harmonizes_resource_optimization": bool(getattr(proj, "harmonizes_resource_optimization", False)),
+                "harmonizes_pegif": bool(getattr(proj, "harmonizes_pegif", False)),
+                "harmonizes_cross_collaboration": bool(getattr(proj, "harmonizes_cross_collaboration", False)),
+                "harmonizes_scalability": bool(getattr(proj, "harmonizes_scalability", False)),
+                "duration_start_year": int(getattr(proj, "duration_start_year", 2026) or 2026),
+                "duration_end_year": int(getattr(proj, "duration_end_year", 2028) or 2028),
+                "annual_deliverables": getattr(proj, "annual_deliverables", {}) or {},
+                "year_1_deliverables": str(getattr(proj, "year_1_deliverables", "") or ""),
+                "year_2_deliverables": str(getattr(proj, "year_2_deliverables", "") or ""),
+                "year_3_deliverables": str(getattr(proj, "year_3_deliverables", "") or ""),
+                "implementing_unit": str(getattr(proj, "implementing_unit", "") or "ICT Management Office"),
+                "funding_source": str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)"),
+                "lead_agency": str(proj.lead_agency) if proj.lead_agency else None,
+                "partner_agencies": str(proj.partner_agencies) if proj.partner_agencies else None,
+                "computed_total_project_cost": total_project_cost,
+                "linked_proposals": linked_items,
+                "linked_systems": linked_sys_list
+            })
 
         return results
     except Exception as e:
@@ -1002,6 +2255,13 @@ def create_ict_project(
         db.add(new_project)
         db.commit()
         db.refresh(new_project)
+
+        if new_project.system_id:
+            db.query(InformationSystem).filter(InformationSystem.id == new_project.system_id).update(
+                {"project_id": new_project.id},
+                synchronize_session=False
+            )
+            db.commit()
         
         return {
             "id": str(new_project.id),
@@ -1017,6 +2277,7 @@ def create_ict_project(
             "aligns_pcb": bool(new_project.aligns_pcb),
             "aligns_others": bool(getattr(new_project, "aligns_others", False)),
             "aligns_others_specify": getattr(new_project, "aligns_others_specify", None),
+            "harmonization_criteria": getattr(new_project, "harmonization_criteria", {}) or {},
             "harmonizes_national_priority": bool(new_project.harmonizes_national_priority),
             "harmonizes_resource_optimization": bool(new_project.harmonizes_resource_optimization),
             "harmonizes_pegif": bool(new_project.harmonizes_pegif),
@@ -1032,7 +2293,9 @@ def create_ict_project(
             "funding_source": str(getattr(new_project.funding_source, "value", new_project.funding_source) or "General Appropriations Act (GAA)"),
             "lead_agency": new_project.lead_agency,
             "partner_agencies": new_project.partner_agencies,
-            "computed_total_project_cost": 0.0
+            "computed_total_project_cost": 0.0,
+            "linked_proposals": [],
+            "linked_systems": []
         }
     except Exception as e:
         db.rollback()
@@ -1056,20 +2319,30 @@ def update_ict_project(
         for key, val in update_dict.items():
             setattr(project, key, val)
 
+        if "system_id" in update_dict:
+            if project.system_id:
+                db.query(InformationSystem).filter(InformationSystem.id == project.system_id).update(
+                    {"project_id": project.id},
+                    synchronize_session=False
+                )
+
+        # Propagate Category and Fund Source updates down to all linked proposals
+        if "funding_source" in update_dict or "project_category" in update_dict:
+            strat_cat_val = str(getattr(project.project_category, "value", project.project_category) or "Internal ICT Projects")
+            sc_obj = db.query(StrategicCategory).filter(
+                func.lower(StrategicCategory.name) == func.lower(strat_cat_val)
+            ).first()
+            strat_cat_id = sc_obj.id if sc_obj else None
+
+            db.query(Proposal).filter(Proposal.project_id == project.id).update({
+                "fund_source": str(getattr(project.funding_source, "value", project.funding_source) or "General Appropriations Act (GAA)"),
+                "strategic_category": strat_cat_val,
+                "strategic_category_id": strat_cat_id
+            }, synchronize_session=False)
+
         db.commit()
         db.refresh(project)
         
-        total_cost = Decimal("0.00")
-        try:
-            cost_sum = db.query(func.sum(Proposal.total_cost)).filter(
-                Proposal.project_id == project.id,
-                or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-            ).scalar()
-            if cost_sum is not None:
-                total_cost = Decimal(str(cost_sum))
-        except Exception:
-            db.rollback()
-
         return {
             "id": str(project.id),
             "issp_period": project.issp_period,
@@ -1084,6 +2357,7 @@ def update_ict_project(
             "aligns_pcb": bool(project.aligns_pcb),
             "aligns_others": bool(getattr(project, "aligns_others", False)),
             "aligns_others_specify": getattr(project, "aligns_others_specify", None),
+            "harmonization_criteria": getattr(project, "harmonization_criteria", {}) or {},
             "harmonizes_national_priority": bool(project.harmonizes_national_priority),
             "harmonizes_resource_optimization": bool(project.harmonizes_resource_optimization),
             "harmonizes_pegif": bool(project.harmonizes_pegif),
@@ -1099,7 +2373,7 @@ def update_ict_project(
             "funding_source": str(getattr(project.funding_source, "value", project.funding_source) or "General Appropriations Act (GAA)"),
             "lead_agency": project.lead_agency,
             "partner_agencies": project.partner_agencies,
-            "computed_total_project_cost": float(total_cost)
+            "computed_total_project_cost": float(project.computed_total_project_cost)
         }
     except HTTPException:
         raise
@@ -1127,6 +2401,13 @@ def delete_ict_project(
                 detail=f"Cannot delete project '{project.project_title}'. There are {linked_items} financial line items linked to it in Part IV.A."
             )
 
+        db.query(PerformanceMetric).filter(PerformanceMetric.project_id == project_id).delete(synchronize_session=False)
+
+        db.query(InformationSystem).filter(InformationSystem.project_id == project_id).update(
+            {"project_id": None},
+            synchronize_session=False
+        )
+
         db.delete(project)
         db.commit()
         return {"status": "success", "message": "ICT Project removed from framework."}
@@ -1139,23 +2420,1022 @@ def delete_ict_project(
 
 
 # ==========================================================
+# 9. REVISED PROJECT LINKING & REAL-TIME COST RECALCULATION
+# ==========================================================
+
+@router.post("/ict-projects/{project_id}/links")
+def update_project_links(
+    project_id: uuid.UUID,
+    payload: ProjectLinksPayload,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Binds or unbinds proposals and information systems directly to an ICT project.
+    Guarantees:
+    1. Unlinked/detached proposals have their project_id cleared (project_id = None).
+    2. Detached proposals immediately stop inflating the project's computed total cost.
+    3. Attached proposals automatically inherit the project's Strategic Category and Fund Source.
+    4. Session relationship caches are expired so next reads reflect the true database state.
+    """
+    project = db.query(IctProject).filter(IctProject.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="ICT Project not found.")
+
+    strat_cat_val = str(getattr(project.project_category, "value", project.project_category) or "Internal ICT Projects")
+    sc_obj = db.query(StrategicCategory).filter(
+        func.lower(StrategicCategory.name) == func.lower(strat_cat_val)
+    ).first()
+    strat_cat_id = sc_obj.id if sc_obj else None
+    proj_fund_source = str(getattr(project.funding_source, "value", project.funding_source) or "General Appropriations Act (GAA)")
+
+    # 1. Update proposal linkages
+    if payload.proposal_ids is not None:
+        p_uuids = set()
+        for pid in payload.proposal_ids:
+            if pid:
+                try:
+                    p_uuids.add(uuid.UUID(str(pid)))
+                except ValueError:
+                    p_uuids.add(pid)
+
+        # Unlink proposals that were detached
+        current_proposals = db.query(Proposal).filter(Proposal.project_id == project.id).all()
+        for p in current_proposals:
+            if p.id not in p_uuids:
+                p.project_id = None
+                p.strategic_category = "Office Productivity"
+                p.strategic_category_id = None
+
+        # Bind selected proposals and inherit project parameters
+        for pid in p_uuids:
+            prop = db.query(Proposal).filter(Proposal.id == pid).first()
+            if prop:
+                prop.project_id = project.id
+                prop.strategic_category = strat_cat_val
+                prop.fund_source = proj_fund_source
+                if strat_cat_id:
+                    prop.strategic_category_id = strat_cat_id
+
+    # 2. Update system linkages
+    if payload.system_ids is not None:
+        s_uuids = set()
+        for sid in payload.system_ids:
+            if sid:
+                try:
+                    s_uuids.add(uuid.UUID(str(sid)))
+                except ValueError:
+                    s_uuids.add(sid)
+
+        # Unlink systems that were detached
+        current_systems = db.query(InformationSystem).filter(
+            or_(
+                InformationSystem.project_id == project.id,
+                InformationSystem.id == project.system_id
+            )
+        ).all()
+        for s in current_systems:
+            if s.id not in s_uuids:
+                s.project_id = None
+                if project.system_id == s.id:
+                    project.system_id = None
+
+        for sid in s_uuids:
+            sys_obj = db.query(InformationSystem).filter(InformationSystem.id == sid).first()
+            if sys_obj:
+                sys_obj.project_id = project.id
+
+        if s_uuids:
+            project.system_id = list(s_uuids)[0]
+
+    db.commit()
+    db.expire_all()
+    db.refresh(project)
+
+    return {
+        "status": "success",
+        "message": f"Project linkages updated for '{project.project_title}'.",
+        "computed_total_project_cost": float(project.computed_total_project_cost)
+    }
+
+
+# ==========================================================
+# PART III.F: PERFORMANCE MEASUREMENT FRAMEWORK (DECOUPLED)
+# ==========================================================
+
+@router.get("/narratives/{issp_period}/metrics", response_model=List[PerformanceMetricResponse])
+def get_performance_metrics(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
+
+
+@router.post("/narratives/{issp_period}/metrics", response_model=PerformanceMetricResponse, status_code=status.HTTP_201_CREATED)
+def add_performance_metric(
+    issp_period: str, 
+    payload: PerformanceMetricCreate, 
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    resolved_title = payload.project_title.strip() if payload.project_title else "Institutional ICT Governance"
+    
+    metric = PerformanceMetric(
+        issp_period=issp_period,
+        project_id=payload.project_id if payload.project_id else None,
+        project_title=resolved_title,
+        result_hierarchy=payload.result_hierarchy,
+        indicator=payload.indicator.strip(),
+        baseline=payload.baseline.strip(),
+        target=payload.target.strip(),
+        annual_targets=payload.annual_targets or {},
+        collection_method=payload.collection_method.strip(),
+        responsibility=payload.responsibility.strip()
+    )
+    db.add(metric)
+    db.commit()
+    db.refresh(metric)
+    return metric
+
+
+@router.put("/metrics/{id}", response_model=PerformanceMetricResponse)
+def update_performance_metric(
+    id: uuid.UUID, 
+    payload: PerformanceMetricCreate, 
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    metric = db.query(PerformanceMetric).filter(PerformanceMetric.id == id).first()
+    if not metric:
+        raise HTTPException(status_code=404, detail="Performance metric not found.")
+
+    for k, v in payload.model_dump().items():
+        setattr(metric, k, v)
+
+    db.commit()
+    db.refresh(metric)
+    return metric
+
+
+@router.delete("/metrics/{id}")
+def delete_performance_metric(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    db.query(PerformanceMetric).filter(PerformanceMetric.id == id).delete()
+    db.commit()
+    return {"status": "success"}
+
+
+# ==========================================================
+# DYNAMIC STRATEGIC CATEGORIES CRUD (PART IV.A & TABLE B.1)
+# ==========================================================
+
+@router.get("/strategic-categories", response_model=List[StrategicCategoryResponse])
+def get_strategic_categories(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(StrategicCategory).filter(StrategicCategory.is_active == True).order_by(StrategicCategory.order_index.asc()).all()
+
+
+@router.post("/strategic-categories", response_model=StrategicCategoryResponse, status_code=status.HTTP_201_CREATED)
+def create_strategic_category(payload: StrategicCategoryCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    name = payload.name.strip()
+    code = (payload.code or name.upper().replace(" ", "_")).strip()
+    
+    existing = db.query(StrategicCategory).filter(or_(StrategicCategory.code == code, StrategicCategory.name == name)).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Strategic category with name or code '{code}' already exists.")
+
+    cat = StrategicCategory(
+        name=name,
+        code=code,
+        is_project_linked=payload.is_project_linked,
+        is_recurring_expense=payload.is_recurring_expense,
+        order_index=payload.order_index,
+        is_active=payload.is_active,
+        description=payload.description
+    )
+    db.add(cat)
+    db.commit()
+    db.refresh(cat)
+    return cat
+
+
+@router.put("/strategic-categories/{cat_id}", response_model=StrategicCategoryResponse)
+def update_strategic_category(cat_id: int, payload: StrategicCategoryUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    cat = db.query(StrategicCategory).filter(StrategicCategory.id == cat_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Strategic category not found.")
+    
+    old_name = cat.name
+    if payload.name:
+        new_name = payload.name.strip()
+        if new_name != old_name:
+            db.query(Proposal).filter(Proposal.strategic_category == old_name).update(
+                {"strategic_category": new_name}, 
+                synchronize_session=False
+            )
+            cat.name = new_name
+
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        if k != "name" and hasattr(cat, k):
+            setattr(cat, k, v)
+    
+    db.commit()
+    db.refresh(cat)
+    return cat
+
+
+@router.delete("/strategic-categories/{cat_id}")
+def delete_strategic_category(cat_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    cat = db.query(StrategicCategory).filter(StrategicCategory.id == cat_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found.")
+
+    linked_count = db.query(Proposal).filter(
+        or_(Proposal.strategic_category_id == cat.id, Proposal.strategic_category == cat.name)
+    ).count()
+
+    if linked_count > 0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot delete category '{cat.name}'. It is currently linked to {linked_count} resource proposals."
+        )
+
+    db.delete(cat)
+    db.commit()
+    return {"status": "success", "message": f"Category '{cat.name}' deleted."}
+
+
+# ==========================================================
+# DYNAMIC UACS / OBJECT OF EXPENDITURE CRUD (TABLE B.4)
+# ==========================================================
+
+@router.get("/uacs-catalog", response_model=List[UacsCatalogItemResponse])
+def get_uacs_catalog(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return db.query(UacsCatalogItem).filter(UacsCatalogItem.is_active == True).order_by(UacsCatalogItem.id.asc()).all()
+
+
+@router.post("/uacs-catalog", response_model=UacsCatalogItemResponse, status_code=status.HTTP_201_CREATED)
+def create_uacs_entry(payload: UacsCatalogItemCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    code = payload.uacs_code.strip()
+    existing = db.query(UacsCatalogItem).filter(UacsCatalogItem.uacs_code == code).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"UACS code '{code}' already exists in catalog.")
+
+    item = UacsCatalogItem(
+        uacs_code=code,
+        account_title=payload.account_title.strip(),
+        expenditure_class=payload.expenditure_class,
+        is_subscription_default=payload.is_subscription_default,
+        is_active=payload.is_active,
+        description=payload.description
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/uacs-catalog/{item_id}", response_model=UacsCatalogItemResponse)
+def update_uacs_entry(item_id: int, payload: Dict[str, Any], db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(UacsCatalogItem).filter(UacsCatalogItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="UACS entry not found.")
+    
+    if "account_title" in payload: item.account_title = payload["account_title"].strip()
+    if "expenditure_class" in payload: item.expenditure_class = payload["expenditure_class"].strip()
+    if "is_subscription_default" in payload: item.is_subscription_default = bool(payload["is_subscription_default"])
+    if "description" in payload: item.description = payload["description"]
+    
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/uacs-catalog/{item_id}")
+def delete_uacs_entry(item_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(UacsCatalogItem).filter(UacsCatalogItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="UACS entry not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": "UACS object code removed from catalog."}
+
+
+# ==========================================================
+# GOVERNANCE POLICIES & INFLATION ADJUSTMENT SETTINGS
+# ==========================================================
+
+@router.get("/governance/policy-settings", response_model=PolicySettingsResponse)
+def get_policy_settings(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    policy = get_governance_policy(db)
+    return PolicySettingsResponse(
+        capitalization_threshold=float(policy["capitalization_threshold"]),
+        major_outlay_review_threshold=float(policy["major_outlay_review_threshold"]),
+        hardware_replacement_buffer_units=int(policy["hardware_replacement_buffer_units"]),
+        canvas_expiration_warning_days=int(policy["canvas_expiration_warning_days"]),
+        inflation_rates_by_year={str(k): float(v) for k, v in policy.get("inflation_rates_by_year", {}).items()}
+    )
+
+
+@router.post("/governance/policy-settings")
+def update_policy_settings(payload: PolicySettingsUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    def upsert_setting(k, v):
+        row = db.query(SystemSetting).filter(SystemSetting.key == k).first()
+        if not row:
+            db.add(SystemSetting(key=k, value=str(v)))
+        else:
+            row.value = str(v)
+
+    if payload.capitalization_threshold is not None:
+        upsert_setting("capitalization_threshold", payload.capitalization_threshold)
+    if payload.major_outlay_review_threshold is not None:
+        upsert_setting("major_outlay_review_threshold", payload.major_outlay_review_threshold)
+    if payload.hardware_replacement_buffer_units is not None:
+        upsert_setting("hardware_replacement_buffer_units", payload.hardware_replacement_buffer_units)
+    if payload.canvas_expiration_warning_days is not None:
+        upsert_setting("canvas_expiration_warning_days", payload.canvas_expiration_warning_days)
+
+    db.commit()
+    return {"status": "success", "message": "Governance policy settings updated."}
+
+
+@router.get("/governance/inflation-settings", response_model=InflationSettingsResponse)
+def get_inflation_settings(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    active_period = get_active_issp_period(db)
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == active_period).first()
+    years = get_cycle_year_range(narrative, active_period)
+    start_year = years[0] if years else 2026
+
+    policy = get_governance_policy(db)
+    stored_rates = policy.get("inflation_rates_by_year", {})
+
+    response_rates = []
+    for idx, yr in enumerate(years):
+        if idx == 0:
+            rate_percent = 0.0
+        elif str(yr) in stored_rates:
+            rate_percent = float(stored_rates[str(yr)])
+        else:
+            rate_percent = 3.0 if idx == 1 else (5.0 if idx == 2 else 5.0 + (idx - 2) * 2.0)
+
+        response_rates.append({
+            "year": yr,
+            "year_index": idx + 1,
+            "rate_percent": rate_percent,
+            "is_base_year": (idx == 0)
+        })
+
+    return InflationSettingsResponse(
+        active_cycle=active_period,
+        start_year=start_year,
+        rates=response_rates
+    )
+
+
+@router.post("/governance/inflation-settings")
+def update_inflation_settings(
+    payload: InflationSettingsUpdate, 
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    rates_dict = payload.rates
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "inflation_rates_by_year").first()
+    if not setting:
+        db.add(SystemSetting(key="inflation_rates_by_year", value=json.dumps(rates_dict)))
+    else:
+        setting.value = json.dumps(rates_dict)
+
+    active_period = get_active_issp_period(db)
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == active_period).first()
+    start_year = narrative.issp_period_from if narrative else 2026
+
+    proposals = db.query(Proposal).filter(Proposal.issp_period == active_period).all()
+    for p in proposals:
+        base_unit = p.unit_cost if p.unit_cost is not None else Decimal("0.00")
+        accumulated = Decimal("0.00")
+        for yr_str, qty in (p.yearly_quantities or {}).items():
+            try:
+                c_yr = int(yr_str)
+                q_int = int(qty)
+                if q_int > 0:
+                    adj_unit = get_adjusted_unit_cost_for_year(db, base_unit, c_yr, start_year)
+                    accumulated += Decimal(q_int) * adj_unit
+            except (ValueError, TypeError):
+                continue
+        p.total_cost = accumulated
+
+    db.commit()
+    return {
+        "status": "success", 
+        "message": "Inflation buffer percentages updated and synchronized across all proposal total costs."
+    }
+
+
+# ==========================================================
+# DYNAMIC HARMONIZATION CRITERIA CRUD
+# ==========================================================
+
+@router.get("/governance/harmonization-criteria", response_model=List[HarmonizationCriterionResponse])
+def get_harmonization_criteria(
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    rows = db.query(DynamicChecklistCriteria).filter(
+        DynamicChecklistCriteria.checklist_type == "HARMONIZATION_FRAMEWORK",
+        DynamicChecklistCriteria.is_active == True
+    ).order_by(DynamicChecklistCriteria.order_index.asc()).all()
+
+    if not rows:
+        default_criteria = [
+            ("National Prioritization (PDP 2023-2028)", False, "Alignment with National Development Goals"),
+            ("Resource Optimization (GovNet, GovCloud)", False, "Shared infrastructure hosting & bandwidth"),
+            ("PeGIF Standardized APIs & Interoperability", True, "Interoperability with NGDX/PeGIF"),
+            ("Cross-Agency Collaboration (JMC / MOA)", False, "Formal cross-agency governance agreement"),
+            ("Scalability and Sustainability (SPAR / PREXC)", True, "Program convergence & performance alignment")
+        ]
+        for idx, (name, is_mand, desc) in enumerate(default_criteria, start=1):
+            crit = DynamicChecklistCriteria(
+                checklist_type="HARMONIZATION_FRAMEWORK",
+                domain_or_category="Harmonization",
+                criteria_name=name,
+                is_mandatory=is_mand,
+                description=desc,
+                order_index=idx,
+                is_active=True
+            )
+            db.add(crit)
+        db.commit()
+        rows = db.query(DynamicChecklistCriteria).filter(
+            DynamicChecklistCriteria.checklist_type == "HARMONIZATION_FRAMEWORK",
+            DynamicChecklistCriteria.is_active == True
+        ).order_by(DynamicChecklistCriteria.order_index.asc()).all()
+
+    return [
+        HarmonizationCriterionResponse(
+            id=r.id,
+            name=r.criteria_name,
+            is_mandatory=r.is_mandatory,
+            description=r.description
+        ) for r in rows
+    ]
+
+
+@router.post("/governance/harmonization-criteria", response_model=HarmonizationCriterionResponse, status_code=status.HTTP_201_CREATED)
+def create_harmonization_criterion(
+    payload: HarmonizationCriterionCreate, 
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Criterion name is required.")
+    
+    max_idx = db.query(func.max(DynamicChecklistCriteria.order_index)).filter(
+        DynamicChecklistCriteria.checklist_type == "HARMONIZATION_FRAMEWORK"
+    ).scalar() or 0
+
+    crit = DynamicChecklistCriteria(
+        checklist_type="HARMONIZATION_FRAMEWORK",
+        domain_or_category="Harmonization",
+        criteria_name=name,
+        is_mandatory=payload.is_mandatory,
+        description=payload.description,
+        order_index=max_idx + 1,
+        is_active=True
+    )
+    db.add(crit)
+    db.commit()
+    db.refresh(crit)
+    return HarmonizationCriterionResponse(
+        id=crit.id,
+        name=crit.criteria_name,
+        is_mandatory=crit.is_mandatory,
+        description=crit.description
+    )
+
+
+@router.put("/governance/harmonization-criteria/{criterion_id}", response_model=HarmonizationCriterionResponse)
+def update_harmonization_criterion(
+    criterion_id: int,
+    payload: HarmonizationCriterionUpdate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    crit = db.query(DynamicChecklistCriteria).filter(
+        DynamicChecklistCriteria.id == criterion_id,
+        DynamicChecklistCriteria.checklist_type == "HARMONIZATION_FRAMEWORK"
+    ).first()
+    if not crit:
+        raise HTTPException(status_code=404, detail="Harmonization criterion not found.")
+
+    if payload.name is not None:
+        crit.criteria_name = payload.name.strip()
+    if payload.is_mandatory is not None:
+        crit.is_mandatory = payload.is_mandatory
+    if payload.description is not None:
+        crit.description = payload.description
+
+    db.commit()
+    db.refresh(crit)
+    return HarmonizationCriterionResponse(
+        id=crit.id,
+        name=crit.criteria_name,
+        is_mandatory=crit.is_mandatory,
+        description=crit.description
+    )
+
+
+@router.delete("/governance/harmonization-criteria/{criterion_id}")
+def delete_harmonization_criterion(
+    criterion_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    crit = db.query(DynamicChecklistCriteria).filter(
+        DynamicChecklistCriteria.id == criterion_id,
+        DynamicChecklistCriteria.checklist_type == "HARMONIZATION_FRAMEWORK"
+    ).first()
+    if not crit:
+        raise HTTPException(status_code=404, detail="Harmonization criterion not found.")
+
+    db.delete(crit)
+    db.commit()
+    return {"status": "success", "message": "Harmonization criterion removed from framework."}
+
+
+# ==========================================================
+# DYNAMIC DEVELOPMENT STRATEGIES CRUD
+# ==========================================================
+
+@router.get("/governance/development-strategies", response_model=List[DevelopmentStrategyResponse])
+def get_development_strategies(
+    db: Session = Depends(get_db), 
+    admin: dict = Depends(require_admin)
+):
+    rows = db.query(SystemTaxonomy).filter(
+        SystemTaxonomy.taxonomy_type == "DEVELOPMENT_STRATEGY",
+        SystemTaxonomy.is_active == True
+    ).order_by(SystemTaxonomy.order_index.asc()).all()
+
+    if not rows:
+        default_strats = [
+            ("IN_HOUSE", "In-House Development", "Internally developed by agency IT"),
+            ("OUTSOURCED", "Outsourced", "Contracted to third-party vendor"),
+            ("COTS", "Commercial Off-The-Shelf (COTS)", "Commercial off-the-shelf software"),
+            ("COMBINATION", "Combination / Hybrid", "Hybrid in-house & vendor development")
+        ]
+        for idx, (code, name, desc) in enumerate(default_strats, start=1):
+            item = SystemTaxonomy(
+                taxonomy_type="DEVELOPMENT_STRATEGY",
+                code=code,
+                display_name=name,
+                description=desc,
+                order_index=idx,
+                is_active=True
+            )
+            db.add(item)
+        db.commit()
+        rows = db.query(SystemTaxonomy).filter(
+            SystemTaxonomy.taxonomy_type == "DEVELOPMENT_STRATEGY",
+            SystemTaxonomy.is_active == True
+        ).order_by(SystemTaxonomy.order_index.asc()).all()
+
+    return [
+        DevelopmentStrategyResponse(
+            code=r.code,
+            display_name=r.display_name,
+            description=r.description
+        ) for r in rows
+    ]
+
+
+@router.post("/governance/development-strategies", response_model=DevelopmentStrategyResponse, status_code=status.HTTP_201_CREATED)
+def create_development_strategy(
+    payload: DevelopmentStrategyCreate,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    code_clean = payload.code.strip().upper().replace(" ", "_")
+    existing = db.query(SystemTaxonomy).filter(
+        SystemTaxonomy.taxonomy_type == "DEVELOPMENT_STRATEGY",
+        SystemTaxonomy.code == code_clean
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Development strategy code '{code_clean}' already exists.")
+
+    max_idx = db.query(func.max(SystemTaxonomy.order_index)).filter(
+        SystemTaxonomy.taxonomy_type == "DEVELOPMENT_STRATEGY"
+    ).scalar() or 0
+
+    item = SystemTaxonomy(
+        taxonomy_type="DEVELOPMENT_STRATEGY",
+        code=code_clean,
+        display_name=payload.display_name.strip(),
+        description=payload.description,
+        order_index=max_idx + 1,
+        is_active=True
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return DevelopmentStrategyResponse(
+        code=item.code,
+        display_name=item.display_name,
+        description=item.description
+    )
+
+
+@router.delete("/governance/development-strategies/{code}")
+def delete_development_strategy(
+    code: str,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    item = db.query(SystemTaxonomy).filter(
+        SystemTaxonomy.taxonomy_type == "DEVELOPMENT_STRATEGY",
+        SystemTaxonomy.code == code.strip().upper()
+    ).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Strategy taxonomy not found.")
+
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": f"Strategy taxonomy '{code}' deleted."}
+
+
+# ==========================================================
+# DBM SPREADSHEET EXPORT (CSV FOR OSPS & NEP UPLOADS)
+# ==========================================================
+
+@router.get("/governance/export-budget-csv")
+def export_budget_csv(
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    period = issp_period or get_active_issp_period(db)
+    
+    # Query approved proposals that are project-linked OR authorized standalone operational expenses
+    non_project_cats = db.query(StrategicCategory.name).filter(
+        StrategicCategory.is_project_linked == False,
+        StrategicCategory.is_active == True
+    ).all()
+    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
+    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
+        if default_cat not in standalone_cat_names:
+            standalone_cat_names.append(default_cat)
+
+    items = db.query(Proposal).filter(
+        Proposal.issp_period == period,
+        func.lower(cast(Proposal.status, String)) == "approved",
+        or_(
+            Proposal.project_id.isnot(None),
+            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
+        ),
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).all()
+
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == period).first()
+    year_range = get_cycle_year_range(narrative, period)
+    start_year = year_range[0] if year_range else 2026
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    headers = [
+        "Strategic Category", "Item Description", "Deployment Office", "Fund Source", 
+        "UACS Object Code", "Expenditure Class", "Base Unit Cost (PHP)"
+    ]
+    for yr in year_range:
+        headers.extend([f"FY {yr} Physical Qty", f"FY {yr} Adjusted Unit Cost", f"FY {yr} Subtotal Outlay (PHP)"])
+    headers.extend(["Total Physical Units", "Grand Total Outlay (PHP)"])
+    writer.writerow(headers)
+
+    for itm in items:
+        base_cost = itm.unit_cost or Decimal("0.00")
+        row = [
+            itm.strategic_category,
+            itm.item_name,
+            itm.target_office_automated or itm.office_location,
+            itm.fund_source,
+            itm.uacs_object_code,
+            itm.expenditure_class,
+            f"{float(base_cost):.2f}"
+        ]
+        q_map = itm.yearly_quantities or {}
+        for yr in year_range:
+            qty = int(q_map.get(str(yr), 0))
+            adj_unit = get_adjusted_unit_cost_for_year(db, base_cost, yr, start_year)
+            subtotal = Decimal(qty) * adj_unit
+            row.extend([qty, f"{float(adj_unit):.2f}", f"{float(subtotal):.2f}"])
+
+        row.extend([itm.total_qty, f"{float(itm.total_cost):.2f}"])
+        writer.writerow(row)
+
+    output.seek(0)
+    filename = f"ISSP_{period}_Part_IV_A_DBM_Export.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ==========================================================
+# COMPILER VERIFICATION FOR INDIVIDUAL MODULES
+# ==========================================================
+
+@router.post("/governance/verify-compiler-sync")
+def verify_compiler_sync(
+    module: str = Query(..., description="Module identifier (e.g. outcomes, concerns, systems, projects, cross_projects, metrics, budget, parity, inventory, framework, glossary, staff, diagrams, narratives)"),
+    issp_period: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Audits an individual module's database records against the DICT Singularity Graph and compilation engine.
+    Ensures zero runtime disconnects before document generation is initiated.
+    """
+    target_period = issp_period or get_active_issp_period(db)
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == target_period).first()
+    if not narrative:
+        raise HTTPException(status_code=400, detail=f"Planning cycle '{target_period}' is not configured.")
+
+    mod_clean = module.strip().lower()
+    report = {
+        "status": "VERIFIED",
+        "module": module,
+        "issp_period": target_period,
+        "records_count": 0,
+        "compiler_ready": True,
+        "message": f"All '{module}' records are verified in the compiler database and ready for document generation.",
+        "checks": [],
+        "warnings": []
+    }
+
+    if mod_clean in ["outcomes", "part_i", "part_i_a4"]:
+        outcomes = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == target_period).all()
+        report["records_count"] = len(outcomes)
+        if len(outcomes) == 0:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append("No Organizational Outcomes (Part I.A.4) registered. At least one is mandatory.")
+        else:
+            unlinked = []
+            for oo in outcomes:
+                c_cnt = db.query(StrategicConcern).filter(
+                    StrategicConcern.issp_period == target_period,
+                    or_(
+                        StrategicConcern.outcome_id == oo.id,
+                        func.lower(func.trim(StrategicConcern.mfo)) == func.lower(func.trim(oo.outcome_name or oo.program_name or ""))
+                    )
+                ).count()
+                if c_cnt == 0:
+                    unlinked.append(oo.outcome_name or oo.program_name)
+            if unlinked:
+                report["compiler_ready"] = False
+                report["status"] = "DISCONNECT"
+                report["warnings"].append(f"Outcome(s) not yet mapped to any Strategic Concern: {', '.join(unlinked)}")
+            report["checks"].append(f"✓ {len(outcomes)} statutory Program Outcomes verified in database.")
+
+    elif mod_clean in ["concerns", "part_ii_a", "strategic_concerns"]:
+        concerns = db.query(StrategicConcern).filter(StrategicConcern.issp_period == target_period).all()
+        report["records_count"] = len(concerns)
+        unmapped = []
+        for c in concerns:
+            s_cnt = db.query(InformationSystem).filter(
+                InformationSystem.issp_period == target_period,
+                or_(
+                    InformationSystem.strategic_concern_id == c.id, 
+                    func.lower(func.trim(InformationSystem.name)) == func.lower(func.trim(c.critical_system))
+                )
+            ).count()
+
+            p_cnt = db.query(IctProject).filter(
+                IctProject.issp_period == target_period,
+                or_(
+                    func.lower(func.trim(IctProject.project_title)).contains(func.lower(func.trim(c.critical_system))),
+                    func.lower(func.trim(IctProject.description)).contains(func.lower(func.trim(c.critical_system)))
+                )
+            ).count()
+
+            prop_cnt = db.query(Proposal).filter(
+                Proposal.issp_period == target_period,
+                or_(
+                    func.lower(func.trim(Proposal.item_name)).contains(func.lower(func.trim(c.critical_system))),
+                    func.lower(func.trim(Proposal.justification)).contains(func.lower(func.trim(c.critical_system)))
+                )
+            ).count()
+
+            na_cnt = db.query(NeedsAssessment).filter(
+                NeedsAssessment.strategic_concern_id == c.id
+            ).count()
+
+            if (s_cnt + p_cnt + prop_cnt + na_cnt) == 0:
+                unmapped.append(c.critical_system)
+        if unmapped:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append(f"Concern(s) with no System, Project, Hardware, or Needs Assessment addressing them: {', '.join(unmapped)}")
+        report["checks"].append(f"✓ {len(concerns)} Strategic Concerns indexed for Table II.A.")
+
+    elif mod_clean in ["systems", "part_ii_c", "part_iii_d", "information_systems"]:
+        systems = db.query(InformationSystem).filter(InformationSystem.issp_period == target_period).all()
+        report["records_count"] = len(systems)
+        pending_review = [s.name for s in systems if getattr(s, "submission_status", "Approved") in ["Draft", "Submitted", "Returned"]]
+        if pending_review:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append(f"Department-proposed systems pending MIS review: {', '.join(pending_review)}")
+        for s in systems:
+            if s.processes_personal_information and not s.has_undergone_pia and not getattr(s, "pia_target_date_text", None):
+                report["compiler_ready"] = False
+                report["status"] = "DISCONNECT"
+                report["warnings"].append(f"System '{s.name}' processes personal data without a completed PIA or Target Audit Date [1].")
+        report["checks"].append(f"✓ {len(systems)} Information Systems ready for Parts II.C & III.D.")
+
+    elif mod_clean in ["projects", "part_iii_e", "part_iii_e1", "ict_projects"]:
+        projects = db.query(IctProject).filter(
+            IctProject.issp_period == target_period,
+            ~IctProject.project_category.ilike("%cross%")
+        ).all()
+        report["records_count"] = len(projects)
+        unfunded = []
+        missing_kpis = []
+        for p in projects:
+            p_cost = float(p.computed_total_project_cost or 0)
+            if p_cost == 0:
+                unfunded.append(p.project_title)
+            kpi_cnt = db.query(PerformanceMetric).filter(
+                PerformanceMetric.issp_period == target_period,
+                or_(PerformanceMetric.project_id == p.id, func.lower(func.trim(PerformanceMetric.project_title)) == func.lower(func.trim(p.project_title)))
+            ).count()
+            if kpi_cnt == 0:
+                missing_kpis.append(p.project_title)
+        if unfunded:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append(f"Internal project(s) with ₱0.00 allocated line items: {', '.join(unfunded)}")
+        if missing_kpis:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append(f"Project(s) lacking PMF KPIs in Part III.F: {', '.join(missing_kpis)}")
+        report["checks"].append(f"✓ {len(projects)} Internal ICT Projects validated for Part III.E.1.")
+
+    elif mod_clean in ["cross_projects", "part_iii_e2"]:
+        cross_projects = db.query(IctProject).filter(
+            IctProject.issp_period == target_period,
+            IctProject.project_category.ilike("%cross%")
+        ).all()
+        report["records_count"] = len(cross_projects)
+        missing_lead = [p.project_title for p in cross_projects if not p.lead_agency or not p.lead_agency.strip()]
+        if missing_lead:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append(f"Cross-Agency project(s) missing mandatory designated Lead Agency: {', '.join(missing_lead)}")
+        report["checks"].append(f"✓ {len(cross_projects)} Cross-Agency ICT Projects registered for Part III.E.2.")
+
+    elif mod_clean in ["metrics", "part_iii_f", "pmf"]:
+        metrics = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == target_period).all()
+        report["records_count"] = len(metrics)
+        report["checks"].append(f"✓ {len(metrics)} PMF Scorecard KPIs ready for Part III.F.")
+
+    elif mod_clean in ["budget", "ceilings", "allocations"]:
+        ceilings = db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == target_period).all()
+        report["records_count"] = len(ceilings)
+        report["checks"].append(f"✓ {len(ceilings)} Department Budget Sub-Ceilings configured.")
+
+    elif mod_clean in ["parity", "part_iv_b"]:
+        matrices = calculate_financial_summaries(db, target_period, only_approved=True)
+        report["compiler_ready"] = matrices["is_parity_valid"]
+        report["status"] = "VERIFIED" if matrices["is_parity_valid"] else "DISCONNECT"
+        report["checks"].append(f"✓ Certified Grand Total: ₱{matrices['certified_grand_total']:,.2f}")
+        if not matrices["is_parity_valid"]:
+            report["warnings"].append(f"Parity mismatch: Tables B.1-B.4 differ by ₱{matrices['parity_discrepancy']:,.2f}")
+
+    elif mod_clean in ["inventory", "annex1"]:
+        items = db.query(ExistingInventory).filter(
+            or_(ExistingInventory.issp_period == target_period, ExistingInventory.issp_period.is_(None))
+        ).all()
+        report["records_count"] = len(items)
+        report["checks"].append(f"✓ {len(items)} physical and software asset line items cataloged in Annex 1 [4].")
+
+    elif mod_clean in ["framework", "checklists"]:
+        cyber_count = db.query(CybersecurityControl).filter(CybersecurityControl.issp_period == target_period).count()
+        egov_count = db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == target_period).count()
+        dr_count = db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.issp_period == target_period).count()
+        report["records_count"] = cyber_count + egov_count + dr_count
+        report["checks"].append(f"✓ Checklists verified: {cyber_count} Cybersecurity Controls, {egov_count} EGP items, {dr_count} DRT personnel.")
+
+    elif mod_clean in ["glossary", "definitions"]:
+        items = db.query(GlossaryTerm).all()
+        report["records_count"] = len(items)
+        report["checks"].append(f"✓ {len(items)} Glossary definitions ready for Page 5 compilation.")
+
+    elif mod_clean in ["staff", "part_iii_c", "positions"]:
+        staff = db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == target_period).all()
+        hc = db.query(HumanCapital).filter(HumanCapital.issp_period == target_period, HumanCapital.is_proposed == True).all()
+        report["records_count"] = len(staff) + len(hc)
+        report["checks"].append(f"✓ {len(staff)} Proposed ICT staff position profiles ready for Part III.C.")
+
+    elif mod_clean in ["diagrams", "vault"]:
+        schematics = [
+            ("Agency Logo", getattr(narrative, "agency_logo_url", None)),
+            ("Existing Network Diagram", getattr(narrative, "network_diagram_url", None)),
+            ("Proposed Fiber Backbone", getattr(narrative, "fiber_backbone_url", None)),
+            ("Enterprise Architecture", getattr(narrative, "system_architecture_url", None)),
+        ]
+        attached = [name for name, url in schematics if url]
+        report["records_count"] = len(attached)
+        report["checks"].append(f"✓ {len(attached)}/4 Primary Document Schematics attached.")
+
+    elif mod_clean in ["narratives", "part_i"]:
+        report["records_count"] = 1
+        if not narrative.mandate_text or len(narrative.mandate_text.strip()) < 15:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append("Legal Mandate (Part I.A.1) text is empty or missing statutory basis.")
+        if not narrative.signatory_prepared_by or not narrative.signatory_approved_by:
+            report["compiler_ready"] = False
+            report["status"] = "DISCONNECT"
+            report["warnings"].append("Signatories (CIO and Agency Head) are incomplete on the coversheet.")
+        report["checks"].append("✓ Master Narrative coversheet and strategic context verified.")
+
+    if not report["compiler_ready"]:
+        report["message"] = f"{len(report['warnings'])} compiler pipeline disconnect(s) detected for '{module}'."
+
+    return report
+
+
+@router.get("/governance/fund-sources")
+def get_fund_sources(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    rows = db.query(SystemTaxonomy).filter(
+        SystemTaxonomy.taxonomy_type == "FUND_SOURCE",
+        SystemTaxonomy.is_active == True
+    ).order_by(SystemTaxonomy.order_index.asc()).all()
+    if not rows:
+        default_sources = [
+            ("GAA", "General Appropriations Act (GAA)", 1),
+            ("FAP", "Foreign-Assisted Projects (FAP)", 2),
+            ("LOCALLY_FUNDED", "Locally Funded", 3),
+            ("OTHER_INCOME", "Other Income Generating Sources", 4)
+        ]
+        for code, name, idx in default_sources:
+            item = SystemTaxonomy(
+                taxonomy_type="FUND_SOURCE",
+                code=code,
+                display_name=name,
+                order_index=idx,
+                is_active=True
+            )
+            db.add(item)
+        db.commit()
+        rows = db.query(SystemTaxonomy).filter(
+            SystemTaxonomy.taxonomy_type == "FUND_SOURCE",
+            SystemTaxonomy.is_active == True
+        ).order_by(SystemTaxonomy.order_index.asc()).all()
+    return [{"code": r.code, "display_name": r.display_name, "description": r.description} for r in rows]
+
+
+@router.post("/governance/fund-sources")
+def create_fund_source(payload: Dict[str, Any], db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    display_name = payload.get("display_name", "").strip()
+    code = (payload.get("code") or display_name.upper().replace(" ", "_")).strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="Fund source display name is required.")
+    item = SystemTaxonomy(
+        taxonomy_type="FUND_SOURCE",
+        code=code,
+        display_name=display_name,
+        description=payload.get("description"),
+        is_active=True
+    )
+    db.add(item)
+    db.commit()
+    return {"status": "success", "code": item.code, "display_name": item.display_name}
+
+
+@router.delete("/governance/fund-sources/{code}")
+def delete_fund_source(code: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    item = db.query(SystemTaxonomy).filter(
+        SystemTaxonomy.taxonomy_type == "FUND_SOURCE",
+        SystemTaxonomy.code == code.strip()
+    ).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Fund source taxonomy not found.")
+    db.delete(item)
+    db.commit()
+    return {"status": "success", "message": f"Fund source '{code}' deleted."}
+
+
+# ==========================================================
 # PART IV.B: LIVE FOUR-WAY PARITY & SINGULARITY GRAPH AUDIT
 # ==========================================================
 
 @router.get("/governance/parity-matrices", response_model=PartIVBParityResponse)
 def get_parity_matrices(
     issp_period: Optional[str] = Query(None),
+    only_approved: bool = Query(False, description="Filter for approved proposals only; defaults to False for live parity"),
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """
-    Computes Part IV.B Tables B.1, B.2, B.3, and B.4 dynamically from atomic line items.
-    Enforces identical grand totals down to the centavo.
-    Supports arbitrary multi-year spans (1 to N years).
-    Accessible to all authenticated users for transparency and document certification.
-    """
     period = issp_period or get_active_issp_period(db)
-    matrices = calculate_financial_summaries(db, period)
+    matrices = ISSPSingularityEngine.calculate_part_iv_b_matrices(db, period, only_approved=only_approved)
     return PartIVBParityResponse(
         b1_general_summary=matrices["b1_general_summary"],
         b2_fund_source=matrices["b2_fund_source"],
@@ -1174,10 +3454,6 @@ def audit_singularity_graph(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Audits the entire strategic dependency graph and asserts end-to-end provenance.
-    Called directly by the 'Audit Singularity DAG' frontend triggers.
-    """
     period = issp_period or get_active_issp_period(db)
     return ISSPSingularityEngine.validate_complete_issp_graph(db, period)
 
@@ -1188,20 +3464,27 @@ def evaluate_lifecycle_rollover(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Evaluates whether the active ISSP planning cycle has concluded based on calendar years.
-    If concluded or force=True:
-      1. Compiles final certified PDF snapshot.
-      2. Transitions PDF to AWS S3 Glacier.
-      3. Archives expired cycle.
-      4. Auto-provisions successor cycle (dynamic N-year span) and clones Outcomes/Ceilings.
-    """
     try:
         result = ISSPLifecycleEngine.evaluate_and_rollover_cycle(db, force=force)
         return result
     except Exception as e:
         logger.error(f"Failed to evaluate lifecycle rollover: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Lifecycle rollover failed: {str(e)}")
+
+
+@router.post("/governance/restore-document")
+def restore_governance_document(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    cycle = payload.get("cycle") or payload.get("issp_period")
+    if not cycle:
+        raise HTTPException(status_code=400, detail="Planning cycle is required for restoration.")
+    return {
+        "status": "restoring",
+        "message": f"Archived plan retrieval job initiated for cycle FY {cycle}."
+    }
 
 
 # ==========================================================
@@ -1218,51 +3501,28 @@ def get_admin_master_queue(
     skip: int = Query(0, ge=0),
     limit: Optional[int] = Query(1000, ge=1, le=100000),
     db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
+    current_user: dict = Depends(require_supply_or_admin)
 ):
     try:
         query = db.query(Proposal).options(
             joinedload(Proposal.outcome),
             joinedload(Proposal.project_rel),
-            joinedload(Proposal.needs_assessment)
+            joinedload(Proposal.needs_assessment),
+            joinedload(Proposal.department)
         ).filter(or_(Proposal.is_archived == False, Proposal.is_archived.is_(None)))
         
         if dept_id:
             query = query.filter(Proposal.department_id == dept_id)
         if status_filter and status_filter.strip().lower() != "all":
-            clean_status = status_filter.strip()
-            matched_status = None
-            for s in ProposalStatus:
-                if s.value.lower() == clean_status.lower() or s.name.lower() == clean_status.lower():
-                    matched_status = s
-                    break
-            if matched_status:
-                query = query.filter(or_(
-                    Proposal.status == matched_status,
-                    Proposal.status == matched_status.value,
-                    Proposal.status == matched_status.name
-                ))
-            else:
-                query = query.filter(func.lower(cast(Proposal.status, String)) == clean_status.lower())
+            clean_status = status_filter.strip().lower()
+            query = query.filter(func.lower(cast(Proposal.status, String)) == clean_status)
 
         if strategic_category and strategic_category.strip().lower() != "all":
-            clean_cat = strategic_category.strip()
-            matched_cat = None
-            for c in ProjectCategory:
-                if c.value.lower() == clean_cat.lower() or c.name.lower() == clean_cat.lower():
-                    matched_cat = c
-                    break
-            if matched_cat:
-                query = query.filter(or_(
-                    Proposal.strategic_category == matched_cat,
-                    Proposal.strategic_category == matched_cat.value,
-                    Proposal.strategic_category == matched_cat.name
-                ))
-            else:
-                query = query.filter(func.lower(cast(Proposal.strategic_category, String)) == clean_cat.lower())
+            clean_cat = strategic_category.strip().lower()
+            query = query.filter(func.lower(cast(Proposal.strategic_category, String)) == clean_cat)
 
-        if issp_period:
-            query = query.filter(Proposal.issp_period == issp_period)
+        if issp_period and issp_period.strip().lower() != "all":
+            query = query.filter(Proposal.issp_period == issp_period.strip())
         if search:
             query = query.filter(Proposal.item_name.ilike(f"%{search}%"))
 
@@ -1275,7 +3535,7 @@ def get_admin_master_queue(
             try:
                 serialized_data.append(ProposalResponse.model_validate(p))
             except Exception as ser_err:
-                logger.debug(f"Direct validation note: {ser_err}")
+                logger.debug(f"Direct serialization note: {ser_err}")
                 serialized_data.append(p)
 
         return {"total": total, "skip": skip, "limit": effective_limit, "data": serialized_data}
@@ -1284,62 +3544,75 @@ def get_admin_master_queue(
         raise HTTPException(status_code=500, detail="Failed to fetch master queue.")
 
 
-@router.get("/subscriptions")
-def get_admin_subscriptions_queue(
-    dept_id: Optional[int] = Query(None),
-    status_filter: Optional[str] = Query(None),
-    issp_period: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
-    skip: int = Query(0, ge=0),
-    limit: Optional[int] = Query(1000, ge=1, le=100000),
+@router.post("/proposals/batch-approve")
+def batch_approve_proposals(
+    payload: Union[BatchApprovePayload, Dict[str, Any]],
+    request: Request,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Retrieves MOOE and software subscriptions queue for ConsolidatedQueue.jsx.
-    Queries the unified issp_core proposals ledger.
-    """
-    try:
-        query = db.query(Proposal).options(
-            joinedload(Proposal.outcome),
-            joinedload(Proposal.project_rel),
-            joinedload(Proposal.needs_assessment)
-        ).filter(
-            or_(
-                Proposal.category.in_([ProposalCategory.SUBSCRIPTION, ProposalCategory.SOFTWARE]),
-                Proposal.expenditure_class == ExpenditureClass.MOOE,
-                Proposal.strategic_category == ProjectCategory.CONTINUING_COSTS
-            ),
-            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    """1-Click batch approval of submitted proposals with transactional COA audit logging."""
+    raw_ids = []
+    if isinstance(payload, BatchApprovePayload):
+        raw_ids = payload.proposal_ids
+    elif isinstance(payload, dict):
+        raw_ids = payload.get("proposal_ids", [])
+    
+    if not raw_ids:
+        raise HTTPException(status_code=400, detail="No proposal IDs provided for batch approval.")
+
+    proposal_uuids = []
+    for pid in raw_ids:
+        try:
+            proposal_uuids.append(uuid.UUID(str(pid).strip()))
+        except Exception:
+            continue
+
+    if not proposal_uuids:
+        raise HTTPException(status_code=400, detail="No valid proposal UUIDs found.")
+
+    proposals = db.query(Proposal).filter(
+        Proposal.id.in_(proposal_uuids),
+        func.lower(cast(Proposal.status, String)) == "submitted"
+    ).all()
+
+    default_outcome = None
+    for p in proposals:
+        if not p.outcome_id:
+            if not default_outcome:
+                default_outcome = db.query(OrganizationalOutcome).filter(
+                    OrganizationalOutcome.issp_period == p.issp_period
+                ).first()
+            if default_outcome:
+                p.outcome_id = default_outcome.id
+
+        # Guard: If item is categorized as a project item but unlinked, fallback to Office Productivity
+        is_project_cat = "project" in (p.strategic_category or "").lower()
+        if is_project_cat and not p.project_id:
+            p.strategic_category = "Office Productivity"
+            sc_obj = db.query(StrategicCategory).filter(
+                func.lower(StrategicCategory.name) == "office productivity"
+            ).first()
+            if sc_obj:
+                p.strategic_category_id = sc_obj.id
+
+        old_status = p.status
+        p.status = "Approved"
+        p.version += 1
+        log_audit_event(
+            db=db,
+            action="STATE_TRANSITION_APPROVED",
+            module="PROPOSALS",
+            user_id=admin["id"],
+            department_id=p.department_id,
+            proposal_id=p.id,
+            ip_address=request.client.host if request.client else None,
+            old_value={"status": old_status},
+            new_value={"status": "Approved", "outcome_id": p.outcome_id}
         )
-        
-        if dept_id:
-            query = query.filter(Proposal.department_id == dept_id)
-        if status_filter and status_filter.strip().lower() != "all":
-            clean_status = status_filter.strip().lower()
-            matched_status = next((s for s in ProposalStatus if s.value.lower() == clean_status or s.name.lower() == clean_status), None)
-            if matched_status:
-                query = query.filter(Proposal.status == matched_status)
-        if issp_period:
-            query = query.filter(Proposal.issp_period == issp_period)
-        if search:
-            query = query.filter(Proposal.item_name.ilike(f"%{search}%"))
 
-        total = query.count()
-        effective_limit = limit or 1000
-        results = query.order_by(Proposal.version.desc()).offset(skip).limit(effective_limit).all()
-
-        serialized_data = []
-        for p in results:
-            try:
-                serialized_data.append(ProposalResponse.model_validate(p))
-            except Exception:
-                serialized_data.append(p)
-
-        return {"total": total, "skip": skip, "limit": effective_limit, "data": serialized_data}
-    except Exception as e:
-        logger.error(f"Error querying subscriptions queue: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch subscriptions queue.")
+    db.commit()
+    return {"status": "success", "approved_count": len(proposals)}
 
 
 @router.post("/proposals", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
@@ -1349,59 +3622,67 @@ def admin_create_proposal(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Allows administrators to add resource line items directly to Part IV.A.
-    """
     active_period = get_active_issp_period(db)
-    
     target_dept_id = getattr(payload, "department_id", None) or 1
     target_dept = db.query(Department).filter(Department.id == target_dept_id).first()
     automated_office = target_dept.name if target_dept else "Central Office"
 
-    canvas_url = payload.canvas_evidence_url
-    canvas_exp = payload.canvas_expiration_date
+    is_turnover = bool(getattr(payload, "is_in_house_turnover", False) or getattr(payload, "created_by_students", False))
 
-    if payload.created_by_students:
-        uacs_code = UacsObjectCode.ICT_SOFTWARE
-        exp_class = ExpenditureClass.CAPITAL_OUTLAY
-    else:
-        uacs_code, exp_class = classify_uacs_and_expenditure(
-            payload.item_name,
-            payload.unit_cost,
-            payload.strategic_category,
-            category=payload.category,
-            created_by_students=payload.created_by_students
-        )
+    outcome_id = payload.outcome_id
+    if not outcome_id:
+        default_oo = db.query(OrganizationalOutcome).filter(
+            OrganizationalOutcome.issp_period == active_period
+        ).first()
+        if default_oo:
+            outcome_id = default_oo.id
+
+    sc_name = payload.strategic_category or "Office Productivity"
+    strat_cat_id = getattr(payload, "strategic_category_id", None)
+    if not strat_cat_id and sc_name:
+        sc_row = db.query(StrategicCategory).filter(func.lower(StrategicCategory.name) == sc_name.lower().strip()).first()
+        if sc_row:
+            strat_cat_id = sc_row.id
+
+    uacs_code, exp_class = classify_uacs_and_expenditure(
+        item_name=payload.item_name,
+        unit_cost=payload.unit_cost,
+        strategic_category=sc_name,
+        category=payload.category,
+        created_by_students=is_turnover,
+        is_in_house_turnover=is_turnover,
+        db=db
+    )
+
+    _, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities or {}, is_submitting=False)
 
     db_proposal = Proposal(
         department_id=target_dept_id,
         issp_period=active_period,
-        outcome_id=payload.outcome_id,
+        outcome_id=outcome_id,
         project_id=payload.project_id,
         needs_assessment_id=getattr(payload, "needs_assessment_id", None),
-        category=payload.category,
-        strategic_category=payload.strategic_category,
-        office_location=payload.office_location,
-        fund_source=payload.fund_source,
-        uacs_object_code=uacs_code,
-        expenditure_class=exp_class,
-        status=ProposalStatus.APPROVED,
-        item_key=payload.item_select,
+        strategic_category_id=strat_cat_id,
+        category=payload.category or "Hardware",
+        strategic_category=sc_name,
+        office_location=payload.office_location or "Central Office",
+        fund_source=payload.fund_source or "General Appropriations Act (GAA)",
+        uacs_object_code=getattr(payload, "uacs_object_code", None) or uacs_code,
+        expenditure_class=getattr(payload, "expenditure_class", None) or exp_class,
+        status="Approved",
+        item_key=payload.item_select or "other",
         item_name=payload.item_name,
         unit_cost=payload.unit_cost,
-        year_1_qty=payload.year_1_qty,
-        year_2_qty=payload.year_2_qty,
-        year_3_qty=payload.year_3_qty,
-        yearly_quantities=payload.yearly_quantities,
+        yearly_quantities=aligned_quantities,
         justification=payload.justification,
-        subscription_type=getattr(payload, "subscription_type", None),
-        system_development_status=payload.system_development_status,
-        created_by_students=payload.created_by_students,
+        system_development_status=payload.system_development_status or "N/A",
+        created_by_students=is_turnover,
+        is_in_house_turnover=is_turnover,
         target_office_automated=automated_office,
-        canvas_evidence_url=canvas_url,
-        canvas_expiration_date=canvas_exp,
-        project_key=getattr(payload, "project_key", None),
-        payload={"comments": []},
+        canvas_evidence_url=payload.canvas_evidence_url,
+        canvas_expiration_date=payload.canvas_expiration_date,
+        supplier_name=payload.supplier_name,
+        comments=[],
         is_expansion=payload.is_expansion
     )
 
@@ -1416,64 +3697,12 @@ def admin_create_proposal(
         department_id=target_dept_id,
         proposal_id=db_proposal.id,
         ip_address=request.client.host if request.client else None,
-        new_value={"item_name": db_proposal.item_name, "total_cost": str(db_proposal.total_cost)}
+        new_value={"item_name": db_proposal.item_name, "total_cost": float(db_proposal.total_cost)}
     )
 
     db.commit()
     db.refresh(db_proposal)
     return db_proposal
-
-
-@router.put("/proposals/{proposal_id}")
-def admin_update_proposal(
-    proposal_id: uuid.UUID,
-    payload: AdminOverridePayload,
-    request: Request,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    """
-    Updates or overrides proposal parameters directly by administrators.
-    """
-    return admin_override_proposal(proposal_id, payload, request, db, admin)
-
-
-@router.delete("/proposals/{proposal_id}")
-def admin_delete_proposal(
-    proposal_id: uuid.UUID,
-    request: Request,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    """
-    Allows administrators to delete an outlay proposal from the database.
-    """
-    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
-    if not proposal:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
-
-    deleted_snapshot = {
-        "item_name": proposal.item_name,
-        "total_cost": str(proposal.total_cost),
-        "department_id": proposal.department_id
-    }
-    dept_id = proposal.department_id
-
-    db.delete(proposal)
-
-    log_audit_event(
-        db=db,
-        action="PROPOSAL_DELETED_BY_ADMIN",
-        module="PROPOSALS",
-        user_id=admin["id"],
-        department_id=dept_id,
-        proposal_id=proposal_id,
-        ip_address=request.client.host if request.client else None,
-        old_value=deleted_snapshot
-    )
-
-    db.commit()
-    return {"status": "success", "message": "Proposal line item deleted."}
 
 
 @router.put("/proposals/{proposal_id}/approve")
@@ -1487,8 +3716,29 @@ def approve_proposal(
     if not proposal:
         raise HTTPException(status_code=404, detail="Proposal not found.")
 
-    old_status = proposal.status.value
-    proposal.status = ProposalStatus.APPROVED
+    if not proposal.outcome_id:
+        default_outcome = db.query(OrganizationalOutcome).filter(
+            OrganizationalOutcome.issp_period == proposal.issp_period
+        ).first()
+        if default_outcome:
+            proposal.outcome_id = default_outcome.id
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Approval Blocked: Please assign an Organizational Outcome (Part I.A.4) to this proposal via Override before approving."
+            )
+
+    # PREVENT ORPHAN PROPOSAL LEAK:
+    # If categorized as an ICT project item, enforce project linkage before approval
+    is_project_cat = "project" in (proposal.strategic_category or "").lower()
+    if is_project_cat and not proposal.project_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval Blocked: Proposal '{proposal.item_name}' is categorized under '{proposal.strategic_category}'. Please link it to an ICT Project (Part III.E) or change its category to a standalone operational category (e.g. 'Office Productivity') before approving."
+        )
+
+    old_status = proposal.status
+    proposal.status = "Approved"
     proposal.version += 1
 
     log_audit_event(
@@ -1500,11 +3750,10 @@ def approve_proposal(
         proposal_id=proposal.id,
         ip_address=request.client.host if request.client else None,
         old_value={"status": old_status},
-        new_value={"status": ProposalStatus.APPROVED.value}
+        new_value={"status": "Approved", "outcome_id": proposal.outcome_id}
     )
     db.commit()
     db.refresh(proposal)
-
     return {"status": "success", "message": "Proposal approved successfully.", "proposal_id": proposal.id}
 
 
@@ -1519,8 +3768,8 @@ def return_proposal(
     if not proposal:
         raise HTTPException(status_code=404, detail="Proposal not found.")
 
-    old_status = proposal.status.value
-    proposal.status = ProposalStatus.RETURNED
+    old_status = proposal.status
+    proposal.status = "Returned"
     proposal.version += 1
 
     log_audit_event(
@@ -1532,41 +3781,11 @@ def return_proposal(
         proposal_id=proposal.id,
         ip_address=request.client.host if request.client else None,
         old_value={"status": old_status},
-        new_value={"status": ProposalStatus.RETURNED.value}
+        new_value={"status": "Returned"}
     )
     db.commit()
     db.refresh(proposal)
-
     return {"status": "success", "message": "Proposal returned to department.", "proposal_id": proposal.id}
-
-
-@router.get("/proposals/approved-canvas")
-def get_approved_canvas_proposals(
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    """
-    Returns approved proposals with canvas quotation proof to populate catalog creation templates.
-    """
-    approved = db.query(Proposal).filter(
-        Proposal.status == ProposalStatus.APPROVED,
-        Proposal.canvas_evidence_url.isnot(None),
-        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-    ).all()
-
-    return [
-        {
-            "id": str(p.id),
-            "display_name": p.item_name,
-            "unit_cost": float(p.unit_cost),
-            "type": "CapEx" if p.expenditure_class == ExpenditureClass.CAPITAL_OUTLAY else "MOOE",
-            "supplier_name": (p.payload or {}).get("supplier_name") or "Standard Supplier",
-            "canvas_evidence_url": p.canvas_evidence_url,
-            "canvas_expiration_date": p.canvas_expiration_date.isoformat() if p.canvas_expiration_date else None,
-            "created_by_students": p.created_by_students
-        }
-        for p in approved
-    ]
 
 
 @router.put("/proposals/{proposal_id}/override")
@@ -1588,71 +3807,113 @@ def admin_override_proposal(
 
         old_state = {
             "item_name": proposal.item_name,
-            "unit_cost": str(proposal.unit_cost),
+            "unit_cost": float(proposal.unit_cost) if proposal.unit_cost is not None else 0.0,
             "total_qty": proposal.total_qty,
-            "uacs_object_code": proposal.uacs_object_code.value,
-            "expenditure_class": proposal.expenditure_class.value
+            "outcome_id": proposal.outcome_id,
+            "project_id": str(proposal.project_id) if proposal.project_id else None,
+            "strategic_category": proposal.strategic_category,
+            "office_location": proposal.office_location,
+            "fund_source": proposal.fund_source,
+            "uacs_object_code": proposal.uacs_object_code,
+            "expenditure_class": proposal.expenditure_class
         }
 
         if payload.item_name is not None:
             proposal.item_name = html.escape(payload.item_name.strip())
         if payload.unit_cost is not None:
             proposal.unit_cost = payload.unit_cost
+        if payload.outcome_id is not None:
+            proposal.outcome_id = payload.outcome_id
+            
         if payload.project_id is not None:
             proposal.project_id = payload.project_id
+            if payload.project_id:
+                proj = db.query(IctProject).filter(IctProject.id == payload.project_id).first()
+                if proj:
+                    proposal.fund_source = str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)")
+                    proposal.strategic_category = str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects")
+            else:
+                # Disconnected from project: assign standalone category if not specified
+                if payload.strategic_category is None:
+                    proposal.strategic_category = "Office Productivity"
+                    sc_row = db.query(StrategicCategory).filter(
+                        func.lower(StrategicCategory.name) == "office productivity"
+                    ).first()
+                    if sc_row:
+                        proposal.strategic_category_id = sc_row.id
+
         if getattr(payload, "needs_assessment_id", None) is not None:
             proposal.needs_assessment_id = payload.needs_assessment_id
+        if getattr(payload, "strategic_category_id", None) is not None:
+            proposal.strategic_category_id = payload.strategic_category_id
         if payload.category is not None:
-            proposal.category = payload.category
-        if payload.strategic_category is not None:
-            proposal.strategic_category = payload.strategic_category
+            proposal.category = str(getattr(payload.category, "value", payload.category))
+        if payload.strategic_category is not None and not payload.project_id:
+            proposal.strategic_category = str(getattr(payload.strategic_category, "value", payload.strategic_category))
+            sc_row = db.query(StrategicCategory).filter(
+                func.lower(StrategicCategory.name) == str(proposal.strategic_category).strip().lower()
+            ).first()
+            if sc_row:
+                proposal.strategic_category_id = sc_row.id
         if payload.office_location is not None:
-            proposal.office_location = payload.office_location
-        if payload.fund_source is not None:
-            proposal.fund_source = payload.fund_source
+            proposal.office_location = str(getattr(payload.office_location, "value", payload.office_location))
+        if payload.fund_source is not None and not payload.project_id:
+            proposal.fund_source = str(getattr(payload.fund_source, "value", payload.fund_source))
         if payload.justification is not None:
             proposal.justification = html.escape(payload.justification.strip())
         if payload.system_development_status is not None:
-            proposal.system_development_status = payload.system_development_status
-        if payload.created_by_students is not None:
-            proposal.created_by_students = payload.created_by_students
+            proposal.system_development_status = str(getattr(payload.system_development_status, "value", payload.system_development_status))
+        
+        is_turnover = getattr(payload, "is_in_house_turnover", None)
+        if is_turnover is None:
+            is_turnover = getattr(payload, "created_by_students", None)
+        if is_turnover is not None:
+            proposal.is_in_house_turnover = bool(is_turnover)
+            proposal.created_by_students = bool(is_turnover)
 
         if payload.yearly_quantities is not None:
-            validate_active_years_alignment(db, list(payload.yearly_quantities.keys()))
-            proposal.yearly_quantities = payload.yearly_quantities
+            _, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
+            proposal.yearly_quantities = aligned_quantities
 
-            years_sorted = sorted([k for k in payload.yearly_quantities.keys() if str(k).isdigit()])
-            if len(years_sorted) >= 1:
-                proposal.year_1_qty = int(payload.yearly_quantities.get(years_sorted[0], 0) or 0)
-            if len(years_sorted) >= 2:
-                proposal.year_2_qty = int(payload.yearly_quantities.get(years_sorted[1], 0) or 0)
-            if len(years_sorted) >= 3:
-                proposal.year_3_qty = int(payload.yearly_quantities.get(years_sorted[2], 0) or 0)
+        # Preserve Admin-assigned UACS object code and expenditure class without overwriting
+        if getattr(payload, "uacs_object_code", None):
+            proposal.uacs_object_code = str(getattr(payload.uacs_object_code, "value", payload.uacs_object_code))
+        if getattr(payload, "expenditure_class", None):
+            proposal.expenditure_class = str(getattr(payload.expenditure_class, "value", payload.expenditure_class))
+        elif proposal.uacs_object_code:
+            if "(CO)" in proposal.uacs_object_code:
+                proposal.expenditure_class = "Capital Outlay"
+            elif "(MOOE)" in proposal.uacs_object_code:
+                proposal.expenditure_class = "Maintenance and Other Operating Expenses"
 
-        # Re-resolve accounting classes
-        if proposal.created_by_students:
-            proposal.expenditure_class = ExpenditureClass.CAPITAL_OUTLAY
-            proposal.uacs_object_code = UacsObjectCode.ICT_SOFTWARE
-        else:
+        if not proposal.uacs_object_code or not proposal.expenditure_class:
             uacs, exp_class = classify_uacs_and_expenditure(
-                proposal.item_name, 
-                proposal.unit_cost, 
-                proposal.strategic_category,
+                item_name=proposal.item_name,
+                unit_cost=proposal.unit_cost,
+                strategic_category=proposal.strategic_category,
                 category=proposal.category,
-                created_by_students=proposal.created_by_students
+                created_by_students=proposal.is_in_house_turnover,
+                is_in_house_turnover=proposal.is_in_house_turnover,
+                db=db
             )
-            proposal.uacs_object_code = uacs
-            proposal.expenditure_class = exp_class
+            if not proposal.uacs_object_code:
+                proposal.uacs_object_code = uacs
+            if not proposal.expenditure_class:
+                proposal.expenditure_class = exp_class
 
         proposal.version += 1
-        proposal.sync_payload()
 
         new_state = {
             "item_name": proposal.item_name,
-            "unit_cost": str(proposal.unit_cost),
+            "unit_cost": float(proposal.unit_cost) if proposal.unit_cost is not None else 0.0,
             "total_qty": proposal.total_qty,
-            "uacs_object_code": proposal.uacs_object_code.value,
-            "expenditure_class": proposal.expenditure_class.value
+            "outcome_id": proposal.outcome_id,
+            "project_id": str(proposal.project_id) if proposal.project_id else None,
+            "strategic_category": proposal.strategic_category,
+            "office_location": proposal.office_location,
+            "fund_source": proposal.fund_source,
+            "uacs_object_code": proposal.uacs_object_code,
+            "expenditure_class": proposal.expenditure_class
         }
 
         log_audit_event(
@@ -1669,7 +3930,7 @@ def admin_override_proposal(
         db.commit()
         db.refresh(proposal)
 
-        return {"status": "success", "message": "Proposal overridden successfully.", "proposal_id": proposal.id}
+        return {"status": "success", "message": "Proposal overridden successfully.", "proposal_id": str(proposal.id)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1678,511 +3939,71 @@ def admin_override_proposal(
         raise HTTPException(status_code=500, detail="Database failure during override.")
 
 
-# ==========================================================
-# BUDGET GOVERNANCE & PRE-FLIGHT VALIDATION
-# ==========================================================
-
-@router.get("/budget-ceilings", response_model=List[BudgetCeilingResponse])
-def get_budget_ceilings(
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        issp_period = get_active_issp_period(db)
-        departments = db.query(Department).all()
-        global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-        global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
-        
-        ceilings_map = {c.department_id: c for c in db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).all()}
-
-        spent_by_dept = dict(
-            db.query(Proposal.department_id, func.sum(Proposal.unit_cost * Proposal.total_qty))
-            .filter(
-                Proposal.status == ProposalStatus.APPROVED,
-                Proposal.issp_period == issp_period,
-                or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-            )
-            .group_by(Proposal.department_id).all()
-        )
-
-        results = []
-        for dept in departments:
-            c = ceilings_map.get(dept.id)
-            results.append(
-                BudgetCeilingResponse(
-                    department_id=dept.id,
-                    department_name=dept.name,
-                    allocated_capex=c.allocated_capex if c else Decimal("0.00"),
-                    allocated_mooe=c.allocated_mooe if c else Decimal("0.00"),
-                    sub_ceiling=c.sub_ceiling if c else Decimal("0.00"),
-                    global_ceiling=global_limit,
-                    current_spent=spent_by_dept.get(dept.id, Decimal("0.00")) or Decimal("0.00")
-                )
-            )
-        return results
-    except Exception as e:
-        logger.error(f"Failed to query budget ceilings: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load budget ceilings.")
-
-
-@router.post("/budget-ceilings")
-def update_budget_ceiling(
-    payload: UpdateCeilingPayload,
+@router.delete("/proposals/{proposal_id}")
+def admin_delete_proposal(
+    proposal_id: uuid.UUID,
     request: Request,
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    issp_period = get_active_issp_period(db)
-    ceiling = db.query(BudgetCeiling).filter(
-        BudgetCeiling.department_id == payload.department_id,
-        BudgetCeiling.issp_period == issp_period
-    ).first()
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found.")
 
-    if not ceiling:
-        ceiling = BudgetCeiling(
-            department_id=payload.department_id,
-            issp_period=issp_period,
-            allocated_capex=payload.allocated_capex,
-            allocated_mooe=payload.allocated_mooe
-        )
-        db.add(ceiling)
-    else:
-        ceiling.allocated_capex = payload.allocated_capex
-        ceiling.allocated_mooe = payload.allocated_mooe
-
-    log_audit_event(
-        db=db,
-        action="SYSTEM_BUDGET_CEILING_UPDATED",
-        module="GOVERNANCE",
-        user_id=admin["id"],
-        department_id=payload.department_id,
-        ip_address=request.client.host if request.client else None,
-        new_value={
-            "department_id": payload.department_id,
-            "allocated_capex": str(payload.allocated_capex),
-            "allocated_mooe": str(payload.allocated_mooe),
-            "sub_ceiling": str(payload.allocated_capex + payload.allocated_mooe)
-        }
-    )
-    db.commit()
-    return {"status": "success", "message": "Budget ceiling updated successfully."}
-
-
-@router.post("/global-budget-ceiling")
-def update_global_budget_ceiling(
-    payload: UpdateGlobalCeilingPayload,
-    request: Request,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-    if not setting:
-        setting = SystemSetting(key="global_budget_ceiling", value=str(payload.global_ceiling))
-        db.add(setting)
-    else:
-        setting.value = str(payload.global_ceiling)
-
-    log_audit_event(
-        db=db,
-        action="GLOBAL_BUDGET_CEILING_MODIFIED",
-        module="GOVERNANCE",
-        user_id=admin["id"],
-        ip_address=request.client.host if request.client else None,
-        new_value={"global_budget_ceiling": str(payload.global_ceiling)}
-    )
-    db.commit()
-    return {"status": "success", "message": "Global budget ceiling updated successfully."}
-
-
-@router.get("/budget-validation")
-def run_pre_generation_budget_check(
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        issp_period = get_active_issp_period(db)
-        global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-        global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
-
-        violations = []
-        spent_by_dept = dict(
-            db.query(Proposal.department_id, func.sum(Proposal.unit_cost * Proposal.total_qty))
-            .filter(
-                Proposal.status == ProposalStatus.APPROVED,
-                Proposal.issp_period == issp_period,
-                or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-            ).group_by(Proposal.department_id).all()
-        )
-
-        ceilings_map = {c.department_id: c.sub_ceiling for c in db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).all()}
-
-        for dept in db.query(Department).all():
-            spent = spent_by_dept.get(dept.id, Decimal("0.00")) or Decimal("0.00")
-            ceiling = ceilings_map.get(dept.id, global_limit)
-            if spent > ceiling:
-                violations.append({
-                    "department_id": dept.id,
-                    "department_name": dept.name,
-                    "allocated_sub_ceiling_php": float(ceiling),
-                    "actual_expenditures_php": float(spent),
-                    "budget_overage_php": float(spent - ceiling),
-                    "status_flag": "RED_BUDGET_BREACH"
-                })
-
-        return {
-            "validation_passed": len(violations) == 0,
-            "total_violations_detected": len(violations),
-            "breaches": violations,
-            "message": "Expenditures cleared for compilation." if len(violations) == 0 else "Budget overages detected."
-        }
-    except Exception as e:
-        logger.error(f"Error running pre-flight budget check: {str(e)}")
-        raise HTTPException(status_code=500, detail="Budget check failed.")
-
-
-# ==========================================================
-# DASHBOARD METRICS & COMPLIANCE ANALYTICS
-# ==========================================================
-
-@router.get("/dashboard-metrics")
-def get_dashboard_metrics(
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    period = get_active_issp_period(db)
-    global_setting = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
-    global_limit = Decimal(global_setting.value) if global_setting else settings.GLOBAL_BUDGET_CEILING
-
-    total_spent = db.query(func.sum(Proposal.total_cost)).filter(
-        Proposal.issp_period == period,
-        Proposal.status == ProposalStatus.APPROVED,
-        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-    ).scalar() or Decimal("0.00")
-
-    pending_count = db.query(Proposal).filter(
-        Proposal.issp_period == period,
-        Proposal.status == ProposalStatus.SUBMITTED,
-        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-    ).count()
-
-    approved_count = db.query(Proposal).filter(
-        Proposal.issp_period == period,
-        Proposal.status == ProposalStatus.APPROVED,
-        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-    ).count()
-
-    return {
-        "global_ceiling": float(global_limit),
-        "total_spent": float(total_spent),
-        "pending_count": pending_count,
-        "approved_count": approved_count
+    deleted_snapshot = {
+        "item_name": proposal.item_name,
+        "total_cost": float(proposal.total_cost),
+        "department_id": proposal.department_id
     }
+    dept_id = proposal.department_id
+
+    db.delete(proposal)
+    log_audit_event(
+        db=db,
+        action="PROPOSAL_DELETED_BY_ADMIN",
+        module="PROPOSALS",
+        user_id=admin["id"],
+        department_id=dept_id,
+        proposal_id=proposal_id,
+        ip_address=request.client.host if request.client else None,
+        old_value=deleted_snapshot
+    )
+
+    db.commit()
+    return {"status": "success", "message": "Proposal line item deleted."}
 
 
-@router.get("/department-analytics", response_model=List[DepartmentAnalyticsResponse])
-def get_department_analytics(
+@router.get("/proposals/approved-canvas")
+def get_approved_canvas_proposals(
+    issp_period: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
+    current_user: dict = Depends(require_supply_or_admin)
 ):
-    period = get_active_issp_period(db)
-    departments = db.query(Department).all()
-    results = []
+    period = issp_period or get_active_issp_period(db)
+    approved = db.query(Proposal).filter(
+        Proposal.issp_period == period,
+        func.lower(cast(Proposal.status, String)) == "approved",
+        Proposal.canvas_evidence_url.isnot(None),
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).all()
 
-    for d in departments:
-        props = db.query(Proposal).filter(
-            Proposal.department_id == d.id,
-            Proposal.issp_period == period,
-            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-        ).all()
-
-        total = len(props)
-        custom = len([p for p in props if p.item_key == "other"])
-        missing_canvas = len([p for p in props if not p.canvas_evidence_url and not p.created_by_students])
-        ratio = (custom / total * 100.0) if total > 0 else 0.0
-
-        results.append(
-            DepartmentAnalyticsResponse(
-                department_id=d.id,
-                department_name=d.name,
-                total_proposals=total,
-                custom_proposals=custom,
-                custom_ratio_percent=round(ratio, 2),
-                missing_canvas_count=missing_canvas,
-                requires_review_abuse=ratio > 20.0
-            )
-        )
-    return results
+    return [
+        {
+            "id": str(p.id),
+            "type": "CapEx" if "capital" in (p.expenditure_class or "").lower() else "MOOE",
+            "display_name": p.item_name,
+            "unit_cost": float(p.unit_cost or 0),
+            "supplier_name": p.supplier_name,
+            "canvas_evidence_url": p.canvas_evidence_url,
+            "canvas_expiration_date": p.canvas_expiration_date.isoformat() if p.canvas_expiration_date else None
+        }
+        for p in approved
+    ]
 
 
 # ==========================================================
-# MASTER NARRATIVES & PLANNING SCOPE CONTROL (NO TRANSMITTAL)
+# RESET PLANNING CYCLE (Safe Flush for Draft States)
 # ==========================================================
-
-@router.get("/narratives/{issp_period}", response_model=MasterNarrativeResponse)
-def get_narrative(
-    issp_period: str,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-        raise HTTPException(status_code=404, detail=f"Planning narrative for cycle '{issp_period}' not found.")
-    return narrative
-
-
-@router.post("/narratives/{issp_period}")
-def update_narrative(
-    issp_period: str,
-    payload: MasterNarrativeUpdate,
-    request: Request,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-        latest = db.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
-
-        parts = issp_period.split("-")
-        start_y = payload.issp_period_from or (int(parts[0]) if len(parts) == 2 and parts[0].isdigit() else 2026)
-        end_y = payload.issp_period_to or (int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else (start_y + 2))
-
-        if not narrative:
-            narrative = MasterNarrative(
-                issp_period=issp_period,
-                issp_period_from=start_y,
-                issp_period_to=end_y,
-                agency_name=payload.agency_name or (latest.agency_name if latest else settings.DEFAULT_AGENCY_NAME),
-                agency_website_url=payload.agency_website_url or (latest.agency_website_url if latest else settings.DEFAULT_AGENCY_WEBSITE),
-                agency_logo_url=payload.agency_logo_url or (latest.agency_logo_url if latest else None),
-                dict_logo_url=getattr(payload, 'dict_logo_url', None) or (getattr(latest, 'dict_logo_url', None) if latest else None),
-                bagong_pilipinas_logo_url=getattr(payload, 'bagong_pilipinas_logo_url', None) or (getattr(latest, 'bagong_pilipinas_logo_url', None) if latest else None),
-                signatory_prepared_by=payload.signatory_prepared_by or payload.cio_name or (latest.signatory_prepared_by if latest else "Chief Information Officer"),
-                preparer_position=payload.preparer_position or payload.cio_plantilla_position or (latest.preparer_position if latest else "Chief Information Officer"),
-                signatory_approved_by=payload.signatory_approved_by or payload.head_of_agency_name or (latest.signatory_approved_by if latest else settings.DEFAULT_AGENCY_HEAD_TITLE),
-                agency_head_position=getattr(payload, 'agency_head_position', None) or (getattr(latest, 'agency_head_position', None) if latest else settings.DEFAULT_AGENCY_HEAD_TITLE),
-                drbcp_approval_date=getattr(payload, 'drbcp_approval_date', None) or (getattr(latest, 'drbcp_approval_date', None) if latest else None),
-                mandate_html=payload.mandate_html or (latest.mandate_html if latest else ""),
-                functions=payload.functions or (latest.functions if latest else ""),
-                vision_html=payload.vision_html or (latest.vision_html if latest else ""),
-                mission_html=payload.mission_html or (latest.mission_html if latest else ""),
-                present_situation_html=payload.present_situation_html or (latest.present_situation_html if latest else ""),
-                enterprise_architecture_narrative=payload.enterprise_architecture_narrative or (getattr(latest, "enterprise_architecture_narrative", None) if latest else None),
-                drbcp_affected_assets_json=payload.drbcp_affected_assets_json or (getattr(latest, "drbcp_affected_assets_json", []) if latest else []),
-                drbcp_recovery_strategy_html=payload.drbcp_recovery_strategy_html or (getattr(latest, "drbcp_recovery_strategy_html", "") if latest else ""),
-                drbcp_sop_phases_html=payload.drbcp_sop_phases_html or (getattr(latest, "drbcp_sop_phases_html", "") if latest else ""),
-                drbcp_compliance_narrative_html=getattr(payload, 'drbcp_compliance_narrative_html', None) or (getattr(latest, 'drbcp_compliance_narrative_html', None) if latest else None),
-                is_active=True,
-                is_archived=False,
-                annual_ict_budget=payload.annual_ict_budget or (latest.annual_ict_budget if latest else Decimal("0.00")),
-                planners_json=(latest.planners_json if latest and latest.planners_json else []),
-                major_final_outputs=(latest.major_final_outputs if latest and latest.major_final_outputs else []),
-                strategic_concerns_json=(latest.strategic_concerns_json if latest and latest.strategic_concerns_json else []),
-                systems_json=(latest.systems_json if latest and latest.systems_json else []),
-                databases_json=(latest.databases_json if latest and latest.databases_json else []),
-                internal_projects_json=(latest.internal_projects_json if latest and latest.internal_projects_json else []),
-                cross_projects_json=(latest.cross_projects_json if latest and latest.cross_projects_json else []),
-                pmf_matrix_json=(latest.pmf_matrix_json if latest and latest.pmf_matrix_json else []),
-                subsystem_network_layouts_json=(latest.subsystem_network_layouts_json if latest and getattr(latest, "subsystem_network_layouts_json", None) else []),
-                mithi_special_solutions=(latest.mithi_special_solutions if latest and latest.mithi_special_solutions else []),
-                mithi_hardware_inventory=(latest.mithi_hardware_inventory if latest and latest.mithi_hardware_inventory else []),
-                implementation_schedules=(latest.implementation_schedules if latest and latest.implementation_schedules else [])
-            )
-            db.add(narrative)
-            db.flush()
-
-        update_dict = payload.model_dump(exclude_unset=True)
-        for key, val in update_dict.items():
-            if hasattr(narrative, key):
-                setattr(narrative, key, val)
-
-        if getattr(payload, "agency_head_position", None):
-            narrative.agency_head_position = payload.agency_head_position
-        if getattr(payload, "drbcp_approval_date", None):
-            narrative.drbcp_approval_date = payload.drbcp_approval_date
-        if getattr(payload, "drbcp_compliance_narrative_html", None):
-            narrative.drbcp_compliance_narrative_html = payload.drbcp_compliance_narrative_html
-        if getattr(payload, "head_of_agency_name", None):
-            narrative.signatory_approved_by = payload.head_of_agency_name
-        if getattr(payload, "cio_name", None):
-            narrative.signatory_prepared_by = payload.cio_name
-        if getattr(payload, "cio_plantilla_position", None):
-            narrative.preparer_position = payload.cio_plantilla_position
-        if getattr(payload, "dict_logo_url", None) is not None:
-            narrative.dict_logo_url = payload.dict_logo_url
-        if getattr(payload, "bagong_pilipinas_logo_url", None) is not None:
-            narrative.bagong_pilipinas_logo_url = payload.bagong_pilipinas_logo_url
-
-        log_audit_event(
-            db=db,
-            action="NARRATIVE_STUDIO_UPDATED",
-            module="GOVERNANCE",
-            user_id=admin["id"],
-            ip_address=request.client.host if request.client else None,
-            new_value={"issp_period": issp_period, "agency_name": narrative.agency_name}
-        )
-
-        db.commit()
-        db.refresh(narrative)
-        return {"status": "success", "message": "Master narrative updated successfully."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to update narrative for cycle '{issp_period}': {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update narrative: {str(e)}")
-
-
-@router.post("/narratives/{issp_period}/activate")
-def activate_planning_cycle(
-    issp_period: str,
-    request: Request,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    try:
-        # 1. Deactivate all existing planning cycles safely without session evaluation errors
-        db.query(MasterNarrative).update({"is_active": False}, synchronize_session=False)
-
-        # 2. Check if the target narrative already exists
-        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-        
-        # Look for the previous reference narrative to clone baselines if target is brand new
-        latest = db.query(MasterNarrative).order_by(
-            MasterNarrative.is_active.desc(),
-            MasterNarrative.issp_period.desc()
-        ).first()
-
-        parts = issp_period.split("-")
-        start_y = int(parts[0]) if len(parts) == 2 and parts[0].isdigit() else 2026
-        end_y = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else (start_y + 2)
-
-        if not narrative:
-            narrative = MasterNarrative(
-                issp_period=issp_period,
-                issp_period_from=start_y,
-                issp_period_to=end_y,
-                agency_name=latest.agency_name if latest else settings.DEFAULT_AGENCY_NAME,
-                agency_website_url=latest.agency_website_url if latest else settings.DEFAULT_AGENCY_WEBSITE,
-                is_active=True,
-                is_amendment=False,
-                amendment_number=None,
-                scope_choice=latest.scope_choice if latest else ScopeChoice.DEPARTMENT_WIDE,
-                scope_json=latest.scope_json if latest and latest.scope_json else {"with_regional_offices": True, "with_bureaus": False},
-                mandate_html=latest.mandate_html if latest and latest.mandate_html else "",
-                functions=latest.functions if latest else "",
-                vision_html=latest.vision_html if latest and latest.vision_html else "",
-                mission_html=latest.mission_html if latest and latest.mission_html else "",
-                present_situation_html=latest.present_situation_html if latest and latest.present_situation_html else "Active planning cycle baseline.",
-                enterprise_architecture_narrative=getattr(latest, 'enterprise_architecture_narrative', None),
-                drbcp_affected_assets_json=getattr(latest, 'drbcp_affected_assets_json', []) or [],
-                drbcp_recovery_strategy_html=getattr(latest, 'drbcp_recovery_strategy_html', "") or "",
-                drbcp_sop_phases_html=getattr(latest, 'drbcp_sop_phases_html', "") or "",
-                drbcp_compliance_narrative_html=getattr(latest, 'drbcp_compliance_narrative_html', "") or "",
-                is_archived=False,
-                final_pdf_vault_url=None,
-                signatory_prepared_by=latest.signatory_prepared_by if latest else "Chief Information Officer",
-                preparer_position=latest.preparer_position if latest else "Chief Information Officer",
-                cio_organizational_unit=latest.cio_organizational_unit if latest else "ICT Services",
-                preparer_tel=latest.preparer_tel if latest else "",
-                preparer_fax=latest.preparer_fax if latest else "",
-                preparer_email=latest.preparer_email if latest else "",
-                focal_name=latest.focal_name if latest else "",
-                focal_position=latest.focal_position if latest else "",
-                focal_organizational_unit=latest.focal_organizational_unit if latest else "",
-                focal_email=latest.focal_email if latest else "",
-                focal_contact_no=latest.focal_contact_no if latest else "",
-                signatory_approved_by=latest.signatory_approved_by if latest else settings.DEFAULT_AGENCY_HEAD_TITLE,
-                agency_head_position=getattr(latest, 'agency_head_position', None) or settings.DEFAULT_AGENCY_HEAD_TITLE,
-                drbcp_approval_date=getattr(latest, 'drbcp_approval_date', None) or None,
-                annual_ict_budget=latest.annual_ict_budget if latest else Decimal("0.00"),
-                agency_logo_url=latest.agency_logo_url if latest else None,
-                dict_logo_url=getattr(latest, "dict_logo_url", None) if latest else None,
-                bagong_pilipinas_logo_url=getattr(latest, "bagong_pilipinas_logo_url", None) if latest else None,
-                cert_logo_url=latest.cert_logo_url if latest else None,
-                site_development_plan_url=latest.site_development_plan_url if latest else None,
-                fiber_backbone_url=latest.fiber_backbone_url if latest else None,
-                system_architecture_url=latest.system_architecture_url if latest else None,
-                process_flow_diagram_url=latest.process_flow_diagram_url if latest else None,
-                network_diagram_url=latest.network_diagram_url if latest else None,
-                subsystem_network_layouts_json=getattr(latest, 'subsystem_network_layouts_json', []) or [],
-                planners_json=latest.planners_json if latest and latest.planners_json else [],
-                major_final_outputs=latest.major_final_outputs if latest and latest.major_final_outputs else [],
-                strategic_concerns_json=latest.strategic_concerns_json if latest and latest.strategic_concerns_json else [],
-                systems_json=latest.systems_json if latest and latest.systems_json else [],
-                databases_json=latest.databases_json if latest and latest.databases_json else [],
-                internal_projects_json=latest.internal_projects_json if latest and latest.internal_projects_json else [],
-                cross_projects_json=latest.cross_projects_json if latest and latest.cross_projects_json else [],
-                pmf_matrix_json=latest.pmf_matrix_json if latest and latest.pmf_matrix_json else [],
-                mithi_special_solutions=latest.mithi_special_solutions if latest and latest.mithi_special_solutions else [],
-                mithi_hardware_inventory=latest.mithi_hardware_inventory if latest and latest.mithi_hardware_inventory else [],
-                implementation_schedules=latest.implementation_schedules if latest and latest.implementation_schedules else []
-            )
-            db.add(narrative)
-            db.flush()
-        else:
-            narrative.is_active = True
-            narrative.is_archived = False
-            narrative.issp_period_from = start_y
-            narrative.issp_period_to = end_y
-
-        # 3. Clone Organizational Outcomes for the new cycle if none exist
-        existing_outcomes = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == issp_period).count()
-        if existing_outcomes == 0 and latest and latest.issp_period != issp_period:
-            old_outcomes = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == latest.issp_period).all()
-            for old_oo in old_outcomes:
-                db.add(OrganizationalOutcome(
-                    issp_period=issp_period,
-                    type_label=old_oo.type_label,
-                    outcome_name=old_oo.outcome_name,
-                    description=old_oo.description
-                ))
-            db.flush()
-
-        # 4. Clone Budget Ceilings for the new cycle if none exist
-        departments = db.query(Department).all()
-        for dept in departments:
-            has_ceiling = db.query(BudgetCeiling).filter(
-                BudgetCeiling.department_id == dept.id,
-                BudgetCeiling.issp_period == issp_period
-            ).first()
-            if not has_ceiling:
-                old_ceiling = None
-                if latest:
-                    old_ceiling = db.query(BudgetCeiling).filter(
-                        BudgetCeiling.department_id == dept.id,
-                        BudgetCeiling.issp_period == latest.issp_period
-                    ).first()
-                capex = old_ceiling.allocated_capex if old_ceiling else Decimal("0.00")
-                mooe = old_ceiling.allocated_mooe if old_ceiling else Decimal("0.00")
-                db.add(BudgetCeiling(
-                    department_id=dept.id,
-                    issp_period=issp_period,
-                    allocated_capex=capex,
-                    allocated_mooe=mooe
-                ))
-            db.flush()
-
-        # 5. Synchronize system setting if present
-        active_setting = db.query(SystemSetting).filter(SystemSetting.key == "issp_active_cycle").first()
-        if active_setting:
-            active_setting.value = issp_period
-        else:
-            db.add(SystemSetting(key="issp_active_cycle", value=issp_period))
-
-        log_audit_event(
-            db=db,
-            action="PLANNING_CYCLE_ACTIVATED",
-            module="GOVERNANCE",
-            user_id=admin["id"],
-            ip_address=request.client.host if request.client else None,
-            new_value={"issp_period": issp_period, "duration": f"{start_y}-{end_y}"}
-        )
-
-        db.commit()
-        return {"status": "success", "message": f"Planning cycle FY {issp_period} activated."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to activate planning cycle '{issp_period}': {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to activate cycle: {str(e)}")
-
 
 @router.post("/narratives/{issp_period}/reset")
 def reset_planning_cycle(
@@ -2191,798 +4012,108 @@ def reset_planning_cycle(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    db.query(Proposal).filter(
-        Proposal.issp_period == issp_period,
-        Proposal.status.in_([ProposalStatus.DRAFT, ProposalStatus.RETURNED])
-    ).delete(synchronize_session=False)
+    """
+    Safely resets the active planning cycle:
+    Flushes unapproved proposal drafts and resets submitted systems back to Draft mode.
+    Preserves approved items and statutory master narratives intact.
+    """
+    try:
+        deleted_count = db.query(Proposal).filter(
+            Proposal.issp_period == issp_period,
+            func.lower(cast(Proposal.status, String)).in_(["draft", "returned"])
+        ).delete(synchronize_session=False)
 
-    log_audit_event(
-        db=db,
-        action="PLANNING_CYCLE_RESET",
-        module="GOVERNANCE",
-        user_id=admin["id"],
-        ip_address=request.client.host if request.client else None,
-        new_value={"issp_period": issp_period, "reset_status": "DRAFTS_PURGED"}
-    )
+        db.query(InformationSystem).filter(
+            InformationSystem.issp_period == issp_period,
+            func.lower(cast(InformationSystem.submission_status, String)) == "submitted"
+        ).update({"submission_status": "Draft"}, synchronize_session=False)
 
-    db.commit()
-    return {"status": "success", "message": f"Cycle {issp_period} draft ledger safely reset."}
-
-
-@router.post("/narratives/{issp_period}/upload-diagram")
-async def upload_diagram(
-    request: Request,
-    issp_period: str,
-    category: str = Query(..., description="Official DICT v.2026 diagram identifier or dynamic subsystem key"),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
-    if not narrative:
-        raise HTTPException(status_code=404, detail="Planning narrative not found.")
-
-    file_bytes = await file.read()
-    safe_name = secure_filename(file.filename)
-    key = storage_client.get_diagram_key(category, safe_name)
-    success = storage_client.upload_canvas_evidence(file_bytes, key)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to write diagram asset to storage.")
-
-    url = storage_client.generate_download_url(key)
-    
-    # Official DICT v.2026 Core Architectural Schematics & Seals Mapping
-    core_dict_mapping = {
-        "dict_logo": "dict_logo_url",                      # Page 1 DICT Co-Branding Seal
-        "bagong_pilipinas_logo": "bagong_pilipinas_logo_url", # Page 1 Bagong Pilipinas Emblem
-        "agency_logo": "agency_logo_url",                  # Page 1 Agency Institutional Seal
-        "network_diagram": "network_diagram_url",          # Part II.B.1 Existing LAN/WAN Topology
-        "fiber_backbone": "fiber_backbone_url",            # Part III.A.1 Proposed LAN/WAN / Backbone Layout
-        "system_architecture": "system_architecture_url",  # Part III.B Enterprise Architecture Schematic
-        "org_chart": "org_chart_url",                      # Part I.B Overall Agency Organizational Structure
-        "proposed_ict_org": "proposed_ict_org_url"         # Part III.C Proposed ICT Unit Structure
-    }
-
-    if category in core_dict_mapping and hasattr(narrative, core_dict_mapping[category]):
-        setattr(narrative, core_dict_mapping[category], url)
-    elif hasattr(narrative, category):
-        setattr(narrative, category, url)
-
-    # In parallel, capture any custom subsystem or departmental diagram dynamically into JSON store
-    if hasattr(narrative, 'set_subsystem_layout'):
-        narrative.set_subsystem_layout(category, url)
-
-    log_audit_event(
-        db=db,
-        action=f"DIAGRAM_UPLOADED_{category.upper()}",
-        module="GOVERNANCE",
-        user_id=admin["id"],
-        ip_address=request.client.host if (request and request.client) else None,
-        new_value={"category": category, "file_url": url, "issp_period": issp_period}
-    )
-
-    db.commit()
-    return {"status": "success", "file_url": url, "category": category}
-
-
-# ==========================================================
-# NARRATIVE CHILD ARTIFACTS (HUMAN CAPITAL, DRT, BIA, ETC.)
-# ==========================================================
-
-@router.get("/narratives/{issp_period}/human-capitals", response_model=List[HumanCapitalResponse])
-def get_human_capitals(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(HumanCapital).filter(HumanCapital.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/human-capitals", response_model=HumanCapitalResponse)
-def add_human_capital(issp_period: str, payload: HumanCapitalCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    hc = HumanCapital(issp_period=issp_period, **payload.model_dump())
-    db.add(hc)
-    db.commit()
-    db.refresh(hc)
-    return hc
-
-@router.put("/human-capitals/{id}", response_model=HumanCapitalResponse)
-def update_human_capital(id: int, payload: HumanCapitalCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    hc = db.query(HumanCapital).filter(HumanCapital.id == id).first()
-    if not hc:
-        raise HTTPException(status_code=404, detail="Human capital record not found.")
-    for k, v in payload.model_dump().items():
-        setattr(hc, k, v)
-    db.commit()
-    db.refresh(hc)
-    return hc
-
-@router.delete("/human-capitals/{id}")
-def delete_human_capital(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(HumanCapital).filter(HumanCapital.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/stakeholders", response_model=List[StakeholderAnalysisResponse])
-def get_stakeholders(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(StakeholderAnalysis).filter(StakeholderAnalysis.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/stakeholders", response_model=StakeholderAnalysisResponse)
-def add_stakeholder(issp_period: str, payload: StakeholderAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    dumped = payload.model_dump()
-    complexity_in = dumped.get("complexity_incoming") or dumped.get("incoming_complexity") or "Simple"
-    complexity_out = dumped.get("complexity_outgoing") or dumped.get("outgoing_complexity") or "Simple"
-    
-    sh = StakeholderAnalysis(
-        issp_period=issp_period,
-        stakeholder_group=payload.stakeholder_group,
-        transaction_processed_incoming=payload.transaction_processed_incoming,
-        transaction_processed_outgoing=payload.transaction_processed_outgoing,
-        complexity_incoming=getattr(complexity_in, "value", str(complexity_in)),
-        complexity_outgoing=getattr(complexity_out, "value", str(complexity_out))
-    )
-    db.add(sh)
-    db.commit()
-    db.refresh(sh)
-    return sh
-
-@router.put("/stakeholders/{id}", response_model=StakeholderAnalysisResponse)
-def update_stakeholder(id: int, payload: StakeholderAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    sh = db.query(StakeholderAnalysis).filter(StakeholderAnalysis.id == id).first()
-    if not sh:
-        raise HTTPException(status_code=404, detail="Stakeholder analysis record not found.")
-    
-    dumped = payload.model_dump()
-    sh.stakeholder_group = payload.stakeholder_group
-    sh.transaction_processed_incoming = payload.transaction_processed_incoming
-    sh.transaction_processed_outgoing = payload.transaction_processed_outgoing
-    
-    comp_in = dumped.get("complexity_incoming") or dumped.get("incoming_complexity")
-    if comp_in:
-        sh.complexity_incoming = getattr(comp_in, "value", str(comp_in))
-        
-    comp_out = dumped.get("complexity_outgoing") or dumped.get("outgoing_complexity")
-    if comp_out:
-        sh.complexity_outgoing = getattr(comp_out, "value", str(comp_out))
-        
-    db.commit()
-    db.refresh(sh)
-    return sh
-
-@router.delete("/stakeholders/{id}")
-def delete_stakeholder(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(StakeholderAnalysis).filter(StakeholderAnalysis.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/egov-checklists", response_model=List[EGovernmentChecklistResponse])
-def get_egov_checklists(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/egov-checklists", response_model=EGovernmentChecklistResponse)
-def add_egov_checklist(issp_period: str, payload: EGovernmentChecklistCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    eg = EGovernmentChecklist(issp_period=issp_period, **payload.model_dump())
-    db.add(eg)
-    db.commit()
-    db.refresh(eg)
-    return eg
-
-@router.put("/egov-checklists/{id}", response_model=EGovernmentChecklistResponse)
-def update_egov_checklist(id: int, payload: EGovernmentChecklistCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    eg = db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).first()
-    if not eg:
-        raise HTTPException(status_code=404, detail="E-Government checklist entry not found.")
-    for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(eg, k, v)
-    db.commit()
-    db.refresh(eg)
-    return eg
-
-@router.delete("/egov-checklists/{id}")
-def delete_egov_checklist(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/dr-teams", response_model=List[DisasterRecoveryTeamResponse])
-def get_dr_teams(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/dr-teams", response_model=DisasterRecoveryTeamResponse)
-def add_dr_team(issp_period: str, payload: DisasterRecoveryTeamCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    t = DisasterRecoveryTeam(issp_period=issp_period, **payload.model_dump())
-    db.add(t)
-    db.commit()
-    db.refresh(t)
-    return t
-
-@router.put("/dr-teams/{id}", response_model=DisasterRecoveryTeamResponse)
-def update_dr_team(id: int, payload: DisasterRecoveryTeamCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    t = db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.id == id).first()
-    if not t:
-        raise HTTPException(status_code=404, detail="Disaster recovery team member not found.")
-    for k, v in payload.model_dump().items():
-        setattr(t, k, v)
-    db.commit()
-    db.refresh(t)
-    return t
-
-@router.delete("/dr-teams/{id}")
-def delete_dr_team(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/dr-bias", response_model=List[BusinessImpactAnalysisResponse])
-def get_dr_bias(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/dr-bias", response_model=BusinessImpactAnalysisResponse)
-def add_dr_bia(issp_period: str, payload: BusinessImpactAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    b = BusinessImpactAnalysis(issp_period=issp_period, **payload.model_dump())
-    db.add(b)
-    db.commit()
-    db.refresh(b)
-    return b
-
-@router.put("/dr-bias/{id}", response_model=BusinessImpactAnalysisResponse)
-def update_dr_bia(id: int, payload: BusinessImpactAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    b = db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.id == id).first()
-    if not b:
-        raise HTTPException(status_code=404, detail="BIA record not found.")
-    for k, v in payload.model_dump().items():
-        setattr(b, k, v)
-    db.commit()
-    db.refresh(b)
-    return b
-
-@router.delete("/dr-bias/{id}")
-def delete_dr_bia(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/dr-metrics", response_model=List[DRBCPMetricResponse])
-def get_dr_metrics(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(DRBCPMetric).filter(DRBCPMetric.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/dr-metrics", response_model=DRBCPMetricResponse)
-def add_dr_metric(issp_period: str, payload: DRBCPMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    m = DRBCPMetric(issp_period=issp_period, **payload.model_dump())
-    db.add(m)
-    db.commit()
-    db.refresh(m)
-    return m
-
-@router.put("/dr-metrics/{id}", response_model=DRBCPMetricResponse)
-def update_dr_metric(id: int, payload: DRBCPMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    m = db.query(DRBCPMetric).filter(DRBCPMetric.id == id).first()
-    if not m:
-        raise HTTPException(status_code=404, detail="DRBCP KPI metric not found.")
-    for k, v in payload.model_dump().items():
-        setattr(m, k, v)
-    db.commit()
-    db.refresh(m)
-    return m
-
-@router.delete("/dr-metrics/{id}")
-def delete_dr_metric(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(DRBCPMetric).filter(DRBCPMetric.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/staff-positions", response_model=List[IctStaffPositionResponse])
-def get_staff_positions(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/staff-positions", response_model=IctStaffPositionResponse)
-def add_staff_position(issp_period: str, payload: IctStaffPositionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    pos = IctStaffPosition(issp_period=issp_period, **payload.model_dump())
-    db.add(pos)
-    db.commit()
-    db.refresh(pos)
-    return pos
-
-@router.put("/staff-positions/{id}", response_model=IctStaffPositionResponse)
-def update_staff_position(id: uuid.UUID, payload: IctStaffPositionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    pos = db.query(IctStaffPosition).filter(IctStaffPosition.id == id).first()
-    if not pos:
-        raise HTTPException(status_code=404, detail="Position not found.")
-    for k, v in payload.model_dump().items():
-        setattr(pos, k, v)
-    db.commit()
-    db.refresh(pos)
-    return pos
-
-@router.delete("/staff-positions/{id}")
-def delete_staff_position(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(IctStaffPosition).filter(IctStaffPosition.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/metrics", response_model=List[PerformanceMetricResponse])
-def get_performance_metrics(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/metrics", response_model=PerformanceMetricResponse)
-def add_performance_metric(issp_period: str, payload: PerformanceMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    metric = PerformanceMetric(issp_period=issp_period, **payload.model_dump())
-    db.add(metric)
-    db.commit()
-    db.refresh(metric)
-    return metric
-
-@router.put("/metrics/{id}", response_model=PerformanceMetricResponse)
-def update_performance_metric(id: uuid.UUID, payload: PerformanceMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    metric = db.query(PerformanceMetric).filter(PerformanceMetric.id == id).first()
-    if not metric:
-        raise HTTPException(status_code=404, detail="Performance metric not found.")
-    for k, v in payload.model_dump().items():
-        setattr(metric, k, v)
-    db.commit()
-    db.refresh(metric)
-    return metric
-
-@router.delete("/metrics/{id}")
-def delete_performance_metric(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(PerformanceMetric).filter(PerformanceMetric.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/cross-projects", response_model=List[CrossAgencyProjectResponse])
-def get_cross_projects(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/cross-projects", response_model=CrossAgencyProjectResponse)
-def add_cross_project(issp_period: str, payload: CrossAgencyProjectCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    proj = CrossAgencyProject(issp_period=issp_period, **payload.model_dump())
-    db.add(proj)
-    db.commit()
-    db.refresh(proj)
-    return proj
-
-@router.put("/cross-projects/{id}", response_model=CrossAgencyProjectResponse)
-def update_cross_project(id: uuid.UUID, payload: CrossAgencyProjectCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    proj = db.query(CrossAgencyProject).filter(CrossAgencyProject.id == id).first()
-    if not proj:
-        raise HTTPException(status_code=404, detail="Cross-agency project not found.")
-    for k, v in payload.model_dump().items():
-        setattr(proj, k, v)
-    db.commit()
-    db.refresh(proj)
-    return proj
-
-@router.delete("/cross-projects/{id}")
-def delete_cross_project(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(CrossAgencyProject).filter(CrossAgencyProject.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/narratives/{issp_period}/costs", response_model=List[AnnualCostBreakdownResponse])
-def get_annual_costs(issp_period: str, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.issp_period == issp_period).all()
-
-@router.post("/narratives/{issp_period}/costs", response_model=AnnualCostBreakdownResponse)
-def add_annual_cost(issp_period: str, payload: AnnualCostBreakdownCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    cost = AnnualCostBreakdown(issp_period=issp_period, **payload.model_dump())
-    db.add(cost)
-    db.commit()
-    db.refresh(cost)
-    return cost
-
-@router.delete("/costs/{id}")
-def delete_annual_cost(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(AnnualCostBreakdown).filter(AnnualCostBreakdown.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-
-# ==========================================================
-# DEPARTMENTS DIRECTORY CRUD
-# ==========================================================
-
-@router.get("/departments")
-def get_all_departments(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    depts = db.query(Department).all()
-    return [{"department_id": d.id, "department_name": d.name} for d in depts]
-
-@router.post("/departments")
-def create_department(payload: Dict[str, Any], db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    name = payload.get("name", "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Department name is required.")
-    dept = Department(name=name)
-    db.add(dept)
-    db.commit()
-    db.refresh(dept)
-    return {"status": "success", "department_id": dept.id, "department_name": dept.name}
-
-@router.put("/departments/{department_id}")
-def update_department(department_id: int, payload: Dict[str, Any], db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    dept = db.query(Department).filter(Department.id == department_id).first()
-    if not dept:
-        raise HTTPException(status_code=404, detail="Department not found.")
-    name = payload.get("name", "").strip()
-    if name:
-        dept.name = name
-    db.commit()
-    return {"status": "success", "department_id": dept.id, "department_name": dept.name}
-
-@router.delete("/departments/{department_id}")
-def delete_department(department_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    dept = db.query(Department).filter(Department.id == department_id).first()
-    if not dept:
-        raise HTTPException(status_code=404, detail="Department not found.")
-    db.delete(dept)
-    db.commit()
-    return {"status": "success"}
-
-
-# ==========================================================
-# USER WHITELIST & ACCESS CONTROL (SUPPLY USER INTEGRATION)
-# ==========================================================
-
-@router.get("/users/whitelist", response_model=List[WhitelistedUserResponse])
-def get_whitelisted_users(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(User).options(joinedload(User.department)).all()
-
-@router.post("/users/whitelist", response_model=WhitelistedUserResponse)
-def add_whitelisted_user(
-    payload: WhitelistedUserCreate, 
-    request: Request,
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    email_clean = payload.email.strip().lower()
-    existing = db.query(User).filter(User.email == email_clean).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=f"Account '{email_clean}' is already registered."
+        log_audit_event(
+            db=db,
+            action="PLANNING_CYCLE_RESET",
+            module="GOVERNANCE",
+            user_id=admin["id"],
+            ip_address=request.client.host if request.client else None,
+            new_value={"issp_period": issp_period, "purged_drafts": deleted_count}
         )
-
-    if not payload.password or len(payload.password.strip()) < 8:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Initial password is required and must be at least 8 characters long."
-        )
-
-    hashed_pwd = bcrypt.hashpw(payload.password.strip().encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    
-    target_dept_id = payload.assigned_department_id if payload.role_tag != RoleTag.ROLE_MIS_ADMIN else None
-    if payload.role_tag in [RoleTag.ROLE_DEPT_USER, RoleTag.ROLE_SUPPLY_USER] and not target_dept_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Department assignment is mandatory for role: {payload.role_tag.value}"
-        )
-
-    user = User(
-        email=email_clean,
-        role_tag=payload.role_tag,
-        department_id=target_dept_id,
-        is_whitelisted=True,
-        password_hash=hashed_pwd
-    )
-    db.add(user)
-    db.flush()
-
-    log_audit_event(
-        db=db,
-        action="USER_MANUALLY_ONBOARDED",
-        module="AUTHENTICATION",
-        user_id=admin["id"],
-        department_id=user.department_id,
-        ip_address=request.client.host if request.client else None,
-        new_value={"email": user.email, "role": user.role_tag.value, "dept_id": user.department_id}
-    )
-    db.commit()
-
-    return user
-
-@router.put("/users/whitelist/{user_id}", response_model=WhitelistedUserResponse)
-def update_whitelisted_user(user_id: int, payload: WhitelistedUserUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
-    
-    if payload.email:
-        user.email = payload.email.strip().lower()
-    if payload.role_tag:
-        user.role_tag = payload.role_tag
-    if payload.assigned_department_id is not None:
-        user.department_id = payload.assigned_department_id if user.role_tag != RoleTag.ROLE_MIS_ADMIN else None
-    if payload.password and payload.password.strip():
-        user.password_hash = bcrypt.hashpw(payload.password.strip().encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-    db.commit()
-    db.refresh(user)
-    return user
-
-@router.delete("/users/whitelist/{user_id}")
-def delete_whitelisted_user(user_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
-    db.delete(user)
-    db.commit()
-    return {"status": "success"}
+        db.commit()
+        return {"status": "success", "message": f"Planning cycle FY {issp_period} safely reset. Purged {deleted_count} draft items."}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to reset cycle '{issp_period}': {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to reset cycle: {str(e)}")
 
 
 # ==========================================================
-# STANDARD PRICE CATALOG
-# ==========================================================
-
-@router.get("/catalog", response_model=List[CatalogItemResponse])
-def get_catalog_items(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(CatalogItem).all()
-
-@router.post("/catalog", response_model=CatalogItemResponse, status_code=status.HTTP_201_CREATED)
-def create_catalog_item(payload: CatalogItemCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    existing = db.query(CatalogItem).filter(CatalogItem.item_key == payload.item_key).first()
-    if existing:
-        raise HTTPException(status_code=400, detail=f"Catalog item key '{payload.item_key}' already exists.")
-    item = CatalogItem(**payload.model_dump())
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return item
-
-@router.put("/catalog/{item_id}", response_model=CatalogItemResponse)
-def update_catalog_item(item_id: uuid.UUID, payload: CatalogItemUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = db.query(CatalogItem).filter(CatalogItem.id == item_id).first()
-    if not item:
-        raise HTTPException(status_code=404, detail="Catalog item not found.")
-    for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(item, k, v)
-    db.commit()
-    db.refresh(item)
-    return item
-
-
-# ==========================================================
-# PHYSICAL CAMPUSES & AUXILIARY DICT SURVEYS
-# ==========================================================
-
-@router.get("/campuses", response_model=List[CampusResponse])
-def get_campuses(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(Campus).all()
-
-@router.post("/campuses", response_model=CampusResponse, status_code=status.HTTP_201_CREATED)
-def create_campus(payload: CampusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    campus = Campus(**payload.model_dump())
-    db.add(campus)
-    db.commit()
-    db.refresh(campus)
-    return campus
-
-@router.put("/campuses/{campus_id}", response_model=CampusResponse)
-def update_campus(campus_id: int, payload: CampusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    campus = db.query(Campus).filter(Campus.id == campus_id).first()
-    if not campus:
-        raise HTTPException(status_code=404, detail="Campus not found.")
-    for k, v in payload.model_dump().items():
-        setattr(campus, k, v)
-    db.commit()
-    db.refresh(campus)
-    return campus
-
-@router.delete("/campuses/{campus_id}")
-def delete_campus(campus_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    campus = db.query(Campus).filter(Campus.id == campus_id).first()
-    if not campus:
-        raise HTTPException(status_code=404, detail="Campus not found.")
-    db.delete(campus)
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/glossary", response_model=List[GlossaryTermResponse])
-def get_glossary(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(GlossaryTerm).order_by(GlossaryTerm.order_index.asc()).all()
-
-@router.post("/glossary", response_model=GlossaryTermResponse)
-def create_glossary(payload: GlossaryTermCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    t = GlossaryTerm(**payload.model_dump())
-    db.add(t)
-    db.commit()
-    db.refresh(t)
-    return t
-
-@router.put("/glossary/{id}", response_model=GlossaryTermResponse)
-def update_glossary(id: int, payload: GlossaryTermCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    t = db.query(GlossaryTerm).filter(GlossaryTerm.id == id).first()
-    if not t:
-        raise HTTPException(status_code=404, detail="Term not found.")
-    for k, v in payload.model_dump().items():
-        setattr(t, k, v)
-    db.commit()
-    db.refresh(t)
-    return t
-
-@router.delete("/glossary/{id}")
-def delete_glossary(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(GlossaryTerm).filter(GlossaryTerm.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/instructions", response_model=List[GeneralInstructionResponse])
-def get_instructions(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(GeneralInstruction).order_by(GeneralInstruction.step_number.asc()).all()
-
-@router.post("/instructions", response_model=GeneralInstructionResponse)
-def create_instruction(payload: GeneralInstructionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    i = GeneralInstruction(**payload.model_dump())
-    db.add(i)
-    db.commit()
-    db.refresh(i)
-    return i
-
-@router.put("/instructions/{id}", response_model=GeneralInstructionResponse)
-def update_instruction(id: int, payload: GeneralInstructionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    i = db.query(GeneralInstruction).filter(GeneralInstruction.id == id).first()
-    if not i:
-        raise HTTPException(status_code=404, detail="Instruction not found.")
-    for k, v in payload.model_dump().items():
-        setattr(i, k, v)
-    db.commit()
-    db.refresh(i)
-    return i
-
-@router.delete("/instructions/{id}")
-def delete_instruction(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(GeneralInstruction).filter(GeneralInstruction.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/server-capacities", response_model=List[ServerCapacityResponse])
-def get_server_capacities(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(ServerCapacityTrack).all()
-
-@router.post("/server-capacities", response_model=ServerCapacityResponse)
-def create_server_capacity(payload: ServerCapacityCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    cap = ServerCapacityTrack(**payload.model_dump())
-    db.add(cap)
-    db.commit()
-    db.refresh(cap)
-    return cap
-
-@router.delete("/server-capacities/{id}")
-def delete_server_capacity(id: uuid.UUID, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(ServerCapacityTrack).filter(ServerCapacityTrack.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/os-census", response_model=List[ClientOsCensusResponse])
-def get_os_census(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(ClientOsCensus).all()
-
-@router.post("/os-census", response_model=ClientOsCensusResponse)
-def create_os_census(payload: ClientOsCensusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    c = ClientOsCensus(**payload.model_dump())
-    db.add(c)
-    db.commit()
-    db.refresh(c)
-    return c
-
-@router.put("/os-census/{id}", response_model=ClientOsCensusResponse)
-def update_os_census(id: int, payload: ClientOsCensusCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    c = db.query(ClientOsCensus).filter(ClientOsCensus.id == id).first()
-    if not c:
-        raise HTTPException(status_code=404, detail="OS Census entry not found.")
-    for k, v in payload.model_dump().items():
-        setattr(c, k, v)
-    db.commit()
-    db.refresh(c)
-    return c
-
-@router.delete("/os-census/{id}")
-def delete_os_census(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(ClientOsCensus).filter(ClientOsCensus.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/software-census", response_model=List[OfficeSoftwareResponse])
-def get_software_census(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    return db.query(OfficeSoftwareCensus).all()
-
-@router.post("/software-census", response_model=OfficeSoftwareResponse)
-def create_software_census(payload: OfficeSoftwareCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    s = OfficeSoftwareCensus(**payload.model_dump())
-    db.add(s)
-    db.commit()
-    db.refresh(s)
-    return s
-
-@router.delete("/software-census/{id}")
-def delete_software_census(id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    db.query(OfficeSoftwareCensus).filter(OfficeSoftwareCensus.id == id).delete()
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/audit-logs", response_model=List[AuditLogEntryResponse])
-def get_audit_logs(
-    module: Optional[str] = Query(None),
-    dept_id: Optional[int] = Query(None),
-    db: Session = Depends(get_db), 
-    admin: dict = Depends(require_admin)
-):
-    query = db.query(AuditTrail).options(
-        joinedload(AuditTrail.user),
-        joinedload(AuditTrail.department)
-    )
-
-    if module and module != "All":
-        query = query.filter(AuditTrail.module == module)
-    if dept_id:
-        query = query.filter(AuditTrail.department_id == dept_id)
-
-    logs = query.order_by(AuditTrail.timestamp.desc()).limit(500).all()
-    out = []
-    for l in logs:
-        out.append(
-            AuditLogEntryResponse(
-                id=l.id,
-                proposal_id=l.proposal_id,
-                action=l.action,
-                module=getattr(l, "module", "GOVERNANCE"),
-                ip_address=getattr(l, "ip_address", None),
-                department_id=getattr(l, "department_id", None),
-                user_id=l.user_id,
-                operator_email=l.user.email if l.user else "System",
-                operator_role=l.user.role_tag.value if l.user else "SYSTEM",
-                timestamp=l.timestamp,
-                old_value=l.old_value,
-                new_value=l.new_value
-            )
-        )
-    return out
-
-
-# ==========================================================
-# ASYNC COMPILATION & GOVERNANCE TRIGGER
+# ASYNC COMPILATION & BACKGROUND TASKS
 # ==========================================================
 
 @router.post("/governance/generate-issp")
 def trigger_document_generation(
     issp_period: Optional[str] = Query(None),
+    export_format: str = Query("pdf", description="Format output: 'pdf' or 'docx'"),
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    try:
-        target_period = issp_period or get_active_issp_period(db)
-        narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == target_period).first()
-        if not narrative:
-            raise HTTPException(status_code=400, detail=f"Planning cycle '{target_period}' not configured.")
+    target_period = issp_period or get_active_issp_period(db)
+    clean_format = (export_format or "pdf").lower().strip()
+    if clean_format not in ("pdf", "docx"):
+        clean_format = "pdf"
 
-        approved_proposals = db.query(Proposal).filter(
-            Proposal.status == ProposalStatus.APPROVED,
-            Proposal.issp_period == target_period,
-            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-        ).all()
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == target_period).first()
+    if not narrative:
+        raise HTTPException(status_code=400, detail=f"Planning cycle '{target_period}' not configured.")
 
-        if not approved_proposals:
-            raise HTTPException(status_code=400, detail="Compilation blocked: No approved proposals exist for this cycle.")
+    # Strict compilation alignment: Only pull approved proposals that are project-linked OR standalone operational
+    non_project_cats = db.query(StrategicCategory.name).filter(
+        StrategicCategory.is_project_linked == False,
+        StrategicCategory.is_active == True
+    ).all()
+    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
+    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
+        if default_cat not in standalone_cat_names:
+            standalone_cat_names.append(default_cat)
 
-        total_capex = sum((p.total_cost for p in approved_proposals if p.expenditure_class == ExpenditureClass.CAPITAL_OUTLAY), Decimal("0.00"))
-        total_mooe = sum((p.total_cost for p in approved_proposals if p.expenditure_class == ExpenditureClass.MOOE), Decimal("0.00"))
+    approved_proposals = db.query(Proposal).filter(
+        func.lower(cast(Proposal.status, String)) == "approved",
+        Proposal.issp_period == target_period,
+        or_(
+            Proposal.project_id.isnot(None),
+            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
+        ),
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).all()
 
-        compiled_meta = {
-            "issp_id": f"ISSP-{target_period}-FINAL",
-            "agency_name": narrative.agency_name,
-            "issp_period_years": target_period,
-            "allocated_budget": str(total_capex + total_mooe),
-            "total_capex": str(total_capex),
-            "total_mooe": str(total_mooe)
-        }
+    if not approved_proposals:
+        raise HTTPException(
+            status_code=400, 
+            detail="Compilation blocked: No approved proposals connected to ICT projects or standalone operations exist for this cycle."
+        )
 
-        task = compile_issp_document.delay(compiled_meta)
+    # Derive accurate parity figures directly from canonical parity calculator
+    matrices = calculate_financial_summaries(db, target_period, only_approved=True)
+    certified_total = matrices["certified_grand_total"]
 
-        return {
-            "status": "queued",
-            "task_id": task.id,
-            "active_cycle": target_period,
-            "combined_plan_cost_php": str(total_capex + total_mooe),
-            "approved_proposals_count": len(approved_proposals)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to queue compilation: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Compilation task queue failed.")
+    compiled_meta = {
+        "issp_id": f"ISSP-{target_period}-FINAL",
+        "agency_name": narrative.agency_name,
+        "issp_period_years": target_period,
+        "allocated_budget": str(certified_total),
+        "total_capex": str(matrices["b3_statement_of_expenditure"]["Capital Outlay"]["Total"]),
+        "total_mooe": str(matrices["b3_statement_of_expenditure"]["Maintenance and Other Operating Expenses"]["Total"]),
+        "export_format": clean_format
+    }
+
+    task = compile_issp_document.delay(compiled_meta)
+
+    return {
+        "status": "queued",
+        "task_id": task.id,
+        "format": clean_format,
+        "active_cycle": target_period,
+        "combined_plan_cost_php": str(certified_total),
+        "approved_proposals_count": len(approved_proposals)
+    }
 
 
 @router.get("/governance/task-status/{task_id}")
@@ -3004,13 +4135,3 @@ def get_task_status(task_id: str, admin: dict = Depends(require_admin)):
     except Exception as e:
         logger.error(f"Task status poll error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to query worker status.")
-
-
-@router.post("/governance/restore-document")
-def restore_governance_document(
-    payload: Dict[str, Any],
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    doc_id = payload.get("document_id")
-    return {"status": "success", "message": f"Glacier restore initiated for {doc_id}."}

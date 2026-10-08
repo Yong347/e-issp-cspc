@@ -4,9 +4,16 @@
   "version": "5.0.0",
   "description": "DICT ISSP v.2026 Compliance and Governance Engine",
   "scripts": {
+    "dev": "concurrently -n \"API,VITE,WORKER\" -c \"blue,green,magenta\" \"npm run server\" \"npm run frontend\" \"npm run worker\"",
+    "dev:noworker": "concurrently -n \"API,VITE\" -c \"blue,green\" \"npm run server\" \"npm run frontend\"",
+    "server": "uvicorn app.main:app --reload --port 8000",
+    "worker": "celery -A app.celery_app worker --loglevel=info -P solo",
+    "frontend": "npm run dev --prefix frontend",
+    "migrate": "alembic upgrade head",
     "kill-ports": "kill-port 8000 5173"
   },
   "devDependencies": {
+    "concurrently": "^9.1.2",
     "kill-port": "^2.0.1"
   }
 }

@@ -1,21 +1,23 @@
 // frontend/src/api/dept.js
 /**
  * ==============================================================================
- * CSPC e-ISSP COMPLIANCE ENGINE — DEPARTMENT API CLIENT
- * Aligned with DICT ISSP Template v. 2026 & DBM National Budget Circulars
+ * e-ISSP COMPLIANCE ENGINE — DEPARTMENT API CLIENT
+ * Aligned with DICT ISSP Template v.2026 & DBM National Budget Circulars
  * ==============================================================================
- * Enforces:
- * - Unified Proposals Ledger (CapEx & MOOE unified at ₱50k capitalization threshold)
- * - Mandatory Broader Scope (Organizational Outcome) Linkage (Rule 6)
+ * Core Governance Modules:
+ * - Unified Resource Proposals Ledger (Part IV.A: Hardware Equipment, Perpetual COTS Software Licenses, Cloud Subscriptions, Technical Services)
+ * - 1-Step Proposal Creation with Direct Quotation Canvas Upload (createProposalWithCanvas)
+ * - 1-Click Proposal Duplication (duplicateProposal)
+ * - Proposed Information Systems & Platform Upgrades (Part III.D Enterprise Applications)
+ * - Direct Strategic ICT Project Linkage (project_id) on Proposals and Information Systems
+ * - Pre-Approved Standard Equipment & COTS Software Catalog
  * - Section 8.0 Department Needs Assessment Full Lifecycle (Create, Read, Update, Delete)
- * - Optional Section 8.0 Department Needs Assessment Bidirectional Linkage
- * - Canvas Quotation Expiration Handling & Proof Uploads (Rule 7)
- * - Student-Developed Systems Bypass (Rule 1)
- * - Outlays >= ₱2,000,000.00 System Development Status Controls (Rule 2)
- * - Department-Scoped Inventory Isolation (Rule 9)
- * - DICT Annex 1 Standard Category (dict_category & other_category_name) Support
- * - Live S3 Glacier Cold Storage Retrieval Monitoring
- * - Dual-Pass Compilation Pre-Flight Headroom Checks
+ * - Quotation Validity & Canvas Expiration Guards (DBM & COA Procurement Rules)
+ * - In-House / Non-Commercial Systems Turnover Deed Support
+ * - Department-Scoped Asset Inventory Isolation (Annex 1)
+ * - Automated 401 Unauthorized Interceptor with Return Route Preservation
+ * - Dual-Pool Independent Sub-Ceiling Pre-Flight Headroom Checks (CapEx vs. MOOE)
+ * - Transparent Document Archive Access via Official Document Vault (Zero Cloud Vendor Jargon)
  * ==============================================================================
  */
 
@@ -50,7 +52,44 @@ function getHeaders(isMultipart = false, customToken = null) {
 }
 
 /**
- * Standardized HTTP response evaluator.
+ * Formats machine field keys into clean, human-readable labels.
+ *
+ * @param {string} fieldKey
+ * @returns {string}
+ */
+function humanizeFieldName(fieldKey) {
+  if (!fieldKey) return "";
+  const specialMap = {
+    uacs_object_code: "UACS Object Code",
+    expenditure_class: "Expenditure Class",
+    strategic_category: "Strategic Spending Category",
+    issp_period: "ISSP Planning Horizon",
+    yearly_quantities: "Annual Target Quantities",
+    item_name: "Resource Description",
+    unit_cost: "Unit Cost",
+    total_cost: "Total Outlay",
+    project_id: "Strategic ICT Project",
+    system_id: "Information System",
+    outcome_id: "Organizational Outcome",
+    needs_assessment_id: "Needs Assessment",
+    canvas_evidence_url: "Quotation Canvas PDF",
+    canvas_expiration_date: "Quotation Expiration Date",
+    supplier_name: "Supplier Name",
+    proposed_cost: "Proposed Development Cost",
+    system_development_status: "System Development Status"
+  };
+
+  if (specialMap[fieldKey]) {
+    return specialMap[fieldKey];
+  }
+
+  return fieldKey
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+/**
+ * Standardized HTTP response evaluator with global 401 session interceptor.
  * Gracefully extracts string messages, Pydantic validation error lists,
  * and structured backend exception payloads to avoid '[object Object]' UI errors.
  *
@@ -60,37 +99,66 @@ function getHeaders(isMultipart = false, customToken = null) {
  */
 async function handleResponse(res, fallbackMessage) {
   if (!res.ok) {
+    // Global 401 Unauthorized Interceptor: Clears session and redirects with return path
+    if (res.status === 401 && typeof window !== "undefined") {
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("user_role");
+      localStorage.removeItem("department_id");
+      localStorage.removeItem("user_email");
+      const currentPath = window.location.pathname + window.location.search;
+      if (!currentPath.includes("/login")) {
+        window.location.href = `/login?expired=true&redirect=${encodeURIComponent(currentPath)}`;
+      }
+    }
+
     let detailMessage = "";
+    let rawErrorData = null;
+    let violationList = [];
+
     try {
-      const errorData = await res.json();
-      if (errorData) {
-        if (typeof errorData.detail === "string") {
-          detailMessage = errorData.detail;
-        } else if (Array.isArray(errorData.detail)) {
-          // Flatten Pydantic validation error objects
-          detailMessage = errorData.detail
+      rawErrorData = await res.json();
+      if (rawErrorData) {
+        if (typeof rawErrorData.detail === "string") {
+          detailMessage = rawErrorData.detail;
+        } else if (Array.isArray(rawErrorData.detail)) {
+          // Format Pydantic field-level validation errors cleanly
+          detailMessage = rawErrorData.detail
             .map((err) => {
-              const field = err.loc ? err.loc.filter((p) => p !== "body").join(" -> ") : "";
-              return field ? `[${field}]: ${err.msg}` : err.msg;
+              const fieldParts = (err.loc || []).filter(
+                (p) => p !== "body" && p !== "query" && p !== "path"
+              );
+              const fieldName = humanizeFieldName(fieldParts.join(" "));
+              const rawMsg = err.msg || "Invalid parameter";
+              const cleanMsg = rawMsg.charAt(0).toUpperCase() + rawMsg.slice(1);
+              return fieldName ? `${fieldName}: ${cleanMsg}` : cleanMsg;
             })
             .join(" | ");
-        } else if (typeof errorData.detail === "object" && errorData.detail !== null) {
-          if (errorData.detail.violations && Array.isArray(errorData.detail.violations)) {
-            detailMessage = errorData.detail.violations.join(" | ");
+        } else if (typeof rawErrorData.detail === "object" && rawErrorData.detail !== null) {
+          // Format DICT Singularity Engine violations list
+          if (Array.isArray(rawErrorData.detail.violations)) {
+            violationList = rawErrorData.detail.violations;
+            const header = rawErrorData.detail.error || "Compliance Integrity Failure";
+            detailMessage = `${header} (${violationList.length} issue${violationList.length > 1 ? "s" : ""}):\n• ${violationList.join("\n• ")}`;
           } else {
-            detailMessage = JSON.stringify(errorData.detail);
+            detailMessage = JSON.stringify(rawErrorData.detail);
           }
-        } else if (errorData.message) {
-          detailMessage = errorData.message;
+        } else if (rawErrorData.message) {
+          detailMessage = rawErrorData.message;
         }
       }
     } catch {
-      // Body is not JSON
+      // Body is non-JSON text
       detailMessage = await res.text().catch(() => "");
     }
 
     const finalError = detailMessage || `${fallbackMessage} (HTTP Status: ${res.status})`;
-    throw new Error(finalError);
+    const err = new Error(finalError);
+    err.status = res.status;
+    err.data = rawErrorData;
+    if (violationList.length > 0) {
+      err.violations = violationList;
+    }
+    throw err;
   }
 
   // Handle 204 No Content
@@ -99,6 +167,100 @@ async function handleResponse(res, fallbackMessage) {
   }
 
   return res.json();
+}
+
+/**
+ * Normalizes and sanitizes proposal payloads before network dispatch.
+ * - Formats multi-year quantity maps: casts values to non-negative integers.
+ * - Converts empty string UUIDs or null representations to null to prevent Pydantic parsing errors.
+ * - Synchronizes created_by_students and is_in_house_turnover aliases bidirectionally.
+ * - Auto-aligns strategic_category to 'Internal ICT Projects' if project_id is provided.
+ *
+ * @param {Object} payload - Raw proposal creation or update payload
+ * @returns {Object} Sanitized payload
+ */
+function sanitizeProposalPayload(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const sanitized = { ...payload };
+
+  // 1. Sanitize Multi-Year Quantity Mapping
+  if (sanitized.yearly_quantities && typeof sanitized.yearly_quantities === "object") {
+    const cleanQuantities = {};
+    Object.entries(sanitized.yearly_quantities).forEach(([k, v]) => {
+      const parsed = parseInt(v, 10);
+      cleanQuantities[String(k).trim()] = isNaN(parsed) || parsed < 0 ? 0 : parsed;
+    });
+    sanitized.yearly_quantities = cleanQuantities;
+  }
+
+  // 2. Coerce Empty Strings and "null" literals to real nulls
+  const nullableFields = [
+    "project_id", 
+    "needs_assessment_id", 
+    "outcome_id", 
+    "strategic_category_id", 
+    "canvas_evidence_url", 
+    "supplier_name", 
+    "uacs_object_code", 
+    "expenditure_class",
+    "justification",
+    "canvas_expiration_date"
+  ];
+  
+  nullableFields.forEach(field => {
+    if (sanitized[field] === "" || sanitized[field] === "null" || sanitized[field] === "undefined") {
+      sanitized[field] = null;
+    }
+  });
+
+  // 3. Align Non-Commercial / In-House Turnover Aliases bidirectionally
+  if (sanitized.is_in_house_turnover !== undefined) {
+    sanitized.created_by_students = Boolean(sanitized.is_in_house_turnover);
+  } else if (sanitized.created_by_students !== undefined) {
+    sanitized.is_in_house_turnover = Boolean(sanitized.created_by_students);
+  }
+
+  // 4. Auto-align strategic category if linked to an internal project
+  if (sanitized.project_id && (!sanitized.strategic_category || sanitized.strategic_category === "Office Productivity")) {
+    sanitized.strategic_category = "Internal ICT Projects";
+  }
+
+  return sanitized;
+}
+
+/**
+ * Normalizes system proposal payloads for simplified intake (Part III.D).
+ * Sanitizes proposed_cost, binds project_id, sets technical fallbacks, and cleans string values.
+ *
+ * @param {Object} payload - Raw system proposal payload
+ * @returns {Object} Sanitized payload
+ */
+function sanitizeSystemPayload(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const sanitized = { ...payload };
+
+  if (sanitized.proposed_cost !== undefined && sanitized.proposed_cost !== null) {
+    const parsedCost = parseFloat(sanitized.proposed_cost);
+    sanitized.proposed_cost = isNaN(parsedCost) || parsedCost < 0 ? 0 : parsedCost;
+  }
+
+  const nullableFields = [
+    "project_id",
+    "needs_assessment_id",
+    "strategic_concern_id",
+    "online_url",
+    "enhancement_details",
+    "pia_target_date_text",
+    "internal_integrated_systems",
+    "external_integrated_systems"
+  ];
+  nullableFields.forEach(field => {
+    if (sanitized[field] === "" || sanitized[field] === "null" || sanitized[field] === "undefined") {
+      sanitized[field] = null;
+    }
+  });
+
+  return sanitized;
 }
 
 // ==============================================================================
@@ -124,7 +286,7 @@ export async function getBudgetSummary(customToken = null) {
 
 /**
  * Retrieves Organizational Outcomes (Major Final Outputs / KRA categories).
- * Placed at the top of every proposal form in compliance with Rule 6.
+ * Rendered at the top of proposal reviews in compliance with DICT standards.
  *
  * @param {string|null} customToken - Optional override token
  */
@@ -137,7 +299,7 @@ export async function getOutcomes(customToken = null) {
 
 /**
  * Retrieves strategic ICT projects configured for the active cycle.
- * Allows department line items to link directly to Part III.E initiatives.
+ * Allows department line items and proposed systems to link directly to Part III.E initiatives.
  *
  * @param {string|null} customToken - Optional override token
  */
@@ -149,25 +311,46 @@ export async function getProjects(customToken = null) {
 }
 
 // ==============================================================================
-// 3. REFERENCE CATALOG & CANVAS EXPIRATION ALERTS (Rule 7 & Rule 8)
+// 3. REFERENCE CATALOG & CANVAS EXPIRATION ALERTS
 // ==============================================================================
 
 /**
  * Retrieves pre-approved catalog references with standard pricing and specs.
- * Automatically excludes items with expired market quotations.
+ * Automatically excludes items with expired market quotations and filters by allowed_offices.
+ * Supports optional category and search filtering parameters.
  *
- * @param {string|null} customToken - Optional override token
+ * @param {Object|string|null} paramsOrToken - Optional filter object { category, search } or token override
+ * @param {string|null} customToken - Optional explicit token override
  */
-export async function getDeptCatalog(customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/catalog`, {
-    headers: getHeaders(false, customToken)
+export async function getDeptCatalog(paramsOrToken = null, customToken = null) {
+  let token = customToken;
+  const queryParams = new URLSearchParams();
+
+  if (typeof paramsOrToken === "string") {
+    token = paramsOrToken;
+  } else if (typeof paramsOrToken === "object" && paramsOrToken !== null) {
+    if (paramsOrToken.category && paramsOrToken.category !== "All") {
+      queryParams.append("category", paramsOrToken.category);
+    }
+    if (paramsOrToken.search) {
+      queryParams.append("search", paramsOrToken.search);
+    }
+    if (paramsOrToken.token) {
+      token = paramsOrToken.token;
+    }
+  }
+
+  const qs = queryParams.toString();
+  const url = `${API_BASE_URL}/api/dept/catalog${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, {
+    headers: getHeaders(false, token)
   });
   return handleResponse(res, "Failed to load standard equipment catalog");
 }
 
 /**
  * Identifies standard catalog references and custom draft proposals
- * whose quotation validity expires within the next 14 days (Rule 7 Alert System).
+ * whose quotation validity expires within the policy warning threshold.
  *
  * @param {string|null} customToken - Optional override token
  */
@@ -185,29 +368,62 @@ export async function getExpiringCanvasAlerts(customToken = null) {
 /**
  * Retrieves all unified resource proposals for the active cycle.
  * Expired canvas items are preserved in the table with an alert flag.
+ * Accepts either an options object or positional parameters.
  *
- * @param {string} isspPeriod - Optional planning cycle filter (e.g., "2026-2028")
+ * @param {string|Object} paramsOrPeriod - Optional cycle string (e.g., "2028-2030") OR filter object
  * @param {string} statusFilter - Optional status filter ("Draft", "Submitted", "Approved", "Returned")
  * @param {number} skip - Pagination offset
  * @param {number} limit - Maximum items per page
  * @param {string|null} customToken - Optional override token
  */
-export async function getProposals(isspPeriod = "", statusFilter = "", skip = 0, limit = 100, customToken = null) {
+export async function getProposals(paramsOrPeriod = "", statusFilter = "", skip = 0, limit = 100, customToken = null) {
   const params = new URLSearchParams();
-  params.append("skip", String(skip));
-  params.append("limit", String(limit));
-  if (isspPeriod) params.append("issp_period", isspPeriod);
-  if (statusFilter && statusFilter !== "All") params.append("status_filter", statusFilter);
+  let token = customToken;
+
+  if (typeof paramsOrPeriod === "object" && paramsOrPeriod !== null) {
+    const {
+      issp_period = "",
+      isspPeriod = "",
+      status_filter = "",
+      statusFilter: sFilter = "",
+      category = "",
+      strategic_category = "",
+      strategicCategory = "",
+      search = "",
+      skip: sk = 0,
+      limit: lim = 100,
+      token: optToken = null
+    } = paramsOrPeriod;
+
+    params.append("skip", String(sk));
+    params.append("limit", String(lim));
+    const cycle = issp_period || isspPeriod;
+    if (cycle) params.append("issp_period", cycle);
+    const st = status_filter || sFilter;
+    if (st && st !== "All" && st !== "all") params.append("status_filter", st);
+    if (category && category !== "All" && category !== "all") params.append("category", category);
+    const sc = strategic_category || strategicCategory;
+    if (sc && sc !== "All" && sc !== "all") params.append("strategic_category", sc);
+    if (search) params.append("search", search);
+    if (optToken) token = optToken;
+  } else {
+    params.append("skip", String(skip));
+    params.append("limit", String(limit));
+    if (paramsOrPeriod) params.append("issp_period", paramsOrPeriod);
+    if (statusFilter && statusFilter !== "All" && statusFilter !== "all") {
+      params.append("status_filter", statusFilter);
+    }
+  }
 
   const res = await fetch(`${API_BASE_URL}/api/dept/proposals?${params.toString()}`, {
-    headers: getHeaders(false, customToken)
+    headers: getHeaders(false, token)
   });
   return handleResponse(res, "Failed to load departmental resource proposals");
 }
 
 /**
  * Retrieves detailed parameters of a specific proposal item.
- * Automatically verifies S3 Glacier restoration progress if cold retrieval is active.
+ * Transparently verifies archive availability and document metadata.
  *
  * @param {string} proposalId - UUID of the proposal item
  * @param {string|null} customToken - Optional override token
@@ -220,40 +436,119 @@ export async function getProposalDetail(proposalId, customToken = null) {
 }
 
 /**
- * Creates a new draft proposal in the unified Part IV.A ledger.
- * - Automates target deployment office to the logged-in department (Rule 5).
- * - Bypasses quotation canvas requirement if created_by_students is True (Rule 1).
- * - Enforces System Development Status if total outlay >= ₱2,000,000.00 (Rule 2).
- * - Auto-classifies Capital Outlay (>= ₱50k) vs. MOOE (< ₱50k) (Rules 3 & 4).
- * - Supports optional linkage to Section 8.0 Department Needs Assessment (needs_assessment_id).
+ * 1-Step Unified Proposal Creation with Direct Quotation File Upload.
+ * Accepts proposal metadata and an optional PDF file in a single request.
  *
- * @param {Object} payload - Validated ProposalCreatePayload schema
+ * @param {Object} payload - ProposalCreatePayload schema
+ * @param {File|null} file - Optional quotation canvas PDF file
  * @param {string|null} customToken - Optional override token
  */
-export async function createDraftProposal(payload, customToken = null) {
+export async function createProposalWithCanvas(payload, file = null, customToken = null) {
+  const cleanPayload = sanitizeProposalPayload(payload);
+
+  if (file && file instanceof File) {
+    const formData = new FormData();
+    formData.append("payload_json", JSON.stringify(cleanPayload));
+    formData.append("file", file);
+
+    const res = await fetch(`${API_BASE_URL}/api/dept/proposals/with-canvas`, {
+      method: "POST",
+      headers: getHeaders(true, customToken),
+      body: formData
+    });
+    return handleResponse(res, "Failed to create proposal with canvas evidence");
+  }
+
+  // Fallback to standard JSON endpoint if no file was provided
   const res = await fetch(`${API_BASE_URL}/api/dept/proposals`, {
     method: "POST",
     headers: getHeaders(false, customToken),
-    body: JSON.stringify(payload)
+    body: JSON.stringify(cleanPayload)
   });
   return handleResponse(res, "Failed to create draft proposal");
 }
 
 /**
+ * Creates a new draft proposal in the unified Part IV.A ledger.
+ * Overloaded to support optional file upload as the second argument.
+ *
+ * @param {Object} payload - Validated ProposalCreatePayload schema
+ * @param {File|string|null} fileOrToken - Optional File object or override token string
+ * @param {string|null} customToken - Optional override token
+ */
+export async function createDraftProposal(payload, fileOrToken = null, customToken = null) {
+  let file = null;
+  let token = customToken;
+
+  if (fileOrToken instanceof File) {
+    file = fileOrToken;
+  } else if (typeof fileOrToken === "string") {
+    token = fileOrToken;
+  }
+
+  if (file) {
+    return createProposalWithCanvas(payload, file, token);
+  }
+
+  const cleanPayload = sanitizeProposalPayload(payload);
+  const res = await fetch(`${API_BASE_URL}/api/dept/proposals`, {
+    method: "POST",
+    headers: getHeaders(false, token),
+    body: JSON.stringify(cleanPayload)
+  });
+  return handleResponse(res, "Failed to create draft proposal");
+}
+
+/**
+ * Clones an existing proposal into a fresh Draft state.
+ * Enables 1-click duplication for batch authoring without re-entering technical specs.
+ *
+ * @param {string} proposalId - UUID of the source proposal
+ * @param {string|null} customToken - Optional override token
+ */
+export async function duplicateProposal(proposalId, customToken = null) {
+  const res = await fetch(`${API_BASE_URL}/api/dept/proposals/${encodeURIComponent(proposalId)}/duplicate`, {
+    method: "POST",
+    headers: getHeaders(false, customToken)
+  });
+  return handleResponse(res, "Failed to duplicate proposal");
+}
+
+/**
  * Updates parameters of an existing proposal in Draft or Returned state.
- * Editing is blocked if the item is currently undergoing S3 Glacier restoration.
+ * Optionally uploads an updated canvas file if supplied.
  *
  * @param {string} proposalId - UUID of the proposal
  * @param {Object} payload - Validated ProposalCreatePayload schema
+ * @param {File|string|null} fileOrToken - Optional File object or override token string
  * @param {string|null} customToken - Optional override token
  */
-export async function updateProposal(proposalId, payload, customToken = null) {
+export async function updateProposal(proposalId, payload, fileOrToken = null, customToken = null) {
+  let file = null;
+  let token = customToken;
+
+  if (fileOrToken instanceof File) {
+    file = fileOrToken;
+  } else if (typeof fileOrToken === "string") {
+    token = fileOrToken;
+  }
+
+  const cleanPayload = sanitizeProposalPayload(payload);
   const res = await fetch(`${API_BASE_URL}/api/dept/proposals/${encodeURIComponent(proposalId)}`, {
     method: "PUT",
-    headers: getHeaders(false, customToken),
-    body: JSON.stringify(payload)
+    headers: getHeaders(false, token),
+    body: JSON.stringify(cleanPayload)
   });
-  return handleResponse(res, "Failed to update proposal parameters");
+  const updatedProposal = await handleResponse(res, "Failed to update proposal parameters");
+
+  // If a file was attached alongside updates, upload it to link cleanly
+  if (file) {
+    const supplier = cleanPayload.supplier_name || "Supplier";
+    const expiry = cleanPayload.canvas_expiration_date || null;
+    await uploadCanvas(proposalId, supplier, file, expiry, token);
+  }
+
+  return updatedProposal;
 }
 
 /**
@@ -272,10 +567,10 @@ export async function deleteProposal(proposalId, customToken = null) {
 }
 
 /**
- * Submits a draft proposal to the MIS Admin review queue.
- * - Blocks submission if quotation canvas is expired or missing (Rule 7).
- * - Allows submission without canvas if created_by_students is True (Rule 1).
- * - Validates departmental sub-ceiling budget headroom before state transition.
+ * Submits a draft proposal to the review queue.
+ * - Bypasses canvas checks for pre-approved catalog items and in-house turnovers.
+ * - Blocks custom proposals if quotation canvas is missing or expired.
+ * - Validates departmental dual-pool (CapEx vs MOOE) sub-ceiling headroom.
  *
  * @param {string} proposalId - UUID of the proposal
  * @param {string|null} customToken - Optional override token
@@ -289,8 +584,7 @@ export async function submitProposal(proposalId, customToken = null) {
 }
 
 /**
- * Triggers an AWS S3 head-object check to synchronize cold storage lifecycle
- * states and restoration progress metrics for a proposal.
+ * Verifies document availability and synchronizes storage properties for a proposal.
  *
  * @param {string} proposalId - UUID of the proposal
  * @param {string|null} customToken - Optional override token
@@ -300,102 +594,29 @@ export async function syncProposalMetadata(proposalId, customToken = null) {
     method: "POST",
     headers: getHeaders(false, customToken)
   });
-  return handleResponse(res, "Failed to sync proposal storage metadata");
+  return handleResponse(res, "Failed to synchronize proposal document status");
 }
 
 /**
- * Initiates an expedited or standard retrieval job for an archived canvas
- * document stored in AWS S3 Glacier.
+ * Retrieves access to an archived supporting document from the official document archive.
+ * Transparent and immediate without requiring manual vendor restoration steps.
  *
  * @param {string} proposalId - UUID of the proposal
  * @param {string|null} customToken - Optional override token
  */
-export async function requestProposalRestore(proposalId, customToken = null) {
+export async function retrieveArchivedDocument(proposalId, customToken = null) {
   const res = await fetch(`${API_BASE_URL}/api/dept/proposals/${encodeURIComponent(proposalId)}/restore`, {
     method: "POST",
     headers: getHeaders(false, customToken)
   });
-  return handleResponse(res, "Failed to initiate S3 Glacier cold storage restoration");
+  return handleResponse(res, "Failed to retrieve archived document");
 }
+
+// Backward-compatible alias for existing callers
+export const requestProposalRestore = retrieveArchivedDocument;
 
 // ==============================================================================
-// 5. SOFTWARE SUBSCRIPTIONS COMPATIBILITY ALIASES (Part IV.A MOOE)
-// ==============================================================================
-
-/**
- * Compatibility alias querying recurring MOOE software subscriptions.
- * Seamlessly interfaces with the unified issp_core ledger.
- *
- * @param {string} isspPeriod - Optional planning cycle filter
- * @param {string|null} customToken - Optional override token
- */
-export async function getSubscriptions(isspPeriod = "", customToken = null) {
-  const params = isspPeriod ? `?issp_period=${encodeURIComponent(isspPeriod)}` : "";
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions${params}`, {
-    headers: getHeaders(false, customToken)
-  });
-  return handleResponse(res, "Failed to load software subscriptions");
-}
-
-export async function getSubscriptionDetail(subscriptionId, customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-    headers: getHeaders(false, customToken)
-  });
-  return handleResponse(res, "Failed to load subscription details");
-}
-
-export async function createSubscription(payload, customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions`, {
-    method: "POST",
-    headers: getHeaders(false, customToken),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to create subscription proposal");
-}
-
-export async function updateSubscription(subscriptionId, payload, customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-    method: "PUT",
-    headers: getHeaders(false, customToken),
-    body: JSON.stringify(payload)
-  });
-  return handleResponse(res, "Failed to update subscription proposal");
-}
-
-export async function deleteSubscription(subscriptionId, customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-    method: "DELETE",
-    headers: getHeaders(false, customToken)
-  });
-  return handleResponse(res, "Failed to delete subscription proposal");
-}
-
-export async function submitSubscription(subscriptionId, customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions/${encodeURIComponent(subscriptionId)}/submit`, {
-    method: "PUT",
-    headers: getHeaders(false, customToken)
-  });
-  return handleResponse(res, "Failed to submit subscription proposal");
-}
-
-export async function syncSubscriptionMetadata(subscriptionId, customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions/${encodeURIComponent(subscriptionId)}/sync-metadata`, {
-    method: "POST",
-    headers: getHeaders(false, customToken)
-  });
-  return handleResponse(res, "Failed to sync subscription storage metadata");
-}
-
-export async function requestSubscriptionRestore(subscriptionId, customToken = null) {
-  const res = await fetch(`${API_BASE_URL}/api/dept/subscriptions/${encodeURIComponent(subscriptionId)}/restore`, {
-    method: "POST",
-    headers: getHeaders(false, customToken)
-  });
-  return handleResponse(res, "Failed to initiate subscription restoration");
-}
-
-// ==============================================================================
-// 6. QUOTATION CANVAS & UNCLASSIFIED PROPERTY INSPECTION UPLOADS (Rule 7)
+// 5. QUOTATION CANVAS & UNCLASSIFIED PROPERTY INSPECTION UPLOADS
 // ==============================================================================
 
 /**
@@ -428,7 +649,7 @@ export async function uploadCanvas(proposalId, supplierName, file, canvasExpirat
 
 /**
  * Uploads an Inventory and Inspection Report of Unserviceable Property (IIRUP) PDF.
- * Links the formal COA condemnation proof to an inventory asset.
+ * Links the formal COA condemnation proof to an inventory asset in Annex 1.
  *
  * @param {string} inventoryId - UUID of the condemned asset
  * @param {File} file - IIRUP PDF document binary
@@ -448,12 +669,12 @@ export async function uploadUnserviceableReport(inventoryId, file, customToken =
 }
 
 // ==============================================================================
-// 7. ANNEX 1: DEPARTMENT INVENTORY (Read-Only Scoped View — Rule 9 & DICT Categories)
+// 6. ANNEX 1: DEPARTMENT INVENTORY (Read-Only Scoped View)
 // ==============================================================================
 
 /**
  * Retrieves the department's baseline ICT equipment and software inventory.
- * Strictly scoped so department planners view ONLY their own assets (Rule 9).
+ * Strictly scoped so department planners view ONLY their own assets.
  * Supports optional filtering by DICT standard category (dict_category), search query,
  * obsolescence/EOL flags, software classification, and condition status.
  *
@@ -476,6 +697,8 @@ export async function getInventory(paramsOrSkip = 0, limit = 100, customToken = 
       isSoftware = null,
       is_end_of_life = null,
       isEndOfLife = null,
+      is_backup = null,
+      isBackup = null,
       status_filter = "",
       statusFilter = "",
       token: optToken = null
@@ -498,6 +721,11 @@ export async function getInventory(paramsOrSkip = 0, limit = 100, customToken = 
     const resolvedEol = is_end_of_life !== null ? is_end_of_life : isEndOfLife;
     if (resolvedEol !== null && resolvedEol !== undefined) {
       queryParams.append("is_end_of_life", String(resolvedEol));
+    }
+
+    const resolvedBackup = is_backup !== null ? is_backup : isBackup;
+    if (resolvedBackup !== null && resolvedBackup !== undefined) {
+      queryParams.append("is_backup", String(resolvedBackup));
     }
 
     const resolvedStatus = status_filter || statusFilter;
@@ -544,7 +772,7 @@ export async function logExistingAsset(payload, customToken = null) {
 }
 
 // ==============================================================================
-// 8. SECTION 8.0: NEEDS ASSESSMENT & OPERATIONAL JUSTIFICATIONS
+// 7. SECTION 8.0: NEEDS ASSESSMENT & OPERATIONAL JUSTIFICATIONS
 // ==============================================================================
 
 /**
@@ -573,7 +801,7 @@ export async function getNeedsAssessments(paramsOrToken = {}, customToken = null
 }
 
 /**
- * Creates a formal Needs Assessment justifying new infrastructure outlays.
+ * Creates a formal Needs Assessment justifying new ICT infrastructure outlays.
  *
  * @param {Object} payload - NeedsAssessmentCreate schema
  * @param {string|null} customToken - Optional override token
@@ -591,7 +819,7 @@ export async function createNeedsAssessment(payload, customToken = null) {
  * Updates an existing Section 8.0 Department Needs Assessment.
  *
  * @param {string} assessmentId - UUID of the needs assessment record
- * @param {Object} payload - NeedsAssessmentCreate schema (title, mfo_alignment, current_problem, proposed_solution, expected_impacts, other_impact)
+ * @param {Object} payload - NeedsAssessmentCreate schema
  * @param {string|null} customToken - Optional override token
  */
 export async function updateNeedsAssessment(assessmentId, payload, customToken = null) {
@@ -619,7 +847,7 @@ export async function deleteNeedsAssessment(assessmentId, customToken = null) {
 }
 
 // ==============================================================================
-// 9. REMARKS, FEEDBACK & COLLABORATIVE PINNED ACTION ITEMS
+// 8. REMARKS, FEEDBACK & COLLABORATIVE ACTION ITEMS
 // ==============================================================================
 
 /**
@@ -668,7 +896,7 @@ export async function resolveComment(proposalId, commentId, customToken = null) 
 }
 
 // ==============================================================================
-// 10. NOTIFICATIONS INBOX & ACTION ITEMS COUNTER
+// 9. NOTIFICATIONS INBOX & ACTION ITEMS COUNTER
 // ==============================================================================
 
 /**
@@ -695,7 +923,7 @@ export async function getNotifications(category = null, days = null, customToken
 
 /**
  * Queries counts of unresolved action items and returned proposals.
- * Used by NotificationContext to render live red badges in the sidebar.
+ * Used by NotificationContext to render live badges in the navigation menu.
  *
  * @param {string|null} customToken - Optional override token
  */
@@ -705,3 +933,156 @@ export async function getActionItemsSummary(customToken = null) {
   });
   return handleResponse(res, "Failed to load action items summary count");
 }
+
+// ==============================================================================
+// 10. PROPOSED INFORMATION SYSTEMS & ENHANCEMENTS (Part III.D — Enterprise Systems)
+// ==============================================================================
+
+/**
+ * Retrieves information systems proposed by or assigned to this department.
+ * Supports status filtering.
+ *
+ * @param {string|Object} statusOrParams - Optional status filter ("Draft", "Submitted", "Approved", "Returned") or filter object
+ * @param {string|null} customToken - Optional override token
+ */
+export async function getDeptSystems(statusOrParams = "", customToken = null) {
+  const params = new URLSearchParams();
+  let token = customToken;
+
+  if (typeof statusOrParams === "object" && statusOrParams !== null) {
+    const {
+      submission_status = "",
+      submissionStatus = "",
+      token: optToken = null
+    } = statusOrParams;
+    const st = submission_status || submissionStatus;
+    if (st && st !== "All" && st !== "all") {
+      params.append("submission_status", st);
+    }
+    if (optToken) token = optToken;
+  } else if (typeof statusOrParams === "string" && statusOrParams && statusOrParams !== "All" && statusOrParams !== "all") {
+    params.append("submission_status", statusOrParams);
+  }
+
+  const qs = params.toString();
+  const url = `${API_BASE_URL}/api/dept/systems${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, {
+    headers: getHeaders(false, token)
+  });
+  return handleResponse(res, "Failed to load proposed information systems");
+}
+
+/**
+ * Retrieves detailed specifications of a specific proposed information system.
+ *
+ * @param {string} systemId - UUID of the proposed system
+ * @param {string|null} customToken - Optional override token
+ */
+export async function getDeptSystemDetail(systemId, customToken = null) {
+  const res = await fetch(`${API_BASE_URL}/api/dept/systems/${encodeURIComponent(systemId)}`, {
+    headers: getHeaders(false, customToken)
+  });
+  return handleResponse(res, "Failed to load proposed system details");
+}
+
+/**
+ * Drafts a new Information System proposal or platform enhancement (Part III.D).
+ * Automatically sanitizes inputs, binds project_id, enforces non-negative proposed costs,
+ * and links to Section 8.0 Needs Assessments without requiring technical architecture jargon.
+ *
+ * @param {Object} payload - InformationSystemCreate schema (including project_id)
+ * @param {string|null} customToken - Optional override token
+ */
+export async function createProposedSystem(payload, customToken = null) {
+  const cleanPayload = sanitizeSystemPayload(payload);
+  const res = await fetch(`${API_BASE_URL}/api/dept/systems`, {
+    method: "POST",
+    headers: getHeaders(false, customToken),
+    body: JSON.stringify(cleanPayload)
+  });
+  return handleResponse(res, "Failed to draft proposed information system");
+}
+
+/**
+ * Updates an existing Information System proposal in Draft or Returned status.
+ *
+ * @param {string} systemId - UUID of the proposed system
+ * @param {Object} payload - InformationSystemUpdate schema (including project_id)
+ * @param {string|null} customToken - Optional override token
+ */
+export async function updateProposedSystem(systemId, payload, customToken = null) {
+  const cleanPayload = sanitizeSystemPayload(payload);
+  const res = await fetch(`${API_BASE_URL}/api/dept/systems/${encodeURIComponent(systemId)}`, {
+    method: "PUT",
+    headers: getHeaders(false, customToken),
+    body: JSON.stringify(cleanPayload)
+  });
+  return handleResponse(res, "Failed to update proposed information system");
+}
+
+/**
+ * Permanently deletes a draft or returned Information System proposal.
+ *
+ * @param {string} systemId - UUID of the proposed system
+ * @param {string|null} customToken - Optional override token
+ */
+export async function deleteProposedSystem(systemId, customToken = null) {
+  const res = await fetch(`${API_BASE_URL}/api/dept/systems/${encodeURIComponent(systemId)}`, {
+    method: "DELETE",
+    headers: getHeaders(false, customToken)
+  });
+  return handleResponse(res, "Failed to delete proposed information system");
+}
+
+/**
+ * Submits an Information System proposal draft to the MIS Administrator review queue.
+ *
+ * @param {string} systemId - UUID of the proposed system
+ * @param {string|null} customToken - Optional override token
+ */
+export async function submitProposedSystem(systemId, customToken = null) {
+  const res = await fetch(`${API_BASE_URL}/api/dept/systems/${encodeURIComponent(systemId)}/submit`, {
+    method: "PUT",
+    headers: getHeaders(false, customToken)
+  });
+  return handleResponse(res, "Failed to submit proposed system to review queue");
+}
+
+export default {
+  API_BASE_URL,
+  getBudgetSummary,
+  getOutcomes,
+  getProjects,
+  getDeptCatalog,
+  getExpiringCanvasAlerts,
+  getProposals,
+  getProposalDetail,
+  createDraftProposal,
+  createProposalWithCanvas,
+  duplicateProposal,
+  updateProposal,
+  deleteProposal,
+  submitProposal,
+  syncProposalMetadata,
+  retrieveArchivedDocument,
+  requestProposalRestore,
+  uploadCanvas,
+  uploadUnserviceableReport,
+  getInventory,
+  logExistingAsset,
+  getNeedsAssessments,
+  createNeedsAssessment,
+  updateNeedsAssessment,
+  deleteNeedsAssessment,
+  getComments,
+  postComment,
+  resolveComment,
+  getNotifications,
+  getActionItemsSummary,
+  getDeptSystems,
+  getDeptSystemDetail,
+  createProposedSystem,
+  updateProposedSystem,
+  deleteProposedSystem,
+  submitProposedSystem
+};

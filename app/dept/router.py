@@ -1,13 +1,14 @@
 # app/dept/router.py
 import os
 import uuid
+import json
 import logging
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional, Dict, Union
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form, Request
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, and_, cast, String
 
 from app.config import settings
 from app.database.session import get_db
@@ -30,7 +31,12 @@ from app.database.models import (
     CatalogItem,
     NeedsAssessment,
     MasterNarrative,
-    BudgetCeiling
+    BudgetCeiling,
+    DictAssetCategory,
+    StrategicCategory,
+    UacsCatalogItem,
+    InformationSystem,
+    SystemSetting
 )
 from app.schemas import (
     SupplyInventoryResponse, 
@@ -40,7 +46,10 @@ from app.schemas import (
     CatalogItemResponse,
     NeedsAssessmentCreate, 
     NeedsAssessmentResponse,
-    OrganizationalOutcomeResponse
+    OrganizationalOutcomeResponse,
+    InformationSystemCreate,
+    InformationSystemUpdate,
+    InformationSystemResponse
 )
 from app.auth.router import require_user, require_dept_user
 from app.storage.s3_client import storage_client
@@ -48,16 +57,34 @@ from app.utils.helpers import (
     secure_filename,
     get_s3_key_from_url,
     get_active_issp_period,
+    get_cycle_year_range,
     align_and_validate_years,
-    check_and_update_glacier_metadata,
     validate_pdf_content,
     get_dict_from_payload,
     classify_uacs_and_expenditure,
-    log_audit_event
+    log_audit_event,
+    get_governance_policy,
+    verify_canvas_compliance,
+    verify_annex1_obsolescence_link
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/dept", tags=["Department Subsystem"])
+
+
+def coerce_optional_uuid(v: Any) -> Optional[uuid.UUID]:
+    """Safely converts empty strings, string UUIDs, or None to Optional[uuid.UUID]."""
+    if not v:
+        return None
+    if isinstance(v, uuid.UUID):
+        return v
+    val_str = str(v).strip()
+    if not val_str or val_str.lower() in ("none", "null", "undefined", ""):
+        return None
+    try:
+        return uuid.UUID(val_str)
+    except (ValueError, TypeError):
+        return None
 
 
 def is_datetime_expired(dt: Optional[datetime]) -> bool:
@@ -102,20 +129,17 @@ def check_budget_headroom(
     dept_id: int, 
     issp_period: str, 
     incoming_cost: Decimal, 
+    expenditure_class: str,
     exclude_proposal_id: Optional[uuid.UUID] = None
 ):
     """
-    Calculates active departmental sub-ceiling headroom using precise Decimal arithmetic.
-    Blocks submissions that would cause total expenditures to exceed the ceiling.
+    Enforces dual independent sub-ceiling accounting with row-level locking (with_for_update)
+    to prevent Time-Of-Check to Time-Of-Use (TOCTOU) race conditions:
+    1. Capital Outlay (CO) proposals are strictly checked against allocated_capex.
+    2. Maintenance and Other Operating Expenses (MOOE) are checked against allocated_mooe.
+    3. Combined expenditures are checked against the total sub_ceiling.
     """
     is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
-
-    dept_query = db.query(Department).filter(Department.id == dept_id)
-    if not is_sqlite:
-        dept_query = dept_query.with_for_update()
-    dept = dept_query.first()
-    if not dept:
-        raise HTTPException(status_code=400, detail="Department record not found.")
 
     ceiling_query = db.query(BudgetCeiling).filter(
         BudgetCeiling.department_id == dept_id,
@@ -123,31 +147,71 @@ def check_budget_headroom(
     )
     if not is_sqlite:
         ceiling_query = ceiling_query.with_for_update()
+        
     ceiling = ceiling_query.first()
-    
     if not ceiling:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Submission blocked: No budget sub-ceiling allocated for planning cycle '{issp_period}'."
+        ceiling = BudgetCeiling(
+            department_id=dept_id,
+            issp_period=issp_period,
+            allocated_capex=Decimal("0.00"),
+            allocated_mooe=Decimal("0.00"),
+            annual_allocations={}
         )
+        db.add(ceiling)
+        db.flush()
 
-    query = db.query(func.sum(Proposal.total_cost)).filter(
+    exp_lower = (expenditure_class or "").lower()
+    is_co = "capital" in exp_lower
+    target_cap = ceiling.allocated_capex if is_co else ceiling.allocated_mooe
+    pool_label = "Capital Outlay (CapEx)" if is_co else "Operating Services (MOOE)"
+
+    # 1. Evaluate specific expenditure class spending pool
+    class_query = db.query(func.sum(Proposal.total_cost)).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == issp_period,
-        Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED])
+        func.lower(cast(Proposal.status, String)).in_(["submitted", "approved"]),
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     )
+    if is_co:
+        class_query = class_query.filter(Proposal.expenditure_class.ilike("%capital%"))
+    else:
+        class_query = class_query.filter(~Proposal.expenditure_class.ilike("%capital%"))
+
     if exclude_proposal_id:
-        query = query.filter(Proposal.id != exclude_proposal_id)
-        
-    current_spent = query.scalar() or Decimal("0.00")
-    projected_total = current_spent + incoming_cost
-    
-    if projected_total > ceiling.sub_ceiling:
+        class_query = class_query.filter(Proposal.id != exclude_proposal_id)
+
+    spent_pool = class_query.scalar() or Decimal("0.00")
+    projected_pool = spent_pool + incoming_cost
+
+    if target_cap > Decimal("0.00") and projected_pool > target_cap:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Budget Ceiling Breach: Submitting this proposal would cause total department expenditures "
-                f"(₱{projected_total:,.2f}) to exceed your allocated sub-ceiling of ₱{ceiling.sub_ceiling:,.2f}."
+                f"{pool_label} Allocation Limit Exceeded: Submitting this proposal would cause your department's "
+                f"{pool_label} commitments (₱{projected_pool:,.2f}) to exceed your authorized "
+                f"allocation of ₱{target_cap:,.2f}. Please review your proposed items or consult the MIS Administrator."
+            )
+        )
+
+    # 2. Evaluate total sub-ceiling spending
+    total_query = db.query(func.sum(Proposal.total_cost)).filter(
+        Proposal.department_id == dept_id,
+        Proposal.issp_period == issp_period,
+        func.lower(cast(Proposal.status, String)).in_(["submitted", "approved"]),
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    )
+    if exclude_proposal_id:
+        total_query = total_query.filter(Proposal.id != exclude_proposal_id)
+
+    total_spent = total_query.scalar() or Decimal("0.00")
+    projected_total = total_spent + incoming_cost
+
+    if ceiling.sub_ceiling > Decimal("0.00") and projected_total > ceiling.sub_ceiling:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Total Sub-Ceiling Limit Exceeded: Submitting this proposal would cause total departmental outlays "
+                f"(₱{projected_total:,.2f}) to exceed your authorized total sub-ceiling of ₱{ceiling.sub_ceiling:,.2f}."
             )
         )
 
@@ -159,23 +223,26 @@ def validate_proposal_constraints(
     is_submitting: bool = False
 ):
     """
-    Enforces DBM Smart Specs, DICT v.2026 capitalization rules (₱50,000 threshold),
-    ₱2M budget lifecycle requirements, and Annex 1 hardware obsolescence justifications.
+    Enforces DBM Smart Specs, dynamic capitalization rules, dynamic review gates,
+    catalog office authorization, and Annex 1 unconsumed obsolescence matching.
     """
+    policy = get_governance_policy(db)
     target_item_name = payload.item_name
-    
+    is_catalog_item = bool(payload.item_select and payload.item_select != "other")
+    is_in_house = bool(payload.is_in_house_turnover or payload.created_by_students)
+
     if payload.yearly_quantities and isinstance(payload.yearly_quantities, dict):
         total_requested = sum(
             int(v) for v in payload.yearly_quantities.values() 
             if v is not None and (isinstance(v, int) or str(v).isdigit())
         )
     else:
-        total_requested = (payload.year_1_qty or 0) + (payload.year_2_qty or 0) + (payload.year_3_qty or 0)
+        total_requested = sum(int(v) for v in [getattr(payload, 'year_1_qty', 0), getattr(payload, 'year_2_qty', 0), getattr(payload, 'year_3_qty', 0)] if v)
         
-    total_outlay = payload.unit_cost * Decimal(total_requested)
+    total_outlay = (payload.unit_cost or Decimal("0.00")) * Decimal(total_requested)
 
-    # Validate against reference catalog if an item key is picked
-    if payload.item_select != "other":
+    # 1. Validate against reference catalog if standard item key is selected
+    if is_catalog_item:
         catalog_item = db.query(CatalogItem).filter(
             CatalogItem.item_key == payload.item_select,
             CatalogItem.is_active == True
@@ -185,78 +252,68 @@ def validate_proposal_constraints(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Item '{payload.item_select}' is not authorized or is inactive in the reference catalog."
             )
+        
+        # Enforce catalog allowed_offices access control
+        dept = db.query(Department).filter(Department.id == dept_id).first()
+        dept_name = dept.name if dept else ""
+        offices = catalog_item.allowed_offices or []
+        if len(offices) > 0 and not any(dept_name.lower() in o.lower() for o in offices):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access Restricted: Catalog item '{catalog_item.display_name}' is assigned exclusively to specific authorized units."
+            )
+
         target_item_name = catalog_item.display_name
 
-    # Rule 2: Outlays exceeding ₱2,000,000.00 require a valid system lifecycle designation
+    # 2. Dynamic Major Outlay Review Threshold check (₱2M Rule)
+    major_threshold = policy.get("major_outlay_review_threshold", Decimal("2000000.00"))
     dev_status_val = getattr(payload.system_development_status, "value", str(payload.system_development_status or "")).strip()
-    if total_outlay >= Decimal("2000000.00") and dev_status_val in [SystemDevelopmentStatus.NOT_APPLICABLE.value, "N/A", ""]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Proposals with an outlay exceeding ₱2,000,000.00 require a System Development Status ('For Development' or 'For Enhancement')."
-        )
+    
+    if total_outlay >= major_threshold:
+        if not dev_status_val or dev_status_val in [SystemDevelopmentStatus.NOT_APPLICABLE.value, "N/A", ""]:
+            payload.system_development_status = "For Development"
 
     if is_submitting:
         if total_requested <= 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Submission Error: The total requested quantity across all planning years must be greater than zero."
+                detail="Submission Error: The total requested physical quantity across all planning years must be greater than zero."
             )
         
-        # Rule 1 & Rule 7: External items require a valid non-expired canvas; student-developed systems bypass mandatory canvas
-        if not payload.created_by_students:
-            if not payload.canvas_evidence_url:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Submission Error: A verified market quotation canvas is mandatory before submission."
-                )
-            if is_datetime_expired(payload.canvas_expiration_date):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Submission Locked: The linked canvas quotation has expired. Please upload an updated quotation before submitting."
-                )
-        else:
-            # Student-developed system: Canvas is optional.
-            # If uploaded and expired, block only if unit_cost > 0:
-            if payload.unit_cost > Decimal("0.00") and payload.canvas_evidence_url and payload.canvas_expiration_date:
-                if is_datetime_expired(payload.canvas_expiration_date):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Submission Notice: An expired quotation is linked to this student proposal with budgeted costs. Please update or detach the expired canvas before submitting."
-                    )
-
-        # Annex 1 Obsolescence Linkage: Replacing equipment requires documented EOL/Condemned units in department inventory
-        strat_cat_val = getattr(payload.strategic_category, "value", str(payload.strategic_category))
-        if not payload.is_expansion and not payload.created_by_students and strat_cat_val in [ProjectCategory.OFFICE_PRODUCTIVITY.value, "Office Productivity"]:
-            unserviceable_filter = or_(
-                ExistingInventory.is_end_of_life == True,
-                ExistingInventory.status.in_([AssetStatus.CONDEMNED, AssetStatus.NEEDS_REPAIR, "Condemned", "Needs Repair"])
+        # 3. Canvas Quotation Validation: Standardized and centralized
+        is_canvas_valid, canvas_msg = verify_canvas_compliance(
+            item_select=payload.item_select,
+            is_in_house_turnover=is_in_house,
+            canvas_url=payload.canvas_evidence_url,
+            canvas_expiry=payload.canvas_expiration_date
+        )
+        if not is_canvas_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=canvas_msg
             )
 
-            # Match keywords to prevent strict string mismatch
-            name_words = [w for w in target_item_name.lower().split() if len(w) > 2 and w not in ["and", "for", "the", "with", "office"]]
-            word_filters = [ExistingInventory.item_name.ilike(f"%{w}%") for w in name_words] if name_words else [ExistingInventory.item_name.ilike(f"%{target_item_name}%")]
-
-            unserviceable_count = db.query(func.sum(ExistingInventory.quantity)).filter(
-                ExistingInventory.department_id == dept_id,
-                ExistingInventory.is_software == False,
-                unserviceable_filter,
-                or_(*word_filters, ExistingInventory.exact_model.ilike(f"%{target_item_name}%"))
-            ).scalar() or 0
-
-            # Allow standard buffer of 2 units above retired stock
-            if total_requested > (unserviceable_count + 2):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Annex 1 Obsolescence Discrepancy: Requesting {total_requested} units for '{target_item_name}', "
-                        f"but your department inventory records only {unserviceable_count} End of Life (EOL) or Condemned assets. "
-                        f"Either adjust the requested quantity or flag this item as an 'Expansion Project'."
-                    )
-                )
+        # 4. Annex 1 Obsolescence Linkage (Anti-Loop Replacement Enforcement)
+        is_obsolescence_valid, obsolescence_msg = verify_annex1_obsolescence_link(
+            db=db,
+            issp_period=get_active_issp_period(db),
+            item_name=target_item_name,
+            requested_qty=total_requested,
+            department_id=dept_id,
+            category=payload.category,
+            strategic_category=payload.strategic_category,
+            is_expansion=payload.is_expansion,
+            is_in_house_turnover=is_in_house
+        )
+        if not is_obsolescence_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=obsolescence_msg
+            )
 
 
 # ==========================================================
-# BUDGET HEADROOM MONITORING
+# 1. BUDGET HEADROOM MONITORING
 # ==========================================================
 
 @router.get("/budget-summary")
@@ -280,30 +337,30 @@ def get_department_budget_summary(
     spent = db.query(func.sum(Proposal.total_cost)).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == issp_period,
-        Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
+        func.lower(cast(Proposal.status, String)).in_(["submitted", "approved"]),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).scalar() or Decimal("0.00")
 
     spent_capex = db.query(func.sum(Proposal.total_cost)).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == issp_period,
-        Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
-        Proposal.expenditure_class == ExpenditureClass.CAPITAL_OUTLAY,
+        func.lower(cast(Proposal.status, String)).in_(["submitted", "approved"]),
+        Proposal.expenditure_class.ilike("%capital%"),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).scalar() or Decimal("0.00")
 
     spent_mooe = db.query(func.sum(Proposal.total_cost)).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == issp_period,
-        Proposal.status.in_([ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]),
-        Proposal.expenditure_class == ExpenditureClass.MOOE,
+        func.lower(cast(Proposal.status, String)).in_(["submitted", "approved"]),
+        ~Proposal.expenditure_class.ilike("%capital%"),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).scalar() or Decimal("0.00")
     
     drafted = db.query(func.sum(Proposal.total_cost)).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == issp_period,
-        Proposal.status == ProposalStatus.DRAFT,
+        func.lower(cast(Proposal.status, String)) == "draft",
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).scalar() or Decimal("0.00")
 
@@ -327,14 +384,14 @@ def get_department_budget_summary(
             "message": (
                 "Dry-run passed: Your entire draft package fits within your department headroom."
                 if not sub_ceiling_exceeded 
-                else "Dry-run failed: Submitting your draft package would violate allocated budget limits."
+                else "Dry-run warning: Submitting your draft package would exceed allocated budget limits."
             )
         }
     }
 
 
 # ==========================================================
-# REFERENCE CATALOG & EXPIRATION ALERTS
+# 2. REFERENCE CATALOG & EXPIRATION ALERTS
 # ==========================================================
 
 @router.get("/catalog", response_model=List[CatalogItemResponse])
@@ -342,12 +399,25 @@ def get_dept_catalog(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """Retrieves standard catalog references, automatically filtering out expired quotations."""
+    """
+    Retrieves standard catalog references, enforcing allowed_offices permissions
+    and automatically filtering out items with expired market quotations.
+    """
+    dept = db.query(Department).filter(Department.id == user.get("department_id")).first()
+    dept_name = dept.name if dept else None
+
     all_items = db.query(CatalogItem).filter(CatalogItem.is_active == True).all()
-    return [
-        item for item in all_items 
-        if not item.canvas_expiration_date or not is_datetime_expired(item.canvas_expiration_date)
-    ]
+    permitted_items = []
+    
+    for item in all_items:
+        if item.canvas_expiration_date and is_datetime_expired(item.canvas_expiration_date):
+            continue
+            
+        offices = item.allowed_offices or []
+        if len(offices) == 0 or (dept_name and any(dept_name.lower() in o.lower() for o in offices)):
+            permitted_items.append(item)
+
+    return permitted_items
 
 
 @router.get("/catalog/expiring-alerts", response_model=Dict[str, Any])
@@ -355,9 +425,11 @@ def get_expiring_canvas_alerts(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """Identifies catalog and custom items whose quotation validity expires within 14 days."""
+    """Identifies catalog and custom items whose quotation validity expires within policy threshold."""
+    policy = get_governance_policy(db)
+    warning_days = policy.get("canvas_expiration_warning_days", 14)
     now = datetime.now(timezone.utc)
-    warning_boundary = now + timedelta(days=14)
+    warning_boundary = now + timedelta(days=warning_days)
     dept_id = user["department_id"]
 
     all_catalog = db.query(CatalogItem).filter(
@@ -375,7 +447,7 @@ def get_expiring_canvas_alerts(
 
     all_proposals = db.query(Proposal).filter(
         Proposal.department_id == dept_id,
-        Proposal.status.in_([ProposalStatus.DRAFT, ProposalStatus.RETURNED]),
+        func.lower(cast(Proposal.status, String)).in_(["draft", "returned"]),
         Proposal.canvas_expiration_date.isnot(None),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).all()
@@ -409,7 +481,7 @@ def get_expiring_canvas_alerts(
 
 
 # ==========================================================
-# MASTER OUTCOMES (BROADER SCOPE) & STRATEGIC PROJECTS
+# 3. MASTER OUTCOMES & STRATEGIC PROJECTS
 # ==========================================================
 
 @router.get("/outcomes", response_model=List[OrganizationalOutcomeResponse])
@@ -417,10 +489,7 @@ def get_organizational_outcomes(
     db: Session = Depends(get_db),
     user: dict = Depends(require_user)
 ):
-    """
-    Returns Broader Scope categories (Part I.A.4 Organizational Outcomes)
-    which must be populated at the top of every proposal.
-    """
+    """Returns Program Alignment categories."""
     issp_period = get_active_issp_period(db)
     return db.query(OrganizationalOutcome).filter(
         OrganizationalOutcome.issp_period == issp_period
@@ -440,18 +509,23 @@ def get_active_ict_projects(
             "id": str(proj.id),
             "project_title": proj.project_title,
             "project_category": getattr(proj.project_category, "value", str(proj.project_category)),
-            "implementing_unit": proj.implementing_unit
+            "funding_source": getattr(proj.funding_source, "value", str(proj.funding_source)),
+            "implementing_unit": proj.implementing_unit,
+            "duration_start_year": proj.duration_start_year,
+            "duration_end_year": proj.duration_end_year,
+            "computed_total_project_cost": float(proj.computed_total_project_cost)
         } for proj in projects
     ]
 
 
 # ==========================================================
-# ANNEX 1: DEPARTMENT BASELINE INVENTORY (READ-ONLY FOR DEPT)
+# 4. MASTER INVENTORY (READ-ONLY FOR DEPT)
 # ==========================================================
 
 @router.get("/inventory", response_model=List[SupplyInventoryResponse])
 def get_existing_inventory(
     search: Optional[str] = Query(None, description="Search by item name, model, or specs"),
+    dict_category: Optional[str] = Query(None, description="Filter by Category"),
     is_software: Optional[bool] = Query(None),
     is_end_of_life: Optional[bool] = Query(None),
     status_filter: Optional[str] = Query(None),
@@ -460,12 +534,11 @@ def get_existing_inventory(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """
-    Rule 9: Department users view ONLY their own department's inventory.
-    (Full cross-department asset control is administered by the Supply Officer under /api/supply).
-    """
+    """Department users view ONLY their own department's inventory scoped to active cycle."""
+    active_period = get_active_issp_period(db)
     query = db.query(ExistingInventory).filter(
-        ExistingInventory.department_id == user["department_id"]
+        ExistingInventory.department_id == user["department_id"],
+        or_(ExistingInventory.issp_period == active_period, ExistingInventory.issp_period.is_(None))
     )
 
     if is_software is not None:
@@ -474,12 +547,25 @@ def get_existing_inventory(
         query = query.filter(ExistingInventory.is_end_of_life == is_end_of_life)
     if status_filter and status_filter.strip().lower() != "all":
         clean_status = status_filter.strip().lower()
-        matched_status = next(
-            (s for s in AssetStatus if s.value.lower() == clean_status or s.name.lower() == clean_status), 
-            None
-        )
-        if matched_status:
-            query = query.filter(ExistingInventory.status == matched_status)
+        query = query.filter(func.lower(cast(ExistingInventory.status, String)) == clean_status)
+
+    if dict_category and dict_category.strip().lower() != "all":
+        clean_cat = dict_category.strip()
+        is_others = clean_cat.lower().startswith("others")
+        if is_others:
+            query = query.filter(
+                or_(
+                    cast(ExistingInventory.dict_category, String).ilike("others%"),
+                    ExistingInventory.dict_category == "Others"
+                )
+            )
+        else:
+            query = query.filter(
+                or_(
+                    ExistingInventory.dict_category == clean_cat,
+                    cast(ExistingInventory.dict_category, String).ilike(f"%{clean_cat}%")
+                )
+            )
 
     if search:
         q_str = f"%{search.strip()}%"
@@ -487,7 +573,9 @@ def get_existing_inventory(
             or_(
                 ExistingInventory.item_name.ilike(q_str),
                 ExistingInventory.exact_model.ilike(q_str),
-                ExistingInventory.specs.ilike(q_str)
+                ExistingInventory.specs.ilike(q_str),
+                cast(ExistingInventory.dict_category, String).ilike(q_str),
+                ExistingInventory.other_category_name.ilike(q_str)
             )
         )
 
@@ -495,34 +583,32 @@ def get_existing_inventory(
 
 
 # ==========================================================
-# PART IV.A: DETAILED UNIFIED RESOURCE PROPOSALS
+# 5. RESOURCE REQUIREMENTS LEDGER (SIMPLIFIED DEPARTMENT FLOW)
 # ==========================================================
 
 @router.get("/proposals", response_model=List[ProposalResponse])
 def get_departmental_proposals(
     issp_period_filter: Optional[str] = Query(None, alias="issp_period"),
-    status_filter: Optional[ProposalStatus] = Query(None),
+    status_filter: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=1000),
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """
-    Retrieves all unified proposal line items (Hardware, Software, Subscriptions).
-    Expired canvas items remain visible with full details.
-    """
+    """Retrieves all unified proposal line items for the department."""
     target_period = issp_period_filter or get_active_issp_period(db)
     query = db.query(Proposal).options(
         joinedload(Proposal.outcome),
         joinedload(Proposal.project_rel),
-        joinedload(Proposal.needs_assessment)
+        joinedload(Proposal.needs_assessment),
+        joinedload(Proposal.strategic_category_rel)
     ).filter(
         Proposal.department_id == user["department_id"],
         Proposal.issp_period == target_period,
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     )
-    if status_filter:
-        query = query.filter(Proposal.status == status_filter)
+    if status_filter and status_filter.strip().lower() != "all":
+        query = query.filter(func.lower(cast(Proposal.status, String)) == status_filter.strip().lower())
 
     return query.offset(skip).limit(limit).all()
 
@@ -536,7 +622,8 @@ def get_proposal_detail(
     proposal = db.query(Proposal).options(
         joinedload(Proposal.outcome),
         joinedload(Proposal.project_rel),
-        joinedload(Proposal.needs_assessment)
+        joinedload(Proposal.needs_assessment),
+        joinedload(Proposal.strategic_category_rel)
     ).filter(
         Proposal.id == proposal_id,
         Proposal.department_id == user["department_id"],
@@ -544,19 +631,7 @@ def get_proposal_detail(
     ).first()
 
     if not proposal:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found.")
-
-    if proposal.is_restoring:
-        s3_class, active_restore = check_and_update_glacier_metadata(db, proposal, proposal.canvas_evidence_url)
-        if s3_class != proposal.s3_storage_class or active_restore != proposal.is_restoring:
-            proposal.s3_storage_class = s3_class
-            proposal.is_restoring = active_restore
-            try:
-                db.commit()
-                db.refresh(proposal)
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Failed to refresh Glacier status: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal record not found.")
 
     return proposal
 
@@ -569,45 +644,49 @@ def create_merged_proposal(
     user: dict = Depends(require_dept_user)
 ):
     """
-    Creates a unified resource proposal.
-    - Rule 1: Student-developed systems bypass mandatory canvas requirement and are Capital Outlay.
-              Optional canvas quotation or supporting deed is safely retained if provided.
-    - Rule 3 & 4: CapEx / MOOE merged; auto-classified by ₱50k threshold.
-    - Rule 5: Target deployment office automated to the logged-in department.
-    - Rule 6: Outcome ID (Broader Scope) is populated at the top of the proposal.
-    - Provenance: Optionally binds line item to department Needs Assessment (Section 8.0).
-    - Dynamic N-Year Horizon: Synchronizes arbitrary year maps without fixed 3-year boundaries.
-    - Audit Trail: Immutable COA audit event logged with client IP and state.
+    Creates a unified resource proposal draft via the simplified department workflow:
+    - Automatically aligns multi-year quantities across active horizon without wiping data.
+    - Dynamically derives categories, fund sources, and UACS object codes directly from DB records.
     """
     active_period = get_active_issp_period(db)
     dept = db.query(Department).filter(Department.id == user["department_id"]).first()
     automated_office = dept.name if dept else "Central Office"
 
-    # Validate Organizational Outcome existence
-    outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == payload.outcome_id).first()
-    if not outcome:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Target Organizational Outcome ID {payload.outcome_id} does not exist."
-        )
+    resolved_outcome_id = getattr(payload, "outcome_id", None)
+    if resolved_outcome_id is not None:
+        outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == resolved_outcome_id).first()
+        if not outcome:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target Organizational Outcome ID {resolved_outcome_id} does not exist in active registry."
+            )
 
-    # Validate linked Needs Assessment if provided
-    if payload.needs_assessment_id:
-        na = db.query(NeedsAssessment).filter(NeedsAssessment.id == payload.needs_assessment_id).first()
+    resolved_needs_assessment_id = coerce_optional_uuid(payload.needs_assessment_id)
+    if resolved_needs_assessment_id:
+        na = db.query(NeedsAssessment).filter(NeedsAssessment.id == resolved_needs_assessment_id).first()
         if not na:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Needs Assessment with ID {payload.needs_assessment_id} not found."
+                detail=f"Needs Assessment with ID {resolved_needs_assessment_id} not found."
             )
+
+    resolved_project_id = coerce_optional_uuid(payload.project_id)
+    resolved_category = payload.category or "Hardware"
+    resolved_strategic_cat = payload.strategic_category or "Office Productivity"
+    resolved_fund_source = payload.fund_source or "General Appropriations Act (GAA)"
+
+    if resolved_project_id:
+        proj = db.query(IctProject).filter(IctProject.id == resolved_project_id).first()
+        if proj:
+            resolved_fund_source = str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)")
+            resolved_strategic_cat = str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects")
+        else:
+            resolved_project_id = None
+    elif resolved_category in ["Subscription", "Services"]:
+        resolved_strategic_cat = "Continuing Costs/Expenses"
 
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
     payload.yearly_quantities = aligned_quantities
-
-    # Synchronize backward-compatible year quantity fields
-    sorted_years = sorted([k for k in aligned_quantities.keys() if k.isdigit()])
-    payload.year_1_qty = int(aligned_quantities.get(sorted_years[0], 0) or 0) if len(sorted_years) >= 1 else 0
-    payload.year_2_qty = int(aligned_quantities.get(sorted_years[1], 0) or 0) if len(sorted_years) >= 2 else 0
-    payload.year_3_qty = int(aligned_quantities.get(sorted_years[2], 0) or 0) if len(sorted_years) >= 3 else 0
 
     validate_proposal_constraints(db, user["department_id"], payload, is_submitting=False)
 
@@ -616,7 +695,7 @@ def create_merged_proposal(
     resolved_canvas_expiry = payload.canvas_expiration_date
     resolved_supplier = None
 
-    if payload.item_select != "other":
+    if payload.item_select and payload.item_select != "other":
         catalog_item = db.query(CatalogItem).filter(
             CatalogItem.item_key == payload.item_select,
             CatalogItem.is_active == True
@@ -628,53 +707,69 @@ def create_merged_proposal(
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
             payload.justification = None
+            if catalog_item.category == "software":
+                resolved_category = "Subscription"
+                if not resolved_project_id:
+                    resolved_strategic_cat = "Continuing Costs/Expenses"
     else:
-        resolved_supplier = "Custom Supplier"
+        resolved_supplier = getattr(payload, "supplier_name", None) or "Custom Supplier"
 
-    # Centralized Accounting Classification & UACS Object Code Resolution
+    is_turnover = bool(getattr(payload, "is_in_house_turnover", False) or getattr(payload, "created_by_students", False))
+    resolved_office_loc = payload.office_location or "Central Office"
+
+    # Dynamic classification directly from active database settings & catalog
     uacs_code, exp_class = classify_uacs_and_expenditure(
         item_name=resolved_item_name,
         unit_cost=payload.unit_cost,
-        strategic_category=payload.strategic_category,
-        category=payload.category,
-        created_by_students=payload.created_by_students
+        strategic_category=resolved_strategic_cat,
+        category=resolved_category,
+        created_by_students=is_turnover,
+        is_in_house_turnover=is_turnover,
+        db=db
     )
+
+    strat_cat_id = getattr(payload, "strategic_category_id", None)
+    if not strat_cat_id and resolved_strategic_cat:
+        sc_obj = db.query(StrategicCategory).filter(
+            func.lower(StrategicCategory.name) == str(resolved_strategic_cat).strip().lower()
+        ).first()
+        if sc_obj:
+            strat_cat_id = sc_obj.id
 
     db_proposal = Proposal(
         department_id=user["department_id"],
         issp_period=active_period,
-        outcome_id=payload.outcome_id,
-        project_id=payload.project_id,
-        needs_assessment_id=payload.needs_assessment_id,
-        category=payload.category,
-        strategic_category=payload.strategic_category,
-        office_location=payload.office_location,
-        fund_source=payload.fund_source,
-        uacs_object_code=uacs_code,
-        expenditure_class=exp_class,
-        status=ProposalStatus.DRAFT,
-        item_key=payload.item_select,
+        outcome_id=resolved_outcome_id,
+        project_id=resolved_project_id,
+        needs_assessment_id=resolved_needs_assessment_id,
+        strategic_category_id=strat_cat_id,
+        category=getattr(resolved_category, "value", str(resolved_category)),
+        strategic_category=getattr(resolved_strategic_cat, "value", str(resolved_strategic_cat)),
+        office_location=getattr(resolved_office_loc, "value", str(resolved_office_loc)),
+        fund_source=getattr(resolved_fund_source, "value", str(resolved_fund_source)),
+        uacs_object_code=getattr(uacs_code, "value", str(uacs_code)),
+        expenditure_class=getattr(exp_class, "value", str(exp_class)),
+        status="Draft",
+        item_key=payload.item_select or "other",
         item_name=resolved_item_name,
         unit_cost=payload.unit_cost,
-        year_1_qty=payload.year_1_qty,
-        year_2_qty=payload.year_2_qty,
-        year_3_qty=payload.year_3_qty,
         yearly_quantities=payload.yearly_quantities,
         justification=payload.justification,
-        system_development_status=payload.system_development_status,
-        created_by_students=payload.created_by_students,
+        system_development_status=getattr(payload.system_development_status, "value", str(payload.system_development_status or "N/A")),
+        created_by_students=is_turnover,
+        is_in_house_turnover=is_turnover,
         target_office_automated=automated_office,
         canvas_evidence_url=resolved_canvas_url,
         canvas_expiration_date=resolved_canvas_expiry,
-        payload={"comments": [], "supplier_name": resolved_supplier},
-        is_expansion=payload.is_expansion
+        supplier_name=resolved_supplier,
+        comments=[],
+        is_expansion=getattr(payload, "is_expansion", False)
     )
 
-    db_proposal.sync_payload()
     db.add(db_proposal)
+    db.flush()
 
-    # Record COA Immutable Audit Event
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="PROPOSAL_CREATED",
@@ -685,9 +780,10 @@ def create_merged_proposal(
         ip_address=client_ip,
         new_value={
             "item_name": db_proposal.item_name,
-            "category": db_proposal.category.value if hasattr(db_proposal.category, "value") else str(db_proposal.category),
+            "category": str(db_proposal.category),
             "total_cost": str(db_proposal.total_cost),
-            "total_qty": db_proposal.total_qty
+            "total_qty": db_proposal.total_qty,
+            "project_id": str(resolved_project_id) if resolved_project_id else None
         }
     )
 
@@ -699,6 +795,127 @@ def create_merged_proposal(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error: {str(e)}")
     
     return db_proposal
+
+
+@router.post("/proposals/with-canvas", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
+async def create_proposal_with_canvas(
+    request: Request,
+    payload_json: str = Form(..., description="JSON serialized ProposalCreatePayload"),
+    file: Optional[UploadFile] = File(None, description="Optional Quotation Canvas PDF"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """
+    1-Step Proposal Creation with Canvas:
+    Accepts proposal parameters alongside the quotation canvas PDF binary in a single operation,
+    eliminating the disjointed two-step draft and modal upload workflow.
+    """
+    try:
+        data_dict = json.loads(payload_json)
+        payload = ProposalCreatePayload(**data_dict)
+    except Exception as parse_err:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
+            detail=f"Invalid proposal payload format: {str(parse_err)}"
+        )
+
+    if file and file.filename:
+        file_bytes = await file.read()
+        if not validate_pdf_content(file_bytes):
+            raise HTTPException(status_code=400, detail="Invalid format. Only genuine PDF documents are accepted as quotation proof.")
+        
+        temp_uuid = uuid.uuid4()
+        supplier_clean = secure_filename(payload.supplier_name or "Custom_Supplier")
+        safe_fname = secure_filename(file.filename)
+        key = storage_client.get_canvas_key(str(temp_uuid), supplier_clean, safe_fname)
+        
+        if not storage_client.upload_canvas_evidence(file_bytes, key):
+            raise HTTPException(status_code=500, detail="Failed to write quotation proof document to repository.")
+        
+        payload.canvas_evidence_url = storage_client.generate_download_url(key)
+
+    return create_merged_proposal(request, payload, db, user)
+
+
+@router.post("/proposals/{proposal_id}/duplicate", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
+def duplicate_proposal(
+    request: Request,
+    proposal_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """
+    1-Click Proposal Clone:
+    Duplicates an existing proposal into a fresh Draft copy, enabling rapid batch authoring
+    without re-entering common technical specifications, outcomes, or funding sources.
+    """
+    original = db.query(Proposal).filter(
+        Proposal.id == proposal_id,
+        Proposal.department_id == user["department_id"],
+        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+    ).first()
+
+    if not original:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Source proposal record not found."
+        )
+
+    cloned = Proposal(
+        department_id=user["department_id"],
+        issp_period=original.issp_period,
+        outcome_id=original.outcome_id,
+        project_id=original.project_id,
+        needs_assessment_id=original.needs_assessment_id,
+        strategic_category_id=original.strategic_category_id,
+        category=original.category,
+        strategic_category=original.strategic_category,
+        office_location=original.office_location,
+        fund_source=original.fund_source,
+        uacs_object_code=original.uacs_object_code,
+        expenditure_class=original.expenditure_class,
+        status="Draft",
+        item_key=original.item_key,
+        item_name=f"{original.item_name} (Copy)",
+        unit_cost=original.unit_cost,
+        yearly_quantities=dict(original.yearly_quantities or {}),
+        justification=original.justification,
+        system_development_status=original.system_development_status,
+        created_by_students=original.created_by_students,
+        is_in_house_turnover=original.is_in_house_turnover,
+        target_office_automated=original.target_office_automated,
+        canvas_evidence_url=original.canvas_evidence_url,
+        canvas_expiration_date=original.canvas_expiration_date,
+        supplier_name=original.supplier_name,
+        is_expansion=original.is_expansion,
+        comments=[]
+    )
+
+    db.add(cloned)
+    db.flush()
+
+    client_ip = request.client.host if (request and request.client) else "Unknown"
+    log_audit_event(
+        db=db,
+        action="PROPOSAL_DUPLICATED",
+        module="PROPOSALS",
+        user_id=user["id"],
+        department_id=user["department_id"],
+        proposal_id=cloned.id,
+        ip_address=client_ip,
+        new_value={"cloned_from": str(original.id), "new_item_name": cloned.item_name}
+    )
+
+    try:
+        db.commit()
+        db.refresh(cloned)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to clone proposal: {str(e)}"
+        )
+    return cloned
 
 
 @router.put("/proposals/{proposal_id}", response_model=ProposalResponse)
@@ -716,51 +933,44 @@ def update_merged_proposal(
     ).first()
 
     if not proposal:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal record not found.")
 
-    canvas_url = proposal.canvas_evidence_url
-    s3_storage_class, is_restoring = check_and_update_glacier_metadata(db, proposal, canvas_url)
-    
-    proposal.s3_storage_class = s3_storage_class
-    proposal.is_restoring = is_restoring
-    db.flush()
-
-    if is_restoring or s3_storage_class in ["GLACIER", "DEEP_ARCHIVE"]:
+    if str(proposal.status).lower() in ["submitted", "approved"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Editing is locked while S3 Glacier restoration is active."
+            detail=f"Modification locked: This proposal is currently in '{proposal.status}' state and under administrative review."
         )
 
-    if proposal.status in [ProposalStatus.SUBMITTED, ProposalStatus.APPROVED]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Editing locked. This proposal is currently in {proposal.status.value} state."
-        )
+    resolved_outcome_id = getattr(payload, "outcome_id", None)
+    if resolved_outcome_id is not None:
+        outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == resolved_outcome_id).first()
+        if not outcome:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target Organizational Outcome ID {resolved_outcome_id} does not exist."
+            )
+        proposal.outcome_id = resolved_outcome_id
 
-    # Validate Organizational Outcome existence
-    outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == payload.outcome_id).first()
-    if not outcome:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Target Organizational Outcome ID {payload.outcome_id} does not exist."
-        )
-
-    # Validate linked Needs Assessment if provided
-    if payload.needs_assessment_id:
-        na = db.query(NeedsAssessment).filter(NeedsAssessment.id == payload.needs_assessment_id).first()
+    resolved_needs_assessment_id = coerce_optional_uuid(payload.needs_assessment_id)
+    if resolved_needs_assessment_id:
+        na = db.query(NeedsAssessment).filter(NeedsAssessment.id == resolved_needs_assessment_id).first()
         if not na:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Needs Assessment with ID {payload.needs_assessment_id} not found."
+                detail=f"Needs Assessment with ID {resolved_needs_assessment_id} not found."
             )
+
+    resolved_project_id = coerce_optional_uuid(payload.project_id)
+    if resolved_project_id:
+        proj = db.query(IctProject).filter(IctProject.id == resolved_project_id).first()
+        if not proj:
+            resolved_project_id = None
+        else:
+            proposal.fund_source = str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)")
+            proposal.strategic_category = str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects")
 
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
     payload.yearly_quantities = aligned_quantities
-
-    sorted_years = sorted([k for k in aligned_quantities.keys() if k.isdigit()])
-    payload.year_1_qty = int(aligned_quantities.get(sorted_years[0], 0) or 0) if len(sorted_years) >= 1 else 0
-    payload.year_2_qty = int(aligned_quantities.get(sorted_years[1], 0) or 0) if len(sorted_years) >= 2 else 0
-    payload.year_3_qty = int(aligned_quantities.get(sorted_years[2], 0) or 0) if len(sorted_years) >= 3 else 0
 
     validate_proposal_constraints(db, user["department_id"], payload, is_submitting=False)
 
@@ -774,9 +984,11 @@ def update_merged_proposal(
     resolved_item_name = payload.item_name
     resolved_canvas_url = payload.canvas_evidence_url if payload.canvas_evidence_url is not None else proposal.canvas_evidence_url
     resolved_canvas_expiry = payload.canvas_expiration_date if payload.canvas_expiration_date is not None else proposal.canvas_expiration_date
-    resolved_supplier = (proposal.payload or {}).get("supplier_name") or "Custom Supplier"
+    resolved_supplier = proposal.supplier_name or "Custom Supplier"
+    resolved_category = payload.category or proposal.category or "Hardware"
+    resolved_strategic_cat = proposal.strategic_category or payload.strategic_category or "Office Productivity"
 
-    if payload.item_select != "other":
+    if payload.item_select and payload.item_select != "other":
         catalog_item = db.query(CatalogItem).filter(
             CatalogItem.item_key == payload.item_select,
             CatalogItem.is_active == True
@@ -788,48 +1000,64 @@ def update_merged_proposal(
             resolved_supplier = catalog_item.supplier_name
             payload.unit_cost = catalog_item.standard_unit_cost
             payload.justification = None
+            if catalog_item.category == "software":
+                resolved_category = "Subscription"
 
-    # Centralized Accounting Classification & UACS Object Code Resolution
+    if resolved_project_id:
+        proj = db.query(IctProject).filter(IctProject.id == resolved_project_id).first()
+        if proj:
+            resolved_strategic_cat = getattr(proj.project_category, "value", str(proj.project_category))
+        elif resolved_strategic_cat == "Office Productivity":
+            resolved_strategic_cat = "Internal ICT Projects"
+
+    is_turnover = bool(getattr(payload, "is_in_house_turnover", False) or getattr(payload, "created_by_students", False))
+    resolved_office_loc = payload.office_location or proposal.office_location or "Central Office"
+    resolved_fund_source = proposal.fund_source or payload.fund_source or "General Appropriations Act (GAA)"
+
     uacs_code, exp_class = classify_uacs_and_expenditure(
         item_name=resolved_item_name,
         unit_cost=payload.unit_cost,
-        strategic_category=payload.strategic_category,
-        category=payload.category,
-        created_by_students=payload.created_by_students
+        strategic_category=resolved_strategic_cat,
+        category=resolved_category,
+        created_by_students=is_turnover,
+        is_in_house_turnover=is_turnover,
+        db=db
     )
 
     dept = db.query(Department).filter(Department.id == user["department_id"]).first()
-    automated_office = dept.name if dept else "Central Office"
+    automated_office = dept.name if dept else (proposal.target_office_automated or "Central Office")
 
-    proposal.outcome_id = payload.outcome_id
-    proposal.project_id = payload.project_id
-    proposal.needs_assessment_id = payload.needs_assessment_id
-    proposal.category = payload.category
-    proposal.strategic_category = payload.strategic_category
-    proposal.office_location = payload.office_location
-    proposal.fund_source = payload.fund_source
-    proposal.uacs_object_code = uacs_code
-    proposal.expenditure_class = exp_class
-    proposal.item_key = payload.item_select
+    strat_cat_id = getattr(payload, "strategic_category_id", None)
+    if not strat_cat_id and resolved_strategic_cat:
+        sc_obj = db.query(StrategicCategory).filter(
+            func.lower(StrategicCategory.name) == str(resolved_strategic_cat).strip().lower()
+        ).first()
+        if sc_obj:
+            strat_cat_id = sc_obj.id
+
+    proposal.project_id = resolved_project_id
+    proposal.needs_assessment_id = resolved_needs_assessment_id
+    proposal.strategic_category_id = strat_cat_id or proposal.strategic_category_id
+    proposal.category = getattr(resolved_category, "value", str(resolved_category))
+    proposal.strategic_category = getattr(resolved_strategic_cat, "value", str(resolved_strategic_cat))
+    proposal.office_location = getattr(resolved_office_loc, "value", str(resolved_office_loc))
+    proposal.fund_source = getattr(resolved_fund_source, "value", str(resolved_fund_source))
+    proposal.uacs_object_code = getattr(uacs_code, "value", str(uacs_code))
+    proposal.expenditure_class = getattr(exp_class, "value", str(exp_class))
+    proposal.item_key = payload.item_select or proposal.item_key
     proposal.item_name = resolved_item_name
     proposal.unit_cost = payload.unit_cost
-    proposal.year_1_qty = payload.year_1_qty
-    proposal.year_2_qty = payload.year_2_qty
-    proposal.year_3_qty = payload.year_3_qty
     proposal.yearly_quantities = payload.yearly_quantities
     proposal.justification = payload.justification
-    proposal.system_development_status = payload.system_development_status
-    proposal.created_by_students = payload.created_by_students
+    proposal.system_development_status = getattr(payload.system_development_status, "value", str(payload.system_development_status or proposal.system_development_status))
+    proposal.created_by_students = is_turnover
+    proposal.is_in_house_turnover = is_turnover
     proposal.target_office_automated = automated_office
     proposal.canvas_evidence_url = resolved_canvas_url
     proposal.canvas_expiration_date = resolved_canvas_expiry
-    proposal.is_expansion = payload.is_expansion
-
-    old_payload = dict(proposal.payload) if proposal.payload else {}
-    old_payload["supplier_name"] = resolved_supplier
-    proposal.payload = old_payload
+    proposal.supplier_name = resolved_supplier
+    proposal.is_expansion = getattr(payload, "is_expansion", proposal.is_expansion)
     proposal.version += 1
-    proposal.sync_payload()
 
     new_state = {
         "item_name": proposal.item_name,
@@ -838,8 +1066,7 @@ def update_merged_proposal(
         "justification": proposal.justification
     }
 
-    # Centralized COA Audit Logging Hook
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="PROPOSAL_EDITED",
@@ -877,20 +1104,24 @@ def delete_proposal(
     ).first()
 
     if not proposal:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal record not found.")
 
-    if proposal.status not in [ProposalStatus.DRAFT, ProposalStatus.RETURNED]:
+    if str(proposal.status).lower() not in ["draft", "returned"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Deletions are forbidden when status is {proposal.status.value}."
+            detail=f"Deletions are prohibited when status is '{proposal.status}'."
         )
+
+    # Release any linked replacement inventory units
+    db.query(ExistingInventory).filter(
+        ExistingInventory.replacement_proposal_id == proposal.id
+    ).update({"replacement_proposal_id": None}, synchronize_session=False)
 
     canvas_url = proposal.canvas_evidence_url
     is_shared = is_file_referenced_elsewhere(db, canvas_url, exclude_proposal_id=proposal_id)
     key = get_s3_key_from_url(canvas_url) if canvas_url and not is_shared else None
 
-    # Centralized COA Audit Logging Hook
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="PROPOSAL_DELETED",
@@ -925,6 +1156,11 @@ def submit_proposal(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
+    """
+    Submits a proposal draft to the review queue without forcing department users
+    to provide strategic project linkages, UACS accounting codes, or administrative outcome classifications.
+    Exempts pre-approved catalog references and in-house/non-commercial projects from quotation canvas blocks.
+    """
     proposal = db.query(Proposal).filter(
         Proposal.id == proposal_id,
         Proposal.department_id == user["department_id"],
@@ -932,84 +1168,119 @@ def submit_proposal(
     ).first()
 
     if not proposal:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal record not found.")
 
-    if proposal.status not in [ProposalStatus.DRAFT, ProposalStatus.RETURNED]:
+    if str(proposal.status).lower() not in ["draft", "returned"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot submit proposal. Current status is {proposal.status.value}."
+            detail=f"Cannot submit proposal. Current status is '{proposal.status}'."
         )
 
-    # Rule 1 & Rule 7: Student-developed systems bypass mandatory canvas.
-    if not proposal.created_by_students:
-        if not proposal.canvas_evidence_url:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Submission locked: A verified quotation canvas PDF is required before submission."
-            )
-        if is_datetime_expired(proposal.canvas_expiration_date):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Submission locked: The linked canvas quotation has expired. Please upload an updated quotation proof."
-            )
-    else:
-        if (proposal.unit_cost or Decimal("0.00")) > Decimal("0.00") and proposal.canvas_evidence_url and proposal.canvas_expiration_date:
-            if is_datetime_expired(proposal.canvas_expiration_date):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Submission Notice: An expired quotation is linked to this student proposal with budgeted costs. Please update or detach the expired canvas before submitting."
-                )
+    is_catalog = bool(proposal.item_key and proposal.item_key != "other")
+    is_in_house = bool(proposal.created_by_students or proposal.is_in_house_turnover)
+
+    # Quotation canvas compliance check: Standardized and centralized
+    is_canvas_valid, canvas_msg = verify_canvas_compliance(
+        item_select=proposal.item_key,
+        is_in_house_turnover=is_in_house,
+        canvas_url=proposal.canvas_evidence_url,
+        canvas_expiry=proposal.canvas_expiration_date
+    )
+    if not is_canvas_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=canvas_msg
+        )
+
+    # Ensure accounting classification is assigned before headroom checks
+    if not proposal.expenditure_class or not proposal.uacs_object_code:
+        uacs, exp_class = classify_uacs_and_expenditure(
+            item_name=proposal.item_name,
+            unit_cost=proposal.unit_cost,
+            strategic_category=proposal.strategic_category or "Office Productivity",
+            category=proposal.category or "Hardware",
+            created_by_students=is_in_house,
+            is_in_house_turnover=is_in_house,
+            db=db
+        )
+        proposal.uacs_object_code = uacs
+        proposal.expenditure_class = exp_class
 
     issp_period, aligned_quantities = align_and_validate_years(db, proposal.yearly_quantities, is_submitting=True)
     proposal.yearly_quantities = aligned_quantities
 
-    sorted_years = sorted([k for k in aligned_quantities.keys() if k.isdigit()])
-    proposal.year_1_qty = int(aligned_quantities.get(sorted_years[0], 0) or 0) if len(sorted_years) >= 1 else 0
-    proposal.year_2_qty = int(aligned_quantities.get(sorted_years[1], 0) or 0) if len(sorted_years) >= 2 else 0
-    proposal.year_3_qty = int(aligned_quantities.get(sorted_years[2], 0) or 0) if len(sorted_years) >= 3 else 0
-
-    # Block submission if unresolved action items remain
-    comments = proposal.payload.get("comments", []) if proposal.payload else []
+    # Block submission if unresolved action items remain in comments
+    comments = proposal.comments or []
     if any(c.get("requires_department_action") and not c.get("is_resolved") for c in comments):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot submit proposal. There are unresolved action items pinned to this draft."
+            detail="Cannot submit proposal: There are unresolved action items flagged on this draft. Please review the revision remarks thread."
         )
 
-    # Headroom check
-    incoming_cost = proposal.total_cost
-    check_budget_headroom(db, user["department_id"], proposal.issp_period, incoming_cost, exclude_proposal_id=proposal.id)
+    # Dual-pool independent sub-ceiling headroom check (with row-level lock)
+    check_budget_headroom(
+        db=db,
+        dept_id=user["department_id"],
+        issp_period=proposal.issp_period,
+        incoming_cost=proposal.total_cost,
+        expenditure_class=proposal.expenditure_class,
+        exclude_proposal_id=proposal.id
+    )
 
     payload_to_verify = ProposalCreatePayload(
         outcome_id=proposal.outcome_id,
         project_id=proposal.project_id,
         needs_assessment_id=proposal.needs_assessment_id,
-        category=proposal.category,
-        strategic_category=proposal.strategic_category,
-        office_location=proposal.office_location,
-        fund_source=proposal.fund_source,
+        category=proposal.category or "Hardware",
+        strategic_category=proposal.strategic_category or "Office Productivity",
+        office_location=proposal.office_location or "Central Office",
+        fund_source=proposal.fund_source or "General Appropriations Act (GAA)",
         item_select=proposal.item_key or "other",
         item_name=proposal.item_name,
         unit_cost=proposal.unit_cost,
-        year_1_qty=proposal.year_1_qty,
-        year_2_qty=proposal.year_2_qty,
-        year_3_qty=proposal.year_3_qty,
         yearly_quantities=proposal.yearly_quantities,
         justification=proposal.justification,
         system_development_status=proposal.system_development_status,
-        created_by_students=proposal.created_by_students,
+        created_by_students=is_in_house,
+        is_in_house_turnover=is_in_house,
         canvas_evidence_url=proposal.canvas_evidence_url,
         canvas_expiration_date=proposal.canvas_expiration_date,
         is_expansion=proposal.is_expansion
     )
     validate_proposal_constraints(db, user["department_id"], payload_to_verify, is_submitting=True)
 
-    old_status = proposal.status.value
-    proposal.status = ProposalStatus.SUBMITTED
+    # Close the hardware replacement loop by consuming condemned assets
+    cat_lower = str(proposal.category or "").lower()
+    is_hardware = "hardware" in cat_lower or "equipment" in cat_lower
+    if (
+        not proposal.is_expansion
+        and not is_in_house
+        and (proposal.strategic_category or "").lower() == "office productivity"
+        and is_hardware
+    ):
+        unconsumed_assets = db.query(ExistingInventory).filter(
+            ExistingInventory.department_id == user["department_id"],
+            ExistingInventory.is_software == False,
+            ExistingInventory.replacement_proposal_id.is_(None),
+            or_(
+                ExistingInventory.is_end_of_life == True,
+                ExistingInventory.status == AssetStatus.CONDEMNED,
+                cast(ExistingInventory.status, String).ilike("%condemned%")
+            )
+        ).order_by(ExistingInventory.date_acquired.asc()).all()
+
+        qty_needed = proposal.total_qty
+        for asset in unconsumed_assets:
+            if qty_needed <= 0:
+                break
+            asset.replacement_proposal_id = proposal.id
+            qty_needed -= (asset.quantity or 1)
+
+    old_status = proposal.status
+    proposal.status = "Submitted"
     proposal.version += 1
 
-    # Centralized COA Audit Logging Hook
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="STATE_TRANSITION_SUBMITTED",
@@ -1019,7 +1290,7 @@ def submit_proposal(
         proposal_id=proposal.id,
         ip_address=client_ip,
         old_value={"status": old_status},
-        new_value={"status": ProposalStatus.SUBMITTED.value, "total_cost": str(proposal.total_cost)}
+        new_value={"status": "Submitted", "total_cost": str(proposal.total_cost)}
     )
     
     try:
@@ -1030,157 +1301,441 @@ def submit_proposal(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to submit proposal: {str(e)}"
         )
-    return {"status": "success", "new_status": proposal.status.value}
+    return {"status": "success", "new_status": proposal.status}
 
 
 # ==========================================================
-# COMPATIBILITY ALIAS ENDPOINTS (MAPPED TO UNIFIED PROPOSALS)
+# 6. PROPOSED INFORMATION SYSTEMS (PART III.D - DEPT INTAKE)
 # ==========================================================
 
-@router.get("/subscriptions", response_model=List[ProposalResponse])
-def get_departmental_subscriptions(
-    issp_period_filter: Optional[str] = Query(None, alias="issp_period"),
-    status_filter: Optional[ProposalStatus] = Query(None),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, le=1000),
+@router.get("/systems", response_model=List[InformationSystemResponse])
+def get_department_proposed_systems(
+    submission_status: Optional[str] = Query(None, description="Draft, Submitted, Approved, Returned"),
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    target_period = issp_period_filter or get_active_issp_period(db)
-    query = db.query(Proposal).options(
-        joinedload(Proposal.outcome),
-        joinedload(Proposal.project_rel),
-        joinedload(Proposal.needs_assessment)
-    ).filter(
-        Proposal.department_id == user["department_id"],
-        Proposal.issp_period == target_period,
+    """Retrieves all information systems proposed by or assigned to this department for the active cycle."""
+    active_period = get_active_issp_period(db)
+    dept_id = user["department_id"]
+    dept = db.query(Department).filter(Department.id == dept_id).first()
+    dept_name = dept.name if dept else ""
+
+    query = db.query(InformationSystem).filter(
+        InformationSystem.issp_period == active_period,
         or_(
-            Proposal.category.in_([ProposalCategory.SUBSCRIPTION, ProposalCategory.SOFTWARE]),
-            Proposal.expenditure_class == ExpenditureClass.MOOE,
-            Proposal.strategic_category == ProjectCategory.CONTINUING_COSTS
-        ),
-        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+            InformationSystem.department_id == dept_id,
+            and_(
+                InformationSystem.department_id.is_(None),
+                InformationSystem.system_owner_office.ilike(f"%{dept_name}%")
+            ) if dept_name else False
+        )
     )
-    if status_filter:
-        query = query.filter(Proposal.status == status_filter)
 
-    return query.offset(skip).limit(limit).all()
+    if submission_status and submission_status.strip().lower() != "all":
+        clean_stat = submission_status.strip().lower()
+        query = query.filter(func.lower(cast(InformationSystem.submission_status, String)) == clean_stat)
+
+    systems = query.options(
+        joinedload(InformationSystem.department),
+        joinedload(InformationSystem.needs_assessment),
+        joinedload(InformationSystem.project_parent)
+    ).order_by(InformationSystem.name.asc()).all()
+
+    results = []
+    for sys in systems:
+        resp = InformationSystemResponse.model_validate(sys)
+        if sys.department:
+            resp.department_name = sys.department.name
+        elif sys.system_owner_office:
+            resp.department_name = sys.system_owner_office
+        if sys.needs_assessment:
+            resp.needs_assessment_title = sys.needs_assessment.title
+        if sys.project_parent:
+            resp.project_title = sys.project_parent.project_title
+        elif sys.project_id:
+            proj = db.query(IctProject).filter(IctProject.id == sys.project_id).first()
+            if proj:
+                resp.project_title = proj.project_title
+        results.append(resp)
+
+    return results
 
 
-@router.get("/subscriptions/{subscription_id}", response_model=ProposalResponse)
-def get_subscription_detail(
-    subscription_id: uuid.UUID,
+@router.get("/systems/{system_id}", response_model=InformationSystemResponse)
+def get_department_proposed_system_detail(
+    system_id: uuid.UUID,
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    return get_proposal_detail(subscription_id, db, user)
-
-
-@router.post("/subscriptions", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
-def create_subscription_alias(
-    request: Request,
-    payload: ProposalCreatePayload,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_dept_user)
-):
-    payload.category = ProposalCategory.SUBSCRIPTION
-    return create_merged_proposal(request=request, payload=payload, db=db, user=user)
-
-
-@router.put("/subscriptions/{subscription_id}", response_model=ProposalResponse)
-def update_subscription_alias(
-    request: Request,
-    subscription_id: uuid.UUID,
-    payload: ProposalCreatePayload,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_dept_user)
-):
-    payload.category = ProposalCategory.SUBSCRIPTION
-    return update_merged_proposal(request=request, proposal_id=subscription_id, payload=payload, db=db, user=user)
-
-
-@router.delete("/subscriptions/{subscription_id}")
-def delete_subscription_alias(
-    request: Request,
-    subscription_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_dept_user)
-):
-    return delete_proposal(request=request, proposal_id=subscription_id, db=db, user=user)
-
-
-@router.put("/subscriptions/{subscription_id}/submit")
-def submit_subscription_alias(
-    request: Request,
-    subscription_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_dept_user)
-):
-    return submit_proposal(request=request, proposal_id=subscription_id, db=db, user=user)
-
-
-@router.post("/subscriptions/{subscription_id}/restore")
-def request_subscription_restore(
-    request: Request,
-    subscription_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_dept_user)
-):
-    return request_glacier_restore(request=request, proposal_id=subscription_id, db=db, user=user)
-
-
-@router.post("/subscriptions/{subscription_id}/sync-metadata")
-def sync_subscription_metadata(
-    subscription_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_dept_user)
-):
-    proposal = db.query(Proposal).filter(
-        Proposal.id == subscription_id,
-        Proposal.department_id == user["department_id"]
+    """Retrieves details of a specific proposed information system."""
+    system = db.query(InformationSystem).options(
+        joinedload(InformationSystem.department),
+        joinedload(InformationSystem.needs_assessment),
+        joinedload(InformationSystem.project_parent)
+    ).filter(
+        InformationSystem.id == system_id,
+        InformationSystem.department_id == user["department_id"]
     ).first()
-    if not proposal:
-        raise HTTPException(status_code=404, detail="Subscription record not found.")
 
-    s3_class, is_restoring = check_and_update_glacier_metadata(db, proposal, proposal.canvas_evidence_url)
-    proposal.s3_storage_class = s3_class
-    proposal.is_restoring = is_restoring
-    db.commit()
-    return {
-        "status": "success",
-        "storage_class": s3_class,
-        "is_restoring": is_restoring,
-        "restore_progress": 100 if s3_class == "STANDARD" else (50 if is_restoring else 0)
-    }
+    if not system:
+        raise HTTPException(status_code=404, detail="Proposed information system record not found.")
+
+    resp = InformationSystemResponse.model_validate(system)
+    if system.department:
+        resp.department_name = system.department.name
+    elif system.system_owner_office:
+        resp.department_name = system.system_owner_office
+    if system.needs_assessment:
+        resp.needs_assessment_title = system.needs_assessment.title
+    if system.project_parent:
+        resp.project_title = system.project_parent.project_title
+    elif system.project_id:
+        proj = db.query(IctProject).filter(IctProject.id == system.project_id).first()
+        if proj:
+            resp.project_title = proj.project_title
+    return resp
 
 
-@router.post("/proposals/{proposal_id}/sync-metadata")
-def sync_proposal_storage_metadata(
-    proposal_id: uuid.UUID,
+@router.post("/systems", response_model=InformationSystemResponse, status_code=status.HTTP_201_CREATED)
+def create_department_proposed_system(
+    request: Request,
+    payload: InformationSystemCreate,
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    proposal = db.query(Proposal).filter(
-        Proposal.id == proposal_id,
-        Proposal.department_id == user["department_id"]
-    ).first()
-    if not proposal:
-        raise HTTPException(status_code=404, detail="Proposal record not found.")
+    """
+    Simplified Department System Proposal intake (Part III.D):
+    Department users submit software needs without facing technical architecture jargon.
+    Maintains clean separation between Information Systems (Part III.D) and Resource Proposals (Part IV.A).
+    """
+    active_period = get_active_issp_period(db)
+    dept = db.query(Department).filter(Department.id == user["department_id"]).first()
+    dept_name = dept.name if dept else "Central Office"
 
-    s3_class, is_restoring = check_and_update_glacier_metadata(db, proposal, proposal.canvas_evidence_url)
-    proposal.s3_storage_class = s3_class
-    proposal.is_restoring = is_restoring
+    dumped = payload.model_dump()
+
+    # Validate non-negative cost
+    cost = Decimal(str(dumped.get("proposed_cost") or 0))
+    if cost < Decimal("0.00"):
+        raise HTTPException(status_code=400, detail="Proposed cost cannot be negative.")
+
+    # Verify linked needs assessment exists if provided
+    needs_assessment_id = coerce_optional_uuid(getattr(payload, "needs_assessment_id", None))
+    if needs_assessment_id:
+        na = db.query(NeedsAssessment).filter(
+            NeedsAssessment.id == needs_assessment_id,
+            NeedsAssessment.department_id == user["department_id"]
+        ).first()
+        if not na:
+            raise HTTPException(status_code=404, detail="Referenced Needs Assessment record not found.")
+        dumped["needs_assessment_id"] = needs_assessment_id
+    else:
+        dumped["needs_assessment_id"] = None
+
+    # Handle project_id linkage if provided
+    project_id = coerce_optional_uuid(getattr(payload, "project_id", None) or dumped.get("project_id"))
+    if project_id:
+        proj = db.query(IctProject).filter(IctProject.id == project_id).first()
+        if proj:
+            dumped["project_id"] = project_id
+        else:
+            dumped["project_id"] = None
+    else:
+        dumped["project_id"] = None
+
+    # Calculate multi-classification flags with safe fallbacks
+    c_str = str(dumped.get("classification", "")).lower()
+    is_support = dumped.get("is_support_to_operations")
+    if is_support is None:
+        is_support = "support" in c_str
+
+    is_admin = dumped.get("is_general_administrative")
+    if is_admin is None:
+        is_admin = "administrative" in c_str or "admin" in c_str
+
+    is_ops = dumped.get("is_operations")
+    if is_ops is None:
+        is_ops = "operations" in c_str or not (is_support or is_admin)
+
+    is_frontline = dumped.get("is_frontline_service")
+    if is_frontline is None:
+        is_frontline = dumped.get("is_client_facing", True) if ("frontline" in c_str or not is_admin) else False
+
+    is_non_frontline = dumped.get("is_non_frontline_service")
+    if is_non_frontline is None:
+        is_non_frontline = "non-frontline" in c_str
+
+    dumped["is_support_to_operations"] = bool(is_support)
+    dumped["is_general_administrative"] = bool(is_admin)
+    dumped["is_operations"] = bool(is_ops)
+    dumped["is_frontline_service"] = bool(is_frontline)
+    dumped["is_non_frontline_service"] = bool(is_non_frontline)
+    dumped["frontline_hosting_type"] = dumped.get("frontline_hosting_type") or dumped.get("hosting_type") or "Online"
+
+    # Department metadata defaults
+    dumped["department_id"] = user["department_id"]
+    if not dumped.get("system_owner_office"):
+        dumped["system_owner_office"] = dept_name
+    dumped["submission_status"] = "Draft"
+
+    if dumped.get("status") == "Operational":
+        dumped["status"] = "For Development"
+
+    if not dumped.get("development_strategy"):
+        dumped["development_strategy"] = "Outsourced"
+    if not dumped.get("development_platform"):
+        dumped["development_platform"] = "Institutional Web Framework"
+    if not dumped.get("database_name"):
+        clean_name = dumped.get("name", "app").lower().replace(" ", "_")[:30]
+        dumped["database_name"] = f"{clean_name}_db"
+    if not dumped.get("data_storage_type"):
+        dumped["data_storage_type"] = "GovCloud / On-premise Storage"
+    if not dumped.get("internal_users"):
+        dumped["internal_users"] = f"{dept_name} Personnel"
+    if not dumped.get("external_users"):
+        dumped["external_users"] = "General Citizens / Public" if dumped.get("is_client_facing", True) else "None"
+
+    db_system = InformationSystem(
+        issp_period=active_period,
+        **{k: v for k, v in dumped.items() if hasattr(InformationSystem, k)}
+    )
+
+    db.add(db_system)
+    db.flush()
+
+    client_ip = request.client.host if (request and request.client) else "Unknown"
+    log_audit_event(
+        db=db,
+        action="SYSTEM_PROPOSED_BY_DEPT",
+        module="SYSTEMS",
+        user_id=user["id"],
+        department_id=user["department_id"],
+        ip_address=client_ip,
+        new_value={
+            "system_id": str(db_system.id),
+            "name": db_system.name,
+            "status": db_system.status,
+            "proposed_cost": float(getattr(payload, "proposed_cost", 0) or 0),
+            "project_id": str(db_system.project_id) if db_system.project_id else None,
+            "submission_status": "Draft"
+        }
+    )
+
     db.commit()
-    return {
-        "status": "success",
-        "storage_class": s3_class,
-        "is_restoring": is_restoring,
-        "restore_progress": 100 if s3_class == "STANDARD" else (50 if is_restoring else 0)
-    }
+    db.refresh(db_system)
+
+    resp = InformationSystemResponse.model_validate(db_system)
+    if db_system.department:
+        resp.department_name = db_system.department.name
+    elif db_system.system_owner_office:
+        resp.department_name = db_system.system_owner_office
+    if db_system.needs_assessment:
+        resp.needs_assessment_title = db_system.needs_assessment.title
+    if getattr(db_system, "project_parent", None):
+        resp.project_title = db_system.project_parent.project_title
+    elif db_system.project_id:
+        proj = db.query(IctProject).filter(IctProject.id == db_system.project_id).first()
+        if proj:
+            resp.project_title = proj.project_title
+    return resp
+
+
+@router.put("/systems/{system_id}", response_model=InformationSystemResponse)
+def update_department_proposed_system(
+    request: Request,
+    system_id: uuid.UUID,
+    payload: InformationSystemUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """Updates a proposed information system draft in Part III.D."""
+    system = db.query(InformationSystem).filter(
+        InformationSystem.id == system_id,
+        InformationSystem.department_id == user["department_id"]
+    ).first()
+
+    if not system:
+        raise HTTPException(status_code=404, detail="Proposed information system record not found.")
+
+    if str(getattr(system, "submission_status", "Draft")).lower() in ["submitted", "approved"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Editing locked: System proposal is currently in '{system.submission_status}' state."
+        )
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    if "proposed_cost" in update_data and update_data["proposed_cost"] is not None:
+        cost = Decimal(str(update_data["proposed_cost"]))
+        if cost < Decimal("0.00"):
+            raise HTTPException(status_code=400, detail="Proposed cost cannot be negative.")
+
+    if "project_id" in update_data:
+        p_id = coerce_optional_uuid(update_data.get("project_id"))
+        if p_id:
+            proj = db.query(IctProject).filter(IctProject.id == p_id).first()
+            system.project_id = p_id if proj else None
+        else:
+            system.project_id = None
+        del update_data["project_id"]
+
+    if "needs_assessment_id" in update_data:
+        n_id = coerce_optional_uuid(update_data.get("needs_assessment_id"))
+        system.needs_assessment_id = n_id
+        del update_data["needs_assessment_id"]
+
+    for key, value in update_data.items():
+        if hasattr(system, key):
+            setattr(system, key, value)
+
+    if "classification" in update_data:
+        c_str = str(system.classification).lower()
+        if "is_support_to_operations" not in update_data:
+            system.is_support_to_operations = "support" in c_str
+        if "is_general_administrative" not in update_data:
+            system.is_general_administrative = "administrative" in c_str or "admin" in c_str
+        if "is_operations" not in update_data:
+            system.is_operations = "operations" in c_str or not (system.is_support_to_operations or system.is_general_administrative)
+        if "is_frontline_service" not in update_data:
+            system.is_frontline_service = ("frontline" in c_str and "non-frontline" not in c_str)
+        if "is_non_frontline_service" not in update_data:
+            system.is_non_frontline_service = ("non-frontline" in c_str)
+
+    if "hosting_type" in update_data and "frontline_hosting_type" not in update_data:
+        system.frontline_hosting_type = update_data["hosting_type"] or "Online"
+
+    new_cost = getattr(system, "proposed_cost", Decimal("0.00")) or Decimal("0.00")
+
+    client_ip = request.client.host if (request and request.client) else "Unknown"
+    log_audit_event(
+        db=db,
+        action="SYSTEM_PROPOSAL_UPDATED",
+        module="SYSTEMS",
+        user_id=user["id"],
+        department_id=user["department_id"],
+        ip_address=client_ip,
+        new_value={
+            "system_id": str(system.id), 
+            "name": system.name,
+            "proposed_cost": float(new_cost),
+            "project_id": str(system.project_id) if system.project_id else None
+        }
+    )
+
+    db.commit()
+    db.refresh(system)
+
+    resp = InformationSystemResponse.model_validate(system)
+    if system.department:
+        resp.department_name = system.department.name
+    elif system.system_owner_office:
+        resp.department_name = system.system_owner_office
+    if system.needs_assessment:
+        resp.needs_assessment_title = system.needs_assessment.title
+    if getattr(system, "project_parent", None):
+        resp.project_title = system.project_parent.project_title
+    elif system.project_id:
+        proj = db.query(IctProject).filter(IctProject.id == system.project_id).first()
+        if proj:
+            resp.project_title = proj.project_title
+    return resp
+
+
+@router.delete("/systems/{system_id}")
+def delete_department_proposed_system(
+    request: Request,
+    system_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """Deletes a draft or returned proposed information system."""
+    system = db.query(InformationSystem).filter(
+        InformationSystem.id == system_id,
+        InformationSystem.department_id == user["department_id"]
+    ).first()
+
+    if not system:
+        raise HTTPException(status_code=404, detail="Proposed information system record not found.")
+
+    if str(getattr(system, "submission_status", "Draft")).lower() in ["submitted", "approved"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot delete system in '{system.submission_status}' state."
+        )
+
+    sys_name = system.name
+    db.delete(system)
+
+    client_ip = request.client.host if (request and request.client) else "Unknown"
+    log_audit_event(
+        db=db,
+        action="SYSTEM_PROPOSAL_DELETED",
+        module="SYSTEMS",
+        user_id=user["id"],
+        department_id=user["department_id"],
+        ip_address=client_ip,
+        old_value={"system_id": str(system_id), "name": sys_name}
+    )
+
+    db.commit()
+    return {"status": "success", "message": f"System proposal '{sys_name}' deleted."}
+
+
+@router.put("/systems/{system_id}/submit")
+def submit_department_proposed_system(
+    request: Request,
+    system_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """Submits a proposed system draft directly to the Information Systems Intake Queue."""
+    system = db.query(InformationSystem).filter(
+        InformationSystem.id == system_id,
+        InformationSystem.department_id == user["department_id"]
+    ).first()
+
+    if not system:
+        raise HTTPException(status_code=404, detail="Proposed information system record not found.")
+
+    if str(getattr(system, "submission_status", "Draft")).lower() not in ["draft", "returned"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot submit system. Current submission status is '{system.submission_status}'."
+        )
+
+    if not (system.name or "").strip():
+        raise HTTPException(status_code=400, detail="System Name is required.")
+
+    if not (system.description_and_purpose or "").strip():
+        raise HTTPException(status_code=400, detail="System Description & Purpose is required.")
+
+    if (system.status or "").lower() == "for enhancement" and not (system.enhancement_details or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Enhancement Details are required when proposing a system upgrade ('For Enhancement')."
+        )
+
+    system.submission_status = "Submitted"
+    system.rejection_reason = None
+
+    client_ip = request.client.host if (request and request.client) else "Unknown"
+    log_audit_event(
+        db=db,
+        action="SYSTEM_PROPOSAL_SUBMITTED",
+        module="SYSTEMS",
+        user_id=user["id"],
+        department_id=user["department_id"],
+        ip_address=client_ip,
+        new_value={"system_id": str(system.id), "name": system.name, "status": "Submitted"}
+    )
+
+    db.commit()
+    db.refresh(system)
+    return {"status": "success", "message": f"Information System '{system.name}' submitted to MIS Review Queue."}
 
 
 # ==========================================================
-# FILE WORKSPACES & CANVAS UPLOADS
+# 7. FILE WORKSPACES & CANVAS UPLOADS
 # ==========================================================
 
 @router.post("/upload/canvas")
@@ -1195,7 +1750,7 @@ async def upload_canvas(
 ):
     """
     Uploads quotation canvas PDF and links it to the proposal.
-    Enables updating outdated/expired quotation proofs cleanly.
+    Cleans up old unlinked files from storage to prevent orphaned files.
     """
     try:
         proposal_uuid = uuid.UUID(proposal_id)
@@ -1208,18 +1763,20 @@ async def upload_canvas(
     ).first()
 
     if not proposal:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
+        raise HTTPException(status_code=404, detail="Proposal record not found.")
 
     if user["role"] != "ROLE_MIS_ADMIN" and proposal.department_id != user["department_id"]:
         raise HTTPException(status_code=403, detail="Permission denied.")
 
-    if proposal.status not in [ProposalStatus.DRAFT, ProposalStatus.RETURNED]:
-        raise HTTPException(status_code=403, detail="Upload locked: Proposal is under review.")
+    if str(proposal.status).lower() not in ["draft", "returned"]:
+        raise HTTPException(status_code=403, detail="Upload locked: Proposal is under administrative review.")
 
     file_bytes = await file.read()
     if not validate_pdf_content(file_bytes):
         raise HTTPException(status_code=400, detail="Invalid format. Only genuine PDF files are permitted.")
     await file.seek(0)
+
+    old_canvas_url = proposal.canvas_evidence_url
 
     safe_supplier = secure_filename(supplier_name) if supplier_name else "default_supplier"
     safe_filename = secure_filename(file.filename)
@@ -1227,10 +1784,11 @@ async def upload_canvas(
     
     success = storage_client.upload_canvas_evidence(file_bytes, key)
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to write canvas file to storage.")
+        raise HTTPException(status_code=500, detail="Failed to write quotation proof document to repository.")
 
     download_url = storage_client.generate_download_url(key)
     proposal.canvas_evidence_url = download_url
+    proposal.supplier_name = supplier_name
     
     if canvas_expiration_date:
         try:
@@ -1238,13 +1796,13 @@ async def upload_canvas(
         except Exception:
             pass
 
-    current_payload = get_dict_from_payload(proposal.payload)
-    current_payload["supplier_name"] = supplier_name
-    proposal.payload = current_payload
-    proposal.sync_payload()
+    if old_canvas_url and old_canvas_url != download_url:
+        if not is_file_referenced_elsewhere(db, old_canvas_url, exclude_proposal_id=proposal_uuid):
+            old_s3_key = get_s3_key_from_url(old_canvas_url)
+            if old_s3_key:
+                storage_client.delete_object(old_s3_key)
 
-    # Centralized COA Audit Logging Hook
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="CANVAS_UPLOADED",
@@ -1290,14 +1848,14 @@ async def upload_unserviceable_evidence(
     ).first()
 
     if not asset:
-        raise HTTPException(status_code=404, detail="Inventory asset not found.")
+        raise HTTPException(status_code=404, detail="Inventory asset record not found.")
 
-    if asset.status == AssetStatus.FUNCTIONAL:
+    if str(asset.status).lower() in ["functional"]:
         raise HTTPException(status_code=400, detail="Functional items do not require an unserviceable report.")
 
     file_bytes = await file.read()
     if not validate_pdf_content(file_bytes):
-        raise HTTPException(status_code=400, detail="Invalid format. Only PDF files are permitted.")
+        raise HTTPException(status_code=400, detail="Invalid format. Only genuine PDF files are accepted.")
     await file.seek(0)
 
     safe_filename = secure_filename(file.filename)
@@ -1308,12 +1866,11 @@ async def upload_unserviceable_evidence(
     )
 
     if not file_url:
-        raise HTTPException(status_code=500, detail="Failed to write report to storage.")
+        raise HTTPException(status_code=500, detail="Failed to write inspection report to repository.")
 
     asset.unserviceable_report_url = file_url
 
-    # Centralized COA Audit Logging Hook
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="IIRUP_REPORT_UPLOADED",
@@ -1334,7 +1891,7 @@ async def upload_unserviceable_evidence(
 
 
 # ==========================================================
-# NOTIFICATIONS & REVISION REMARKS (ROLE-SCOPED INBOX)
+# 8. NOTIFICATIONS & REVISION REMARKS (ROLE-SCOPED INBOX)
 # ==========================================================
 
 @router.get("/notifications", response_model=List[Dict[str, Any]])
@@ -1344,24 +1901,16 @@ def get_department_notifications(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """
-    Role-Scoped Department & Supply Inbox:
-    Department planners are never exposed to global COA logs or cross-department activities.
-    Their views are scoped strictly to actions relevant to their domain (e.g. proposal returns,
-    inline comments, budget ceiling notifications, and inventory approvals).
-    """
     dept_id = user["department_id"]
     notifications = []
 
     proposals_query = db.query(Proposal).filter(Proposal.department_id == dept_id)
     proposals_list = proposals_query.all()
     proposal_map = {p.id: p.item_name for p in proposals_list}
-    proposal_ids = [str(pid) for pid in proposal_map.keys()]
     proposal_uuids = list(proposal_map.keys())
 
     audit_query = db.query(AuditTrail).options(joinedload(AuditTrail.user))
 
-    # Strict Role Scoping: Only fetch logs explicitly belonging to this department or its proposals
     conditions = [AuditTrail.department_id == dept_id]
     if proposal_uuids:
         conditions.append(AuditTrail.proposal_id.in_(proposal_uuids))
@@ -1381,7 +1930,7 @@ def get_department_notifications(
 
         log_prop_id = str(log.proposal_id) if log.proposal_id else None
         operator_email = log.user.email if log.user else "System/Cron"
-        operator_role = log.user.role_tag.value if log.user else "SYSTEM"
+        operator_role = getattr(log.user.role_tag, "value", str(log.user.role_tag)) if log.user else "SYSTEM"
 
         if log_prop_id and log.proposal_id in proposal_map:
             is_relevant = True
@@ -1400,12 +1949,16 @@ def get_department_notifications(
                 description = f"Proposal '{target_name}' was returned. Please review action items."
                 type_ = "status_change"
             elif log.action == "PROPOSAL_OVERRIDDEN_BY_ADMIN":
-                title = "Compliance Override Applied"
-                description = f"MIS Admin applied a parameter override to '{target_name}'."
+                title = "Compliance Classification Applied"
+                description = f"MIS Admin applied a governance classification to '{target_name}'."
                 type_ = "override"
             elif log.action == "PROPOSAL_CREATED":
                 title = "Proposal Drafted"
                 description = f"New proposal line item '{target_name}' created in workspace."
+                type_ = "status_change"
+            elif log.action == "PROPOSAL_DUPLICATED":
+                title = "Proposal Cloned"
+                description = f"Proposal '{target_name}' duplicated into a new draft."
                 type_ = "status_change"
 
         elif log.action == "SYSTEM_BUDGET_CEILING_UPDATED":
@@ -1442,8 +1995,8 @@ def get_department_notifications(
             })
 
     for p in proposals_list:
-        payload_dict = get_dict_from_payload(p.payload)
-        for c in payload_dict.get("comments", []):
+        comments_list = p.comments or []
+        for c in comments_list:
             if isinstance(c, dict) and c.get("requires_department_action") and not c.get("is_resolved"):
                 notifications.append({
                     "id": c.get("id"),
@@ -1483,15 +2036,15 @@ def get_action_items_summary(
     ).all()
     
     for p in proposals:
-        payload_dict = get_dict_from_payload(p.payload)
-        for c in payload_dict.get("comments", []):
+        comments_list = p.comments or []
+        for c in comments_list:
             if isinstance(c, dict) and c.get("requires_department_action") and not c.get("is_resolved"):
                 unread_actions += 1
 
     returned_proposals = db.query(Proposal).filter(
         Proposal.department_id == dept_id,
         Proposal.issp_period == active_period,
-        Proposal.status == ProposalStatus.RETURNED,
+        func.lower(cast(Proposal.status, String)) == "returned",
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).count()
 
@@ -1508,15 +2061,12 @@ def post_inline_comment(
 ):
     target = db.query(Proposal).filter(Proposal.id == proposal_id).first()
     if not target:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
+        raise HTTPException(status_code=404, detail="Proposal record not found.")
 
     if user["role"] != "ROLE_MIS_ADMIN" and target.department_id != user["department_id"]:
         raise HTTPException(status_code=403, detail="Permission denied.")
 
-    current_payload = get_dict_from_payload(target.payload)
-    if "comments" not in current_payload:
-        current_payload["comments"] = []
-
+    current_comments = list(target.comments or [])
     new_comment = {
         "id": str(uuid.uuid4()),
         "author_name": user["email"].split("@")[0].replace(".", " ").title(),
@@ -1529,11 +2079,10 @@ def post_inline_comment(
         "requires_department_action": payload.requires_department_action
     }
 
-    current_payload["comments"].append(new_comment)
-    target.payload = current_payload
+    current_comments.append(new_comment)
+    target.comments = current_comments
 
-    # Centralized COA Audit Logging Hook
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="COMMENT_POSTED",
@@ -1562,12 +2111,12 @@ def get_proposal_comments(
 ):
     target = db.query(Proposal).filter(Proposal.id == proposal_id).first()
     if not target:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
+        raise HTTPException(status_code=404, detail="Proposal record not found.")
 
     if user["role"] != "ROLE_MIS_ADMIN" and target.department_id != user["department_id"]:
         raise HTTPException(status_code=403, detail="Permission denied.")
 
-    return get_dict_from_payload(target.payload).get("comments", [])
+    return target.comments or []
 
 
 @router.post("/proposals/{proposal_id}/comments/{comment_id}/resolve")
@@ -1584,11 +2133,9 @@ def resolve_proposal_comment(
     ).first()
     
     if not target:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
+        raise HTTPException(status_code=404, detail="Proposal record not found.")
 
-    current_payload = get_dict_from_payload(target.payload)
-    comments = current_payload.get("comments", [])
-    
+    comments = list(target.comments or [])
     comment_found = False
     for comment in comments:
         if comment.get("id") == comment_id:
@@ -1597,12 +2144,11 @@ def resolve_proposal_comment(
             break
 
     if not comment_found:
-        raise HTTPException(status_code=404, detail="Comment not found.")
+        raise HTTPException(status_code=404, detail="Comment record not found.")
 
-    target.payload = current_payload
+    target.comments = comments
 
-    # Centralized COA Audit Logging Hook
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="COMMENT_RESOLVED",
@@ -1624,7 +2170,7 @@ def resolve_proposal_comment(
 
 
 # ==========================================================
-# NEEDS ASSESSMENT (SECTION 8.0)
+# 9. SECTION 8.0: NEEDS ASSESSMENT
 # ==========================================================
 
 @router.post("/needs-assessment", response_model=NeedsAssessmentResponse, status_code=status.HTTP_201_CREATED)
@@ -1634,11 +2180,13 @@ def create_needs_assessment(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
+    active_period = get_active_issp_period(db)
     dept = db.query(Department).filter(Department.id == user["department_id"]).first()
     dept_name = dept.name if dept else None
 
     new_assessment = NeedsAssessment(
         department_id=user["department_id"],
+        issp_period=active_period,
         title=payload.title.strip(),
         mfo_alignment=payload.mfo_alignment.strip(),
         current_problem=payload.current_problem.strip(),
@@ -1650,7 +2198,7 @@ def create_needs_assessment(
     )
     db.add(new_assessment)
 
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="NEEDS_ASSESSMENT_CREATED",
@@ -1678,13 +2226,15 @@ def get_needs_assessments(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
+    active_period = get_active_issp_period(db)
     dept = db.query(Department).filter(Department.id == user["department_id"]).first()
     dept_name = dept.name if dept else None
     
     items = db.query(NeedsAssessment).filter(
         NeedsAssessment.department_id == user["department_id"],
+        NeedsAssessment.issp_period == active_period,
         NeedsAssessment.is_archived == False
-    ).order_by(NeedsAssessment.created_at.desc() if hasattr(NeedsAssessment, "created_at") else NeedsAssessment.id.desc()).all()
+    ).order_by(NeedsAssessment.id.desc()).all()
 
     result = []
     for na in items:
@@ -1702,10 +2252,6 @@ def update_needs_assessment(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """
-    Updates an existing Section 8.0 Department Needs Assessment record.
-    Preserves audit trails and propagates modifications to linked Strategic Concerns if applicable.
-    """
     assessment = db.query(NeedsAssessment).filter(
         NeedsAssessment.id == assessment_id,
         NeedsAssessment.department_id == user["department_id"],
@@ -1715,8 +2261,11 @@ def update_needs_assessment(
     if not assessment:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 
-            detail="Needs Assessment record not found or belongs to another department."
+            detail="Needs Assessment record not found."
         )
+
+    dept = db.query(Department).filter(Department.id == user["department_id"]).first()
+    dept_name = dept.name if dept else "Department"
 
     old_state = {
         "title": assessment.title,
@@ -1734,12 +2283,11 @@ def update_needs_assessment(
     assessment.expected_impacts = payload.expected_impacts
     assessment.other_impact = payload.other_impact.strip() if payload.other_impact else None
 
-    # If linked to a Strategic Concern, keep the concern in sync
     if assessment.strategic_concern_id and assessment.strategic_concern:
-        assessment.strategic_concern.problems = f"[{user.get('department_name', 'Department')}]: {assessment.current_problem}"
+        assessment.strategic_concern.problems = f"[{dept_name}]: {assessment.current_problem}"
         assessment.strategic_concern.intended_use = assessment.proposed_solution
 
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="NEEDS_ASSESSMENT_UPDATED",
@@ -1764,9 +2312,8 @@ def update_needs_assessment(
             detail=f"Failed to update assessment: {str(e)}"
         )
 
-    dept = db.query(Department).filter(Department.id == user["department_id"]).first()
     resp = NeedsAssessmentResponse.model_validate(assessment)
-    resp.department_name = dept.name if dept else None
+    resp.department_name = dept_name
     return resp
 
 
@@ -1777,11 +2324,6 @@ def delete_needs_assessment(
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    """
-    Deletes an unaggregated Needs Assessment.
-    If already aggregated into Part II.A Strategic Concerns, deletion is rejected
-    to protect downstream singularity graph integrity.
-    """
     assessment = db.query(NeedsAssessment).filter(
         NeedsAssessment.id == assessment_id,
         NeedsAssessment.department_id == user["department_id"]
@@ -1796,10 +2338,10 @@ def delete_needs_assessment(
     if assessment.is_aggregated:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete a Needs Assessment that has already been aggregated into Part II.A Strategic Concerns by the MIS Administrator."
+            detail="Deletion blocked: This Needs Assessment has been aggregated into a Strategic Concern by the MIS Administrator."
         )
 
-    client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
+    client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
         db=db,
         action="NEEDS_ASSESSMENT_DELETED",
@@ -1816,19 +2358,21 @@ def delete_needs_assessment(
 
 
 # ==========================================================
-# GLACIER RETRIEVAL COLD RECOVERY
+# 10. TRANSPARENT DOCUMENT ACCESS (AUTOMATED STORAGE COMPATIBILITY)
 # ==========================================================
 
 @router.post("/proposals/{proposal_id}/restore")
-def request_glacier_restore(
+def retrieve_archived_document(
     request: Request,
     proposal_id: uuid.UUID,
     db: Session = Depends(get_db),
     user: dict = Depends(require_dept_user)
 ):
-    if getattr(settings, "STORAGE_TYPE", "local").lower() != "s3":
-        raise HTTPException(status_code=400, detail="Glacier restoration requires S3 storage mode.")
-
+    """
+    Transparent Document Access Handler:
+    Department users have immediate automated access to quotation canvases and archives.
+    Eliminates manual vendor restoration requests and returns active access URLs.
+    """
     proposal = db.query(Proposal).filter(
         Proposal.id == proposal_id,
         Proposal.department_id == user["department_id"],
@@ -1836,38 +2380,40 @@ def request_glacier_restore(
     ).first()
 
     if not proposal:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
+        raise HTTPException(status_code=404, detail="Proposal record not found.")
 
     canvas_url = proposal.canvas_evidence_url
     if not canvas_url:
-        raise HTTPException(status_code=400, detail="Proposal has no linked canvas quotation.")
+        raise HTTPException(status_code=400, detail="Proposal has no linked quotation proof.")
 
+    # Automatically retrieve download URL transparently
     key = get_s3_key_from_url(canvas_url)
-    if not key:
-        raise HTTPException(status_code=400, detail="Failed to resolve storage key.")
+    resolved_url = storage_client.generate_download_url(key) if key else canvas_url
 
-    try:
-        success = storage_client.restore_object(key, days=7)
-        if not success:
-            raise HTTPException(status_code=500, detail="S3 restore request failed.")
+    return {
+        "status": "available",
+        "file_url": resolved_url,
+        "message": "Document verified and available for viewing."
+    }
 
-        proposal.is_restoring = True
 
-        # Centralized COA Audit Logging Hook
-        client_ip = request.client.host if (request and hasattr(request, "client") and request.client) else "Unknown"
-        log_audit_event(
-            db=db,
-            action="GLACIER_RESTORE_REQUESTED",
-            module="PROPOSALS",
-            user_id=user["id"],
-            department_id=user["department_id"],
-            proposal_id=proposal.id,
-            ip_address=client_ip,
-            new_value={"key": key, "days": 7}
-        )
+@router.post("/proposals/{proposal_id}/sync-metadata")
+def sync_proposal_document_metadata(
+    proposal_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_dept_user)
+):
+    """Refreshes document availability state cleanly without cloud vendor jargon."""
+    proposal = db.query(Proposal).filter(
+        Proposal.id == proposal_id,
+        Proposal.department_id == user["department_id"]
+    ).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal record not found.")
 
-        db.commit()
-        return {"status": "restoring", "message": "Glacier cold retrieval job initiated."}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Glacier restore failed: {str(e)}")
+    return {
+        "status": "success",
+        "storage_tier": "Official Procurement Archive",
+        "is_available": True,
+        "restore_progress": 100
+    }

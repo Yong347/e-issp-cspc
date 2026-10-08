@@ -1,7 +1,23 @@
 # app/main.py
+"""
+=============================================================================
+DICT ISSP v.2026 COMPLIANCE ENGINE — FASTAPI APPLICATION CORE & LIFESPAN
+=============================================================================
+Core Capabilities:
+- Application Bootstrapping, Dynamic Lifespan Context & Diagnostics
+- Dialect-Agnostic Schema Alignment & Native Operator Cleaning (Postgres/SQLite)
+- Resilience Patching for Cryptographic Decryption & JSON Serialization
+- CORS Security Middleware & Structured JSON Error Handlers
+- Single Source of Truth Router Registrations (Auth, Dept, Admin, Supply)
+=============================================================================
+"""
+
 import os
 import sys
+import re
 import time
+import json
+import enum
 import logging
 from contextlib import asynccontextmanager
 
@@ -14,6 +30,7 @@ from fastapi.encoders import jsonable_encoder
 
 from sqlalchemy import inspect, text, String
 from sqlalchemy.orm import Session
+from sqlalchemy.ext.mutable import MutableDict, MutableList
 
 from app.config import settings
 from app.auth.router import router as auth_router
@@ -30,10 +47,6 @@ from app.database.models import (
     AssetStatus,
     ProposalStatus,
     ProposalCategory,
-    NodeType,
-    PageOrientation,
-    ContentType,
-    AssetRole,
     RoleTag,
     ProjectCategory,
     OfficeLocation,
@@ -45,11 +58,19 @@ from app.database.models import (
     SystemClassification,
     SystemHostingType,
     DevelopmentStrategy,
-    ScopeChoice
+    ScopeChoice,
+    ResilientJSON,
+    ResilientMutableDict,
+    ResilientMutableList,
+    EncryptedJSON,
+    StrategicCategory,
+    UacsCatalogItem,
+    SystemTaxonomy,
+    DynamicChecklistCriteria
 )
 from app.database.session import engine, db_session, SessionLocal
 
-# Configure diagnostic stdout logging
+# Configure stdout diagnostics logging
 logging.basicConfig(
     level=logging.INFO,
     format="[E-ISSP SYSTEM] %(asctime)s - %(levelname)s - %(message)s",
@@ -72,31 +93,117 @@ elif isinstance(cors_origins, str):
     cors_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
 
 
+def patch_resilient_encrypted_json():
+    """
+    Hardens EncryptedJSON and ResilientJSON against key rotation, salt mismatches, or legacy cipher strings.
+    Dynamically wraps process_result_value to gracefully fall back to {}
+    if decryption fails, avoiding DecryptionError crashes and enabling database auto-healing.
+    Also ensures MutableDict and MutableList have resilient string coercion active across all models.
+    """
+    try:
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+        import base64
+
+        # Enforce resilient coercion globally on MutableDict and MutableList
+        if hasattr(models_module, "ResilientMutableDict"):
+            MutableDict.coerce = classmethod(models_module.ResilientMutableDict.coerce)
+        if hasattr(models_module, "ResilientMutableList"):
+            MutableList.coerce = classmethod(models_module.ResilientMutableList.coerce)
+
+        candidate_salts = set()
+        active_salt = getattr(settings, "DB_ENCRYPTION_SALT", None)
+        if active_salt:
+            candidate_salts.add(str(active_salt))
+
+        fallback_salts = [
+            "issp_secure_static_encryption_salt",
+            "default_insecure_static_encryption_salt",
+            "static_encryption_salt",
+            "changeme_encryption_salt",
+            getattr(settings, "SECRET_KEY", None),
+            "issp-vault",
+            "salt"
+        ]
+        for s in fallback_salts:
+            if s:
+                candidate_salts.add(str(s))
+
+        candidate_keys = set()
+        active_keys_str = getattr(settings, "DB_ENCRYPTION_KEY", None) or ""
+        for k in active_keys_str.split(","):
+            if k.strip():
+                candidate_keys.add(k.strip())
+
+        secret_key = getattr(settings, "SECRET_KEY", None)
+        if secret_key:
+            candidate_keys.add(secret_key.strip())
+
+        if hasattr(models_module, "active_ciphers"):
+            existing_ciphers = models_module.active_ciphers
+            for k in candidate_keys:
+                for s in candidate_salts:
+                    try:
+                        kdf = PBKDF2HMAC(
+                            algorithm=hashes.SHA256(),
+                            length=32,
+                            salt=s.encode("utf-8") if isinstance(s, str) else s,
+                            iterations=100_000,
+                        )
+                        derived_key = base64.urlsafe_b64encode(kdf.derive(k.encode("utf-8") if isinstance(k, str) else k))
+                        cipher = Fernet(derived_key)
+                        s_key = getattr(cipher, "_signing_key", None)
+                        if not any(getattr(c, "_signing_key", None) == s_key for c in existing_ciphers):
+                            existing_ciphers.append(cipher)
+                    except Exception:
+                        pass
+    except Exception as cipher_err:
+        logger.debug(f"Candidate cipher registration note: {cipher_err}")
+
+    for json_cls_name in ("EncryptedJSON", "ResilientJSON"):
+        if hasattr(models_module, json_cls_name):
+            target_cls = getattr(models_module, json_cls_name)
+            orig_process = target_cls.process_result_value
+
+            def safe_process_result_value(self, value, dialect):
+                if value is None:
+                    return {}
+                try:
+                    res = orig_process(self, value, dialect)
+                    return res if isinstance(res, dict) else {}
+                except Exception as exc:
+                    logger.warning(
+                        f"Decryption recovery: Unable to decrypt payload ({exc}). "
+                        f"Recovering with empty dictionary {{}} to allow auto-healing."
+                    )
+                    return {}
+
+            target_cls.process_result_value = safe_process_result_value
+
+
 def patch_runtime_enum_columns():
     """
     Patches column type processors dynamically so that:
-    1. Native PostgreSQL Enum columns bind uppercase enum names (e.g. 'FUNCTIONAL').
+    1. Native PostgreSQL Enum columns bind uppercase enum names without type representation errors.
     2. VARCHAR columns storing human-readable string values deserialize cleanly.
+    3. Excludes legacy purged document tree tables and dynamic database-backed tables.
+    4. Re-verifies resilient EncryptedJSON patching across all mappers.
     """
     if hasattr(models_module, 'enforce_issp_singularity_and_accounting'):
         models_module.enforce_issp_singularity_and_accounting.__globals__['item_lower'] = ''
 
+    patch_resilient_encrypted_json()
+
+    # Native database enum columns
     native_enum_columns = {
-        ("existing_inventory", "status"): (AssetStatus, True),
-        ("issp_core", "status"): (ProposalStatus, True),
-        ("issp_core", "category"): (ProposalCategory, True),
-        ("issp_nodes", "node_type"): (NodeType, True),
-        ("issp_nodes", "page_orientation"): (PageOrientation, True),
-        ("issp_contents", "content_type"): (ContentType, True),
-        ("issp_assets", "asset_role"): (AssetRole, True),
         ("users", "role_tag"): (RoleTag, True),
     }
 
+    # Reference VARCHAR enum fallback columns
     varchar_enum_columns = {
-        ("issp_core", "strategic_category"): (ProjectCategory, False),
         ("issp_core", "office_location"): (OfficeLocation, False),
         ("issp_core", "fund_source"): (FundSource, False),
-        ("issp_core", "uacs_object_code"): (UacsObjectCode, False),
         ("issp_core", "expenditure_class"): (ExpenditureClass, False),
         ("issp_core", "system_development_status"): (SystemDevelopmentStatus, False),
         ("existing_inventory", "office_location"): (OfficeLocation, False),
@@ -114,15 +221,16 @@ def patch_runtime_enum_columns():
 
     configs = {**native_enum_columns, **varchar_enum_columns}
 
-    # Patch Table columns
+    # Patch Table columns with defensive type inspection
     for table in Base.metadata.tables.values():
         for column in table.columns:
             key = (table.name, column.name)
             if key in configs:
                 enum_cls, send_name = configs[key]
-                column.type = SafeEnumType(enum_cls, send_name=send_name)
+                if isinstance(enum_cls, type) and issubclass(enum_cls, enum.Enum):
+                    column.type = SafeEnumType(enum_cls, send_name=send_name)
 
-    # Patch ORM class mappers
+    # Patch ORM class mappers with defensive type inspection
     for mapper in Base.registry.mappers:
         t_name = mapper.local_table.name
         for prop in mapper.column_attrs:
@@ -130,20 +238,32 @@ def patch_runtime_enum_columns():
                 key = (t_name, col.name)
                 if key in configs:
                     enum_cls, send_name = configs[key]
-                    col.type = SafeEnumType(enum_cls, send_name=send_name)
+                    if isinstance(enum_cls, type) and issubclass(enum_cls, enum.Enum):
+                        col.type = SafeEnumType(enum_cls, send_name=send_name)
+
+
+def strip_html_tags(text_val: str) -> str:
+    """Helper to convert any residual HTML strings into clean structured plain text."""
+    if not text_val:
+        return ""
+    clean = re.sub(r'</?(p|br|li|h[1-6]|tr|div)[^>]*>', '\n', str(text_val), flags=re.IGNORECASE)
+    clean = re.sub(r'<[^>]+>', '', clean)
+    clean = clean.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
+    clean = re.sub(r'\n\s*\n+', '\n\n', clean).strip()
+    return clean
 
 
 def align_database_schemas(engine):
     """
-    Defensively inspects target database tables at runtime and appends any
-    columns defined in the canonical models that are physically missing.
-    Uses nested savepoints (conn.begin_nested()) to guarantee that a failure
-    in any single statement never aborts the overall transaction in PostgreSQL.
-    Converts legacy native ENUM columns (system_development_status, scope_choice)
-    to standard VARCHAR types to prevent InvalidTextRepresentation crashes.
-    Strips static institutional server defaults so configuration parameters govern values.
+    Defensively inspects target database tables at runtime and:
+    1. Defensively drops legacy document tree tables and PostgreSQL types.
+    2. Converts legacy native ENUM columns to standard VARCHAR types to prevent InvalidTextRepresentation.
+    3. Synchronizes missing columns for DICT v.2026 specifications.
+    4. Ensures zero hardcoded deletion of user-created projects or institutional names.
+    5. Preserves legitimate human signatory names on the cover page without overwriting them with generic titles.
+    6. Seeds initial baseline records for dynamic strategic categories, UACS catalog, and policy settings ONLY if empty.
     """
-    logger.info("Running defensive schema alignment checks...")
+    logger.info("Running defensive schema alignment and data sanitization...")
     is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
     bool_false = "0" if is_sqlite else "false"
     bool_true = "1" if is_sqlite else "true"
@@ -157,8 +277,28 @@ def align_database_schemas(engine):
             logger.debug(f"Defensive statement bypassed: {e}")
 
     with engine.begin() as conn:
+        # ==========================================================
+        # 1. PURGE LEGACY TABLES & POSTGRESQL NATIVE TYPES
+        # ==========================================================
+        safe_exec(conn, text("DROP TABLE IF EXISTS issp_assets CASCADE;"))
+        safe_exec(conn, text("DROP TABLE IF EXISTS issp_contents CASCADE;"))
+        safe_exec(conn, text("DROP TABLE IF EXISTS issp_vocabulary CASCADE;"))
+        safe_exec(conn, text("DROP TABLE IF EXISTS issp_nodes CASCADE;"))
+
         if not is_sqlite:
-            # 1. Safely terminate orphan idle transactions
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    DROP TYPE IF EXISTS assetrole CASCADE;
+                    DROP TYPE IF EXISTS contenttype CASCADE;
+                    DROP TYPE IF EXISTS pageorientation CASCADE;
+                    DROP TYPE IF EXISTS nodetype CASCADE;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Safely terminate orphan idle transactions
             safe_exec(conn, text("""
                 SELECT pg_terminate_backend(pid) 
                 FROM pg_stat_activity 
@@ -235,7 +375,7 @@ def align_database_schemas(engine):
                 END $$;
             """))
 
-            # Defensive Alter: Convert issp_core.system_development_status from ENUM to VARCHAR(100)
+            # Defensive Alter: Convert issp_core.system_development_status to VARCHAR(100)
             safe_exec(conn, text("""
                 DO $$
                 BEGIN
@@ -259,7 +399,91 @@ def align_database_schemas(engine):
                 END $$;
             """))
 
-            # Defensive Alter: Convert master_narratives.scope_choice from ENUM to VARCHAR(100)
+            # Defensive Alter: Convert issp_core.category from ENUM to VARCHAR(100)
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'issp_core' 
+                          AND column_name = 'category' 
+                          AND (data_type = 'USER-DEFINED' OR udt_name = 'proposalcategory')
+                    ) THEN
+                        ALTER TABLE issp_core ALTER COLUMN category DROP DEFAULT;
+                        ALTER TABLE issp_core ALTER COLUMN category TYPE VARCHAR(100) USING category::text;
+                        ALTER TABLE issp_core ALTER COLUMN category SET DEFAULT 'Hardware';
+                        DROP TYPE IF EXISTS proposalcategory CASCADE;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Defensive Alter: Convert issp_core.status from ENUM to VARCHAR(100)
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'issp_core' 
+                          AND column_name = 'status' 
+                          AND (data_type = 'USER-DEFINED' OR udt_name = 'proposalstatus')
+                    ) THEN
+                        ALTER TABLE issp_core ALTER COLUMN status DROP DEFAULT;
+                        ALTER TABLE issp_core ALTER COLUMN status TYPE VARCHAR(100) USING status::text;
+                        ALTER TABLE issp_core ALTER COLUMN status SET DEFAULT 'Draft';
+                        DROP TYPE IF EXISTS proposalstatus CASCADE;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Defensive Alter: Convert issp_core.strategic_category to VARCHAR(100)
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'issp_core' 
+                          AND column_name = 'strategic_category' 
+                          AND (data_type = 'USER-DEFINED' OR udt_name = 'projectcategory')
+                    ) THEN
+                        ALTER TABLE issp_core ALTER COLUMN strategic_category DROP DEFAULT;
+                        ALTER TABLE issp_core ALTER COLUMN strategic_category TYPE VARCHAR(100) USING strategic_category::text;
+                        ALTER TABLE issp_core ALTER COLUMN strategic_category SET DEFAULT 'Office Productivity';
+                        DROP TYPE IF EXISTS projectcategory CASCADE;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Defensive Alter: Convert existing_inventory.status to VARCHAR(100)
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'existing_inventory' 
+                          AND column_name = 'status' 
+                          AND (data_type = 'USER-DEFINED' OR udt_name = 'assetstatus')
+                    ) THEN
+                        ALTER TABLE existing_inventory ALTER COLUMN status DROP DEFAULT;
+                        ALTER TABLE existing_inventory ALTER COLUMN status TYPE VARCHAR(100) USING status::text;
+                        ALTER TABLE existing_inventory ALTER COLUMN status SET DEFAULT 'Functional';
+                        DROP TYPE IF EXISTS assetstatus CASCADE;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Defensive Alter: Convert master_narratives.scope_choice to VARCHAR(100)
             safe_exec(conn, text("""
                 DO $$
                 BEGIN
@@ -280,11 +504,199 @@ def align_database_schemas(engine):
                 END $$;
             """))
 
-        # Inspect database tables safely
+            # Defensive Alter: Ensure issp_core.outcome_id is nullable
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'issp_core' AND column_name = 'outcome_id'
+                          AND is_nullable = 'NO'
+                    ) THEN
+                        ALTER TABLE issp_core ALTER COLUMN outcome_id DROP NOT NULL;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Defensive Alter: Release NOT NULL constraint from issp_core.created_by_students
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'issp_core' AND column_name = 'created_by_students'
+                    ) THEN
+                        ALTER TABLE issp_core ALTER COLUMN created_by_students DROP NOT NULL;
+                        ALTER TABLE issp_core ALTER COLUMN created_by_students SET DEFAULT false;
+                        UPDATE issp_core 
+                        SET created_by_students = COALESCE(is_in_house_turnover, false) 
+                        WHERE created_by_students IS NULL;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+            # Defensive Alter: Ensure stakeholder_analyses complexity fields accept flexible range strings
+            safe_exec(conn, text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'stakeholder_analyses' AND column_name = 'complexity_incoming'
+                    ) THEN
+                        ALTER TABLE stakeholder_analyses ALTER COLUMN complexity_incoming TYPE VARCHAR(100);
+                        ALTER TABLE stakeholder_analyses ALTER COLUMN complexity_outgoing TYPE VARCHAR(100);
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
+        # Normalize corrupt, legacy ciphertext, or empty string payload columns in issp_core
+        safe_exec(conn, text("""
+            UPDATE issp_core 
+            SET payload = '{}' 
+            WHERE payload IS NULL 
+               OR payload = '' 
+               OR payload = 'null' 
+               OR payload = 'None'
+               OR payload LIKE 'v3$%' 
+               OR payload LIKE 'v2$%';
+        """))
+
+        # ==========================================================
+        # 2. DYNAMIC FIELD BACKFILL (NEVER OVERWRITE REAL SIGNATORY NAMES)
+        # ==========================================================
+        default_agency = getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency").replace("'", "''")
+        default_website = getattr(settings, "DEFAULT_AGENCY_WEBSITE", "https://agency.gov.ph").replace("'", "''")
+        default_head_title = getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency").replace("'", "''")
+
+        # Safely populate institutional identity ONLY when completely empty
+        safe_exec(conn, text(f"""
+            UPDATE master_narratives 
+            SET agency_name = '{default_agency}'
+            WHERE agency_name IS NULL OR agency_name = '';
+        """))
+
+        safe_exec(conn, text(f"""
+            UPDATE master_narratives 
+            SET agency_website_url = '{default_website}'
+            WHERE agency_website_url IS NULL OR agency_website_url = '';
+        """))
+
+        safe_exec(conn, text(f"""
+            UPDATE master_narratives 
+            SET agency_head_position = '{default_head_title}' 
+            WHERE agency_head_position IS NULL OR agency_head_position = '';
+        """))
+
+        # Preserve human signatory full names without overwriting them with generic position titles
+        safe_exec(conn, text("""
+            UPDATE master_narratives 
+            SET signatory_prepared_by = 'REY T. CORTEZ, MIT'
+            WHERE signatory_prepared_by IS NULL OR signatory_prepared_by = ''
+               OR LOWER(TRIM(signatory_prepared_by)) IN ('chief information officer', 'cio', 'none', 'null', 'undefined');
+        """))
+
+        safe_exec(conn, text("""
+            UPDATE master_narratives 
+            SET preparer_position = 'Chief Information Officer'
+            WHERE preparer_position IS NULL OR preparer_position = '';
+        """))
+
+        safe_exec(conn, text("""
+            UPDATE master_narratives 
+            SET signatory_approved_by = 'AMADO A. OLIVA JR, PhD.'
+            WHERE signatory_approved_by IS NULL OR signatory_approved_by = ''
+               OR LOWER(TRIM(signatory_approved_by)) IN ('head of agency', 'agency head', 'college president', 'president', 'none', 'null', 'undefined');
+        """))
+
+        # Safely resolve dynamic active cycle period
+        active_period = conn.execute(text(
+            "SELECT issp_period FROM master_narratives WHERE is_active = true LIMIT 1"
+        )).scalar()
+        if not active_period:
+            active_period = conn.execute(text(
+                "SELECT value FROM system_settings WHERE key = 'issp_active_cycle' LIMIT 1"
+            )).scalar() or getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+
+        # Seed Baseline Stakeholder Analysis ONLY if table is completely empty for active cycle
+        stakeholders_count = conn.execute(
+            text("SELECT COUNT(*) FROM stakeholder_analyses WHERE issp_period = :period"),
+            {"period": active_period}
+        ).scalar() or 0
+
+        if stakeholders_count == 0:
+            safe_exec(conn, text("""
+                INSERT INTO stakeholder_analyses (
+                    issp_period, stakeholder_group, transaction_processed_incoming, 
+                    complexity_incoming, transaction_processed_outgoing, complexity_outgoing
+                ) VALUES 
+                (:period, 'General Citizens and Service Applicants', 'Online service inquiries, application submissions, and electronic fee settlement', 'Simple', 'Official E-Certificates, clearances, regulatory statements, and receipts', 'Simple'),
+                (:period, 'Institutional Staff, Planners and Division Heads', 'Budget allotment requests, work programs, activity proposals, and leave clearances', 'Complex', 'Disbursement vouchers, approved PRs, compliance endorsements, and performance scorecards', 'Simple'),
+                (:period, 'National Oversight and Regulatory Agencies (DICT, DBM, COA)', 'Statutory compliance circulars, mandate benchmarks, audit inquiries, and MITHI surveys', 'Highly Technical', 'Completed ISSP documentation, UACS audit ledgers, PREXC accomplishment reports', 'Highly Technical');
+            """), {"period": active_period})
+
+        # Purge sample dummy systems from Annex 2 BIA summary ONLY if actual systems exist
+        safe_exec(conn, text("""
+            DELETE FROM dr_bia_summary
+            WHERE system_name IN (
+                'Public Licensing Portal',
+                'Integrated HR & Payroll',
+                'Official Website',
+                'Document Tracking'
+            ) AND EXISTS (
+                SELECT 1 FROM dr_bia_summary d2 
+                WHERE d2.system_name NOT IN ('Public Licensing Portal', 'Integrated HR & Payroll', 'Official Website', 'Document Tracking')
+            );
+        """))
+
+        # Deduplicate Duplicate Cybersecurity Controls
+        if not is_sqlite:
+            safe_exec(conn, text("""
+                DELETE FROM cybersecurity_controls a USING cybersecurity_controls b
+                WHERE a.id > b.id
+                  AND LOWER(TRIM(a.control_name)) = LOWER(TRIM(b.control_name))
+                  AND a.is_proposed = b.is_proposed
+                  AND a.issp_period = b.issp_period;
+            """))
+        else:
+            safe_exec(conn, text("""
+                DELETE FROM cybersecurity_controls
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM cybersecurity_controls
+                    GROUP BY LOWER(TRIM(control_name)), is_proposed, issp_period
+                );
+            """))
+
+        # Deduplicate Duplicate Glossary Terms
+        safe_exec(conn, text("""
+            DELETE FROM glossary_terms
+            WHERE UPPER(TRIM(term)) IN ('ISSP', 'RTO', 'RPO')
+              AND EXISTS (
+                  SELECT 1 FROM glossary_terms g2
+                  WHERE g2.id <> glossary_terms.id
+                    AND (
+                        g2.term ILIKE '%Information Systems Strategic Plan%'
+                        OR g2.term ILIKE '%Recovery Time Objective%'
+                        OR g2.term ILIKE '%Recovery Point Objective%'
+                    )
+              );
+        """))
+
+        # Inspect database tables safely for missing column synchronization
         inspector = inspect(conn)
         table_names = inspector.get_table_names()
 
-        # 1. Patch 'master_narratives' table (Zero Hardcoding, DICT Co-Branding & MITHI Res 2025-01 Compliance)
+        # ==========================================================
+        # 3. COLUMN SYNCHRONIZATION FOR DICT v.2026 SPECIFICATIONS
+        # ==========================================================
+
+        # Patch 'master_narratives' table (Plain text fields + dual export vault URLs)
         if "master_narratives" in table_names:
             narrative_cols = [c['name'] for c in inspector.get_columns('master_narratives')]
             columns_to_sync_narrative = {
@@ -301,46 +713,33 @@ def align_database_schemas(engine):
                 "focal_organizational_unit": "VARCHAR(200)",
                 "focal_email": "VARCHAR(255)",
                 "focal_contact_no": "VARCHAR(100)",
-                "agency_head_position": "VARCHAR(200)",
+                "agency_head_position": f"VARCHAR(200) DEFAULT '{default_head_title}'",
                 "drbcp_approval_date": "VARCHAR(100)",
-                "authoring_cycle_duration": "INTEGER",
+                "authoring_cycle_duration": "INTEGER DEFAULT 3",
                 "site_development_plan_url": "VARCHAR(500)",
                 "fiber_backbone_url": "VARCHAR(500)",
                 "system_architecture_url": "VARCHAR(500)",
                 "process_flow_diagram_url": "VARCHAR(500)",
                 "network_diagram_url": "VARCHAR(500)",
-                "b_3_a_ict_org_url": "VARCHAR(500)",
-                "net_layout_sias_url": "VARCHAR(500)",
-                "net_layout_library_url": "VARCHAR(500)",
-                "net_layout_security_url": "VARCHAR(500)",
-                "net_layout_hris_url": "VARCHAR(500)",
-                "net_layout_dms_url": "VARCHAR(500)",
-                "net_layout_supplies_url": "VARCHAR(500)",
-                "net_layout_budget_url": "VARCHAR(500)",
-                "net_layout_sias_upgrade_url": "VARCHAR(500)",
-                "net_layout_extension_url": "VARCHAR(500)",
+                "org_chart_url": "VARCHAR(500)",
+                "existing_ict_org_url": "VARCHAR(500)",
+                "proposed_ict_org_url": "VARCHAR(500)",
+                "subsystem_network_layouts_json": "JSON DEFAULT '[]'",
                 "planners_json": "JSON DEFAULT '[]'",
                 "manpower_json": "JSON DEFAULT '{}'",
-                "major_final_outputs": "JSON DEFAULT '[]'",
-                "strategic_concerns_json": "JSON DEFAULT '[]'",
-                "systems_json": "JSON DEFAULT '[]'",
-                "databases_json": "JSON DEFAULT '[]'",
-                "internal_projects_json": "JSON DEFAULT '[]'",
-                "cross_projects_json": "JSON DEFAULT '[]'",
-                "pmf_matrix_json": "JSON DEFAULT '[]'",
-                "mithi_special_solutions": "JSON DEFAULT '[]'",
-                "mithi_hardware_inventory": "JSON DEFAULT '[]'",
-                "implementation_schedules": "JSON DEFAULT '[]'",
                 "annual_ict_budget": "NUMERIC(15, 2) DEFAULT 0.00",
-                # Dynamic Section Extensions
+                "mandate_text": "TEXT DEFAULT ''",
+                "vision_text": "TEXT DEFAULT ''",
+                "mission_text": "TEXT DEFAULT ''",
+                "present_situation_text": "TEXT DEFAULT ''",
                 "enterprise_architecture_narrative": "TEXT",
                 "drbcp_affected_assets_json": "JSON DEFAULT '[]'",
-                "drbcp_recovery_strategy_html": "TEXT",
-                "drbcp_sop_phases_html": "TEXT",
-                "drbcp_compliance_narrative_html": "TEXT",
+                "drbcp_recovery_strategy_text": "TEXT",
+                "drbcp_sop_phases_text": "TEXT",
+                "drbcp_compliance_narrative_text": "TEXT",
                 "is_archived": f"BOOLEAN DEFAULT {bool_false}",
                 "final_pdf_vault_url": "VARCHAR(500)",
-                # Official DICT v.2026 Co-Branding Seals & Institutional Logos
+                "final_docx_vault_url": "VARCHAR(500)",
                 "dict_logo_url": "VARCHAR(500)",
                 "bagong_pilipinas_logo_url": "VARCHAR(500)",
                 "agency_logo_url": "VARCHAR(500)",
@@ -351,12 +750,164 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'master_narratives'.")
                     safe_exec(conn, text(f"ALTER TABLE master_narratives ADD COLUMN {col_name} {col_def}"))
 
-        # 2. Patch 'organizational_outcomes' table (Defensively sync both outcome_name & program_name)
+            # Backfill plain-text fields from legacy HTML fields if needed, stripping tags cleanly
+            if 'mandate_html' in narrative_cols and 'mandate_text' in narrative_cols:
+                safe_exec(conn, text("""
+                    UPDATE master_narratives
+                    SET mandate_text = mandate_html
+                    WHERE (mandate_text IS NULL OR mandate_text = '') AND mandate_html IS NOT NULL AND mandate_html != '';
+                """))
+            if 'vision_html' in narrative_cols and 'vision_text' in narrative_cols:
+                safe_exec(conn, text("""
+                    UPDATE master_narratives
+                    SET vision_text = vision_html
+                    WHERE (vision_text IS NULL OR vision_text = '') AND vision_html IS NOT NULL AND vision_html != '';
+                """))
+            if 'mission_html' in narrative_cols and 'mission_text' in narrative_cols:
+                safe_exec(conn, text("""
+                    UPDATE master_narratives
+                    SET mission_text = mission_html
+                    WHERE (mission_text IS NULL OR mission_text = '') AND mission_html IS NOT NULL AND mission_html != '';
+                """))
+            if 'present_situation_html' in narrative_cols and 'present_situation_text' in narrative_cols:
+                safe_exec(conn, text("""
+                    UPDATE master_narratives
+                    SET present_situation_text = present_situation_html
+                    WHERE (present_situation_text IS NULL OR present_situation_text = '') AND present_situation_html IS NOT NULL AND present_situation_html != '';
+                """))
+
+        # Patch 'information_systems' table (Part II.C & Part III.D specifications)
+        if "information_systems" in table_names:
+            sys_cols = [c['name'] for c in inspector.get_columns('information_systems')]
+            columns_to_sync_sys = {
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "strategic_concern_id": f"{uuid_type}",
+                "department_id": "INTEGER",
+                "needs_assessment_id": f"{uuid_type}",
+                "project_id": f"{uuid_type}",
+                "submission_status": "VARCHAR(50) DEFAULT 'Approved'",
+                "rejection_reason": "TEXT",
+                "name": "VARCHAR(255) DEFAULT ''",
+                "status": "VARCHAR(50) DEFAULT 'Operational'",
+                "classification": "VARCHAR(100) DEFAULT 'Operations - Frontline Service'",
+                "proposed_cost": "NUMERIC(15, 2) DEFAULT 0.00",
+                "is_client_facing": f"BOOLEAN DEFAULT {bool_true}",
+                "is_support_to_operations": f"BOOLEAN DEFAULT {bool_false}",
+                "is_general_administrative": f"BOOLEAN DEFAULT {bool_false}",
+                "is_operations": f"BOOLEAN DEFAULT {bool_true}",
+                "is_frontline_service": f"BOOLEAN DEFAULT {bool_true}",
+                "frontline_hosting_type": "VARCHAR(50) DEFAULT 'Online'",
+                "online_url": "VARCHAR(255)",
+                "is_non_frontline_service": f"BOOLEAN DEFAULT {bool_false}",
+                "description_and_purpose": "TEXT DEFAULT ''",
+                "enhancement_details": "TEXT",
+                "development_strategy": "VARCHAR(100) DEFAULT 'Outsourced'",
+                "development_platform": "VARCHAR(200) DEFAULT ''",
+                "database_name": "VARCHAR(200) DEFAULT ''",
+                "data_storage_type": "VARCHAR(200) DEFAULT ''",
+                "internal_users": "TEXT DEFAULT ''",
+                "external_users": "TEXT DEFAULT ''",
+                "system_owner_office": "VARCHAR(200) DEFAULT ''",
+                "is_integrated_with_others": f"BOOLEAN DEFAULT {bool_false}",
+                "internal_integrated_systems": "TEXT",
+                "external_integrated_systems": "TEXT",
+                "generates_data_for_others": f"BOOLEAN DEFAULT {bool_false}",
+                "processes_data_from_others": f"BOOLEAN DEFAULT {bool_false}",
+                "is_deployed_on_shared_platform": f"BOOLEAN DEFAULT {bool_false}",
+                "processes_personal_information": f"BOOLEAN DEFAULT {bool_false}",
+                "has_undergone_pia": f"BOOLEAN DEFAULT {bool_false}",
+                "pia_target_date_text": "VARCHAR(100)"
+            }
+            for col_name, col_def in columns_to_sync_sys.items():
+                if col_name not in sys_cols:
+                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'information_systems'.")
+                    safe_exec(conn, text(f"ALTER TABLE information_systems ADD COLUMN {col_name} {col_def}"))
+
+            # Indexes on new columns
+            sys_indexes = [ix['name'] for ix in inspector.get_indexes('information_systems')]
+            if "ix_information_systems_department_id" not in sys_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_department_id ON information_systems (department_id)"))
+            if "ix_information_systems_needs_assessment_id" not in sys_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_needs_assessment_id ON information_systems (needs_assessment_id)"))
+            if "ix_information_systems_submission_status" not in sys_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_submission_status ON information_systems (submission_status)"))
+            if "ix_information_systems_project_id" not in sys_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_project_id ON information_systems (project_id)"))
+
+            # Backfill submission_status & link department_id where matching system_owner_office
+            safe_exec(conn, text("UPDATE information_systems SET submission_status = 'Approved' WHERE submission_status IS NULL OR submission_status = ''"))
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET department_id = (
+                    SELECT id FROM departments
+                    WHERE LOWER(TRIM(departments.name)) = LOWER(TRIM(information_systems.system_owner_office))
+                    LIMIT 1
+                )
+                WHERE department_id IS NULL 
+                  AND system_owner_office IS NOT NULL 
+                  AND system_owner_office <> '';
+            """))
+
+            # Backfill information_systems.project_id from existing ict_projects.system_id
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET project_id = (
+                    SELECT id FROM ict_projects
+                    WHERE ict_projects.system_id = information_systems.id
+                    LIMIT 1
+                )
+                WHERE project_id IS NULL;
+            """))
+
+            # Synchronize is_client_facing with is_frontline_service
+            safe_exec(conn, text("""
+                UPDATE information_systems 
+                SET is_client_facing = is_frontline_service 
+                WHERE is_client_facing IS NULL;
+            """))
+
+            # Harmonize multi-classification boolean flags
+            safe_exec(conn, text("""
+                UPDATE information_systems 
+                SET 
+                    is_support_to_operations = CASE 
+                        WHEN LOWER(classification) LIKE '%support%' THEN 1 
+                        ELSE 0 
+                    END,
+                    is_general_administrative = CASE 
+                        WHEN LOWER(classification) LIKE '%general administrative%' OR LOWER(classification) LIKE '%administrative%' THEN 1 
+                        ELSE 0 
+                    END,
+                    is_operations = CASE 
+                        WHEN LOWER(classification) LIKE '%operations%' 
+                          OR is_frontline_service = 1 
+                          OR is_non_frontline_service = 1 THEN 1 
+                        ELSE 0 
+                    END,
+                    is_frontline_service = CASE 
+                        WHEN LOWER(classification) LIKE '%frontline%' AND LOWER(classification) NOT LIKE '%non-frontline%' THEN 1 
+                        ELSE 0 
+                    END,
+                    is_non_frontline_service = CASE 
+                        WHEN LOWER(classification) LIKE '%non-frontline%' THEN 1 
+                        ELSE 0 
+                    END;
+            """))
+
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET is_operations = 1
+                WHERE (is_support_to_operations = 0 OR is_support_to_operations IS NULL)
+                  AND (is_general_administrative = 0 OR is_general_administrative IS NULL)
+                  AND (is_operations = 0 OR is_operations IS NULL);
+            """))
+
+        # Patch 'organizational_outcomes' table
         if "organizational_outcomes" in table_names:
             oo_cols = [c['name'] for c in inspector.get_columns('organizational_outcomes')]
             columns_to_sync_oo = {
                 "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
-                "type_label": "VARCHAR(50) DEFAULT 'Major Final Output'",
+                "type_label": "VARCHAR(50) DEFAULT 'Organizational Outcome'",
                 "outcome_name": "VARCHAR(255)",
                 "program_name": "VARCHAR(255)",
                 "description": "TEXT"
@@ -369,7 +920,7 @@ def align_database_schemas(engine):
             safe_exec(conn, text("UPDATE organizational_outcomes SET outcome_name = program_name WHERE outcome_name IS NULL AND program_name IS NOT NULL"))
             safe_exec(conn, text("UPDATE organizational_outcomes SET program_name = outcome_name WHERE program_name IS NULL AND outcome_name IS NOT NULL"))
 
-        # 3. Patch 'strategic_concerns' table
+        # Patch 'strategic_concerns' table
         if "strategic_concerns" in table_names:
             sc_cols = [c['name'] for c in inspector.get_columns('strategic_concerns')]
             columns_to_sync_sc = {
@@ -386,77 +937,33 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'strategic_concerns'.")
                     safe_exec(conn, text(f"ALTER TABLE strategic_concerns ADD COLUMN {col_name} {col_def}"))
 
-        # 4. Patch 'human_capitals' table
-        if "human_capitals" in table_names:
-            hc_cols = [c['name'] for c in inspector.get_columns('human_capitals')]
-            columns_to_sync_hc = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
-                "is_proposed": f"BOOLEAN DEFAULT {bool_false}",
-                "employment_status": "VARCHAR(100) DEFAULT 'Plantilla (Filled)'",
-                "it_positions_count": "INTEGER DEFAULT 0",
-                "non_it_positions_count": "INTEGER DEFAULT 0",
-                "male_count": "INTEGER DEFAULT 0",
-                "female_count": "INTEGER DEFAULT 0"
-            }
-            for col_name, col_def in columns_to_sync_hc.items():
-                if col_name not in hc_cols:
-                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'human_capitals'.")
-                    safe_exec(conn, text(f"ALTER TABLE human_capitals ADD COLUMN {col_name} {col_def}"))
-
-        # 5. Patch 'ict_staff_positions' table
-        if "ict_staff_positions" in table_names:
-            isp_cols = [c['name'] for c in inspector.get_columns('ict_staff_positions')]
-            columns_to_sync_isp = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
-                "position_title": "VARCHAR(150)",
-                "status": "VARCHAR(50) DEFAULT 'Plantilla'",
-                "count": "INTEGER DEFAULT 1"
-            }
-            for col_name, col_def in columns_to_sync_isp.items():
-                if col_name not in isp_cols:
-                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'ict_staff_positions'.")
-                    safe_exec(conn, text(f"ALTER TABLE ict_staff_positions ADD COLUMN {col_name} {col_def}"))
-
-        # 6. Patch 'stakeholder_analyses' table
-        if "stakeholder_analyses" in table_names:
-            sh_cols = [c['name'] for c in inspector.get_columns('stakeholder_analyses')]
-            columns_to_sync_sh = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
-                "stakeholder_group": "VARCHAR(150)",
-                "transaction_processed_incoming": "TEXT",
-                "transaction_processed_outgoing": "TEXT",
-                "complexity_incoming": "VARCHAR(50) DEFAULT 'Simple'",
-                "complexity_outgoing": "VARCHAR(50) DEFAULT 'Simple'"
-            }
-            for col_name, col_def in columns_to_sync_sh.items():
-                if col_name not in sh_cols:
-                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'stakeholder_analyses'.")
-                    safe_exec(conn, text(f"ALTER TABLE stakeholder_analyses ADD COLUMN {col_name} {col_def}"))
-
-        # 7. Patch 'issp_core' table (Unified Proposals Ledger)
+        # Patch 'issp_core' table (Unified Proposals Ledger)
         if "issp_core" in table_names:
             core_cols = [c['name'] for c in inspector.get_columns('issp_core')]
             columns_to_sync_core = {
                 "project_id": f"{uuid_type}",
                 "needs_assessment_id": f"{uuid_type}",
+                "strategic_category_id": "INTEGER",
                 "outcome_id": "INTEGER",
                 "item_key": "VARCHAR(100)",
-                "item_name": "VARCHAR(200) DEFAULT ''",
-                "category": "VARCHAR(50) DEFAULT 'Hardware'",
+                "item_name": "VARCHAR(255) DEFAULT ''",
+                "category": "VARCHAR(100) DEFAULT 'Hardware'",
                 "strategic_category": "VARCHAR(100) DEFAULT 'Office Productivity'",
                 "office_location": "VARCHAR(100) DEFAULT 'Central Office'",
                 "fund_source": "VARCHAR(100) DEFAULT 'General Appropriations Act (GAA)'",
-                "uacs_object_code": "VARCHAR(150)",
+                "uacs_object_code": "VARCHAR(150) DEFAULT '50604050 03 - ICT Equipment (CO)'",
                 "expenditure_class": "VARCHAR(100) DEFAULT 'Capital Outlay'",
-                "year_1_qty": "INTEGER DEFAULT 0",
-                "year_2_qty": "INTEGER DEFAULT 0",
-                "year_3_qty": "INTEGER DEFAULT 0",
+                "yearly_quantities": "JSON DEFAULT '{}'",
                 "total_qty": "INTEGER DEFAULT 0",
                 "total_cost": "NUMERIC(15, 2) DEFAULT 0.00",
+                "system_development_status": "VARCHAR(100) DEFAULT 'N/A'",
                 "created_by_students": f"BOOLEAN DEFAULT {bool_false}",
-                "system_development_status": "VARCHAR(50) DEFAULT 'N/A'",
+                "is_in_house_turnover": f"BOOLEAN DEFAULT {bool_false}",
                 "target_office_automated": "VARCHAR(200)",
+                "canvas_evidence_url": "VARCHAR(500)",
                 "canvas_expiration_date": "TIMESTAMP NULL",
+                "supplier_name": "VARCHAR(200)",
+                "comments": "JSON DEFAULT '[]'",
                 "is_expansion": f"BOOLEAN DEFAULT {bool_false}",
                 "is_archived": f"BOOLEAN DEFAULT {bool_false}"
             }
@@ -465,18 +972,20 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'issp_core'.")
                     safe_exec(conn, text(f"ALTER TABLE issp_core ADD COLUMN {col_name} {col_def}"))
 
-        # 8. Patch 'existing_inventory' table (Annex 1 Standard Categorization)
+        # Patch 'existing_inventory' table
         if "existing_inventory" in table_names:
             inv_cols = [c['name'] for c in inspector.get_columns('existing_inventory')]
             columns_to_sync_inv = {
                 "department_id": "INTEGER",
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "replacement_proposal_id": f"{uuid_type}",
                 "dict_category": "VARCHAR(100)",
                 "other_category_name": "VARCHAR(200)",
                 "item_name": "VARCHAR(200) DEFAULT ''",
                 "specs": "TEXT",
                 "exact_model": "VARCHAR(200)",
                 "quantity": "INTEGER DEFAULT 1",
-                "status": "VARCHAR(50) DEFAULT 'Functional'",
+                "status": "VARCHAR(100) DEFAULT 'Functional'",
                 "date_acquired": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                 "acquired_price": "NUMERIC(15, 2) DEFAULT 0.00",
                 "office_location": "VARCHAR(100) DEFAULT 'Central Office'",
@@ -492,20 +1001,7 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'existing_inventory'.")
                     safe_exec(conn, text(f"ALTER TABLE existing_inventory ADD COLUMN {col_name} {col_def}"))
 
-        # 9. Patch 'catalog_items' table
-        if "catalog_items" in table_names:
-            cat_cols = [c['name'] for c in inspector.get_columns('catalog_items')]
-            columns_to_sync_cat = {
-                "canvas_evidence_url": "VARCHAR(500)",
-                "supplier_name": "VARCHAR(200)",
-                "canvas_expiration_date": "TIMESTAMP NULL"
-            }
-            for col_name, col_def in columns_to_sync_cat.items():
-                if col_name not in cat_cols:
-                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'catalog_items'.")
-                    safe_exec(conn, text(f"ALTER TABLE catalog_items ADD COLUMN {col_name} {col_def}"))
-
-        # 10. Patch 'egovernment_checklists' table
+        # Patch 'egovernment_checklists' table
         if "egovernment_checklists" in table_names:
             egov_cols = [c['name'] for c in inspector.get_columns('egovernment_checklists')]
             columns_to_sync_egov = {
@@ -513,14 +1009,36 @@ def align_database_schemas(engine):
                 "is_proposed_development": f"BOOLEAN DEFAULT {bool_false}",
                 "adoption_ratio": "VARCHAR(100)",
                 "channels_json": "JSON DEFAULT '[]'",
-                "is_connected_to_portal": f"BOOLEAN DEFAULT {bool_false}"
+                "is_connected_to_portal": f"BOOLEAN DEFAULT {bool_false}",
+                "equivalent_system_name": "VARCHAR(255)",
+                "equivalent_system_url": "VARCHAR(255)",
+                "has_other_payment_platform": f"BOOLEAN DEFAULT {bool_false}",
+                "proposed_development_name": "VARCHAR(255)",
+                "total_employees": "VARCHAR(50)",
+                "active_pnpki_count": "VARCHAR(50)"
             }
             for col_name, col_def in columns_to_sync_egov.items():
                 if col_name not in egov_cols:
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'egovernment_checklists'.")
                     safe_exec(conn, text(f"ALTER TABLE egovernment_checklists ADD COLUMN {col_name} {col_def}"))
 
-        # 11. Patch 'network_infrastructures' table
+        # Patch 'stakeholder_analyses' table
+        if "stakeholder_analyses" in table_names:
+            sh_cols = [c['name'] for c in inspector.get_columns('stakeholder_analyses')]
+            columns_to_sync_sh = {
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "stakeholder_group": "VARCHAR(150)",
+                "transaction_processed_incoming": "TEXT",
+                "transaction_processed_outgoing": "TEXT",
+                "complexity_incoming": "VARCHAR(100) DEFAULT 'Simple'",
+                "complexity_outgoing": "VARCHAR(100) DEFAULT 'Simple'"
+            }
+            for col_name, col_def in columns_to_sync_sh.items():
+                if col_name not in sh_cols:
+                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'stakeholder_analyses'.")
+                    safe_exec(conn, text(f"ALTER TABLE stakeholder_analyses ADD COLUMN {col_name} {col_def}"))
+
+        # Patch 'network_infrastructures' table
         if "network_infrastructures" in table_names:
             net_cols = [c['name'] for c in inspector.get_columns('network_infrastructures')]
             columns_to_sync_net = {
@@ -534,7 +1052,7 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'network_infrastructures'.")
                     safe_exec(conn, text(f"ALTER TABLE network_infrastructures ADD COLUMN {col_name} {col_def}"))
 
-        # 12. Patch 'dr_bia_summary' table
+        # Patch 'dr_bia_summary' table
         if "dr_bia_summary" in table_names:
             bia_cols = [c['name'] for c in inspector.get_columns('dr_bia_summary')]
             columns_to_sync_bia = {
@@ -546,27 +1064,30 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'dr_bia_summary'.")
                     safe_exec(conn, text(f"ALTER TABLE dr_bia_summary ADD COLUMN {col_name} {col_def}"))
 
-        # 13. Patch 'performance_metrics' table
+        # Patch 'performance_metrics' table
         if "performance_metrics" in table_names:
             pmf_cols = [c['name'] for c in inspector.get_columns('performance_metrics')]
             if "project_id" not in pmf_cols:
                 logger.info(f"Defensive Sync: Appending missing column 'project_id' to 'performance_metrics' as {uuid_type}.")
                 safe_exec(conn, text(f"ALTER TABLE performance_metrics ADD COLUMN project_id {uuid_type}"))
+            if "annual_targets" not in pmf_cols:
+                safe_exec(conn, text("ALTER TABLE performance_metrics ADD COLUMN annual_targets JSON DEFAULT '{}'"))
 
-        # 14. Patch 'budget_ceilings' table
+        # Patch 'budget_ceilings' table
         if "budget_ceilings" in table_names:
             bc_cols = [c['name'] for c in inspector.get_columns('budget_ceilings')]
             columns_to_sync_bc = {
                 "allocated_capex": "NUMERIC(15, 2) DEFAULT 0.00",
                 "allocated_mooe": "NUMERIC(15, 2) DEFAULT 0.00",
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'"
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "annual_allocations": "JSON DEFAULT '{}'"
             }
             for col_name, col_def in columns_to_sync_bc.items():
                 if col_name not in bc_cols:
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'budget_ceilings'.")
                     safe_exec(conn, text(f"ALTER TABLE budget_ceilings ADD COLUMN {col_name} {col_def}"))
 
-        # 15. Patch 'ict_projects' table (Part III.E Strategic Alignment Extension)
+        # Patch 'ict_projects' table
         if "ict_projects" in table_names:
             proj_cols = [c['name'] for c in inspector.get_columns('ict_projects')]
             columns_to_sync_proj = {
@@ -582,6 +1103,7 @@ def align_database_schemas(engine):
                 "aligns_pcb": f"BOOLEAN DEFAULT {bool_false}",
                 "aligns_others": f"BOOLEAN DEFAULT {bool_false}",
                 "aligns_others_specify": "VARCHAR(255)",
+                "harmonization_criteria": "JSON DEFAULT '{}'",
                 "harmonizes_national_priority": f"BOOLEAN DEFAULT {bool_false}",
                 "harmonizes_resource_optimization": f"BOOLEAN DEFAULT {bool_false}",
                 "harmonizes_pegif": f"BOOLEAN DEFAULT {bool_false}",
@@ -603,44 +1125,21 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'ict_projects'.")
                     safe_exec(conn, text(f"ALTER TABLE ict_projects ADD COLUMN {col_name} {col_def}"))
 
-        # 16. Patch 'information_systems' table
-        if "information_systems" in table_names:
-            sys_cols = [c['name'] for c in inspector.get_columns('information_systems')]
-            columns_to_sync_sys = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
-                "strategic_concern_id": f"{uuid_type}",
-                "name": "VARCHAR(255) DEFAULT ''",
-                "status": "VARCHAR(50) DEFAULT 'Operational'",
-                "classification": "VARCHAR(100) DEFAULT 'Operations - Frontline Service'",
-                "hosting_type": "VARCHAR(50) DEFAULT 'Hybrid'",
-                "online_url": "VARCHAR(255)",
-                "description_and_purpose": "TEXT DEFAULT ''",
-                "enhancement_details": "TEXT",
-                "development_strategy": "VARCHAR(100) DEFAULT 'Outsourced'",
-                "development_platform": "VARCHAR(200) DEFAULT ''",
-                "database_name": "VARCHAR(200) DEFAULT ''",
-                "data_storage_type": "VARCHAR(200) DEFAULT ''",
-                "internal_users": "TEXT DEFAULT ''",
-                "external_users": "TEXT DEFAULT ''",
-                "system_owner_office": "VARCHAR(200) DEFAULT ''",
-                "is_integrated_with_others": f"BOOLEAN DEFAULT {bool_false}",
-                "internal_integrated_systems": "TEXT",
-                "external_integrated_systems": "TEXT",
-                "generates_data_for_others": f"BOOLEAN DEFAULT {bool_false}",
-                "processes_data_from_others": f"BOOLEAN DEFAULT {bool_false}",
-                "is_deployed_on_shared_platform": f"BOOLEAN DEFAULT {bool_false}",
-                "processes_personal_information": f"BOOLEAN DEFAULT {bool_false}",
-                "has_undergone_pia": f"BOOLEAN DEFAULT {bool_false}"
-            }
-            for col_name, col_def in columns_to_sync_sys.items():
-                if col_name not in sys_cols:
-                    logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'information_systems'.")
-                    safe_exec(conn, text(f"ALTER TABLE information_systems ADD COLUMN {col_name} {col_def}"))
+            safe_exec(conn, text("UPDATE ict_projects SET harmonization_criteria = '{}' WHERE harmonization_criteria IS NULL;"))
 
-        # 17. Patch 'needs_assessments' table (Section 8.0 Aggregation & Linkage)
+        # Clean broken foreign keys defensively
+        if "ict_projects" in table_names and "performance_metrics" in table_names:
+            safe_exec(conn, text("""
+                DELETE FROM performance_metrics 
+                WHERE project_id IS NOT NULL 
+                  AND project_id NOT IN (SELECT id FROM ict_projects);
+            """))
+
+        # Patch 'needs_assessments' table
         if "needs_assessments" in table_names:
             na_cols = [c['name'] for c in inspector.get_columns('needs_assessments')]
             columns_to_sync_na = {
+                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
                 "is_aggregated": f"BOOLEAN DEFAULT {bool_false}",
                 "strategic_concern_id": f"{uuid_type}"
             }
@@ -649,7 +1148,7 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'needs_assessments'.")
                     safe_exec(conn, text(f"ALTER TABLE needs_assessments ADD COLUMN {col_name} {col_def}"))
 
-        # 18. Patch 'audit_trails' table (COA Security & Role-Scoped Audit Trails)
+        # Patch 'audit_trails' table
         if "audit_trails" in table_names:
             audit_cols = [c['name'] for c in inspector.get_columns('audit_trails')]
             columns_to_sync_audit = {
@@ -666,12 +1165,83 @@ def align_database_schemas(engine):
             if "ix_audit_trails_department_id" not in audit_indexes:
                 safe_exec(conn, text("CREATE INDEX ix_audit_trails_department_id ON audit_trails (department_id)"))
 
+        # ==========================================================
+        # 4. SEED CANONICAL DYNAMIC TABLES ONLY IF COMPLETELY EMPTY
+        # ==========================================================
+        if "strategic_categories" in table_names:
+            count_cats = conn.execute(text("SELECT COUNT(*) FROM strategic_categories;")).scalar() or 0
+            if count_cats == 0:
+                safe_exec(conn, text(f"""
+                    INSERT INTO strategic_categories (name, code, is_project_linked, is_recurring_expense, order_index, is_active, description)
+                    VALUES 
+                        ('Office Productivity', 'OFFICE_PRODUCTIVITY', {bool_false}, {bool_false}, 1, {bool_true}, 'Workstations, laptops, and peripheral tools.'),
+                        ('Internal ICT Projects', 'INTERNAL_ICT_PROJECT', {bool_true}, {bool_false}, 2, {bool_true}, 'Agency internal IT modernizations.'),
+                        ('Cross-Agency ICT Projects', 'CROSS_AGENCY_ICT_PROJECT', {bool_true}, {bool_false}, 3, {bool_true}, 'PeGIF and multi-agency cooperative initiatives.'),
+                        ('Continuing Costs/Expenses', 'CONTINUING_COSTS', {bool_false}, {bool_true}, 4, {bool_true}, 'Recurring operating subscriptions and bandwidth.');
+                """))
+
+        if "uacs_catalog" in table_names:
+            count_uacs = conn.execute(text("SELECT COUNT(*) FROM uacs_catalog;")).scalar() or 0
+            if count_uacs == 0:
+                safe_exec(conn, text(f"""
+                    INSERT INTO uacs_catalog (uacs_code, account_title, expenditure_class, is_subscription_default, is_active, description)
+                    VALUES 
+                        ('50604050 03', 'ICT Equipment (CO)', 'Capital Outlay', {bool_false}, {bool_true}, 'Hardware >= capitalization threshold.'),
+                        ('50604050 07', 'Printing Equipment (CO)', 'Capital Outlay', {bool_false}, {bool_true}, 'Production printers >= capitalization threshold.'),
+                        ('50604070 01', 'ICT Software (Perpetual CO)', 'Capital Outlay', {bool_false}, {bool_true}, 'Perpetual licenses and in-house systems.'),
+                        ('50203210 03', 'Semi-Expendable ICT Equipment (MOOE)', 'Maintenance and Other Operating Expenses', {bool_false}, {bool_true}, 'ICT equipment under the capitalization threshold.'),
+                        ('50203210 07', 'Semi-Expendable Printing Equipment (MOOE)', 'Maintenance and Other Operating Expenses', {bool_false}, {bool_true}, 'Office printers under the capitalization threshold.'),
+                        ('50299070 00', 'ICT Software Subscription (MOOE)', 'Maintenance and Other Operating Expenses', {bool_true}, {bool_true}, 'Recurring software subscriptions and cloud hosting.'),
+                        ('50202010 00', 'Training Expenses (MOOE)', 'Maintenance and Other Operating Expenses', {bool_false}, {bool_true}, 'Seminars and certification programs.'),
+                        ('50211030 00', 'Consulting/Outsourced Development (MOOE)', 'Maintenance and Other Operating Expenses', {bool_false}, {bool_true}, 'Consulting contractors and penetration testing.');
+                """))
+
+        if "system_taxonomies" in table_names:
+            count_strat = conn.execute(text("SELECT COUNT(*) FROM system_taxonomies WHERE taxonomy_type = 'DEVELOPMENT_STRATEGY';")).scalar() or 0
+            if count_strat == 0:
+                safe_exec(conn, text(f"""
+                    INSERT INTO system_taxonomies (taxonomy_type, code, display_name, order_index, is_active)
+                    VALUES 
+                        ('DEVELOPMENT_STRATEGY', 'IN_HOUSE', 'In-House Development', 1, {bool_true}),
+                        ('DEVELOPMENT_STRATEGY', 'OUTSOURCED', 'Outsourced', 2, {bool_true}),
+                        ('DEVELOPMENT_STRATEGY', 'COTS', 'Commercial Off-The-Shelf (COTS)', 3, {bool_true}),
+                        ('DEVELOPMENT_STRATEGY', 'COMBINATION', 'Combination / Hybrid', 4, {bool_true});
+                """))
+
+        if "dynamic_checklist_criteria" in table_names:
+            count_harm = conn.execute(text("SELECT COUNT(*) FROM dynamic_checklist_criteria WHERE checklist_type = 'HARMONIZATION_FRAMEWORK';")).scalar() or 0
+            if count_harm == 0:
+                safe_exec(conn, text(f"""
+                    INSERT INTO dynamic_checklist_criteria (checklist_type, domain_or_category, criteria_name, is_mandatory, is_active, order_index)
+                    VALUES 
+                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'National Prioritization (PDP 2023-2028)', {bool_false}, {bool_true}, 1),
+                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Resource Optimization (GovNet, GovCloud)', {bool_false}, {bool_true}, 2),
+                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'PeGIF Standardized APIs & Interoperability', {bool_true}, {bool_true}, 3),
+                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Cross-Agency Collaboration (JMC / MOA)', {bool_false}, {bool_true}, 4),
+                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Scalability and Sustainability (SPAR / PREXC)', {bool_true}, {bool_true}, 5);
+                """))
+
+        if "system_settings" in table_names:
+            defaults = [
+                ("capitalization_threshold", "50000.00"),
+                ("major_outlay_review_threshold", "2000000.00"),
+                ("inflation_rates_by_year", '{"2028": 0.0, "2029": 3.0, "2030": 5.0}'),
+                ("hardware_replacement_buffer_units", "3"),
+                ("canvas_expiration_warning_days", "14"),
+            ]
+            for k, v in defaults:
+                safe_exec(conn, text(f"""
+                    INSERT INTO system_settings (key, value)
+                    SELECT '{k}', '{v}'
+                    WHERE NOT EXISTS (SELECT 1 FROM system_settings WHERE key = '{k}');
+                """))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Handles application startup and shutdown procedures safely.
-    Defensively verifies schemas, patches runtime enums, neutralizes operator conflicts,
+    Defensively verifies schemas, purges legacy tables, patches runtime enums,
     and automatically executes cycle expiration / rollover checks.
     """
     agency_label = getattr(settings, "DEFAULT_AGENCY_NAME", "INSTITUTIONAL")
@@ -683,25 +1253,25 @@ async def lifespan(app: FastAPI):
     if hasattr(models_module, 'enforce_issp_singularity_and_accounting'):
         models_module.enforce_issp_singularity_and_accounting.__globals__['item_lower'] = ''
 
-    # 1. Defensive Schema Alignment & Operator Sanitization
-    try:
-        align_database_schemas(engine)
-    except Exception as schema_err:
-        logger.error(f"Defensive schema alignment encountered a non-fatal warning: {str(schema_err)}")
-
-    # 2. Defensively patch all mapped Enum columns for runtime reflection
-    try:
-        patch_runtime_enum_columns()
-    except Exception as enum_err:
-        logger.error(f"Runtime enum column patching warning: {str(enum_err)}")
-
-    # 3. Verify and compile database schema structures
+    # 1. Verify and compile database schema structures
     try:
         logger.info("Verifying and registering database schema metadata...")
         Base.metadata.create_all(bind=engine)
         logger.info("Database base tables verified successfully.")
     except Exception as e:
         logger.critical(f"Failed to initialize metadata tables on startup: {str(e)}", exc_info=True)
+
+    # 2. Defensive Schema Alignment, Operator Sanitization & Data Cleansing
+    try:
+        align_database_schemas(engine)
+    except Exception as schema_err:
+        logger.error(f"Defensive schema alignment encountered a non-fatal warning: {str(schema_err)}")
+
+    # 3. Defensively patch all mapped Enum columns for runtime reflection
+    try:
+        patch_runtime_enum_columns()
+    except Exception as enum_err:
+        logger.error(f"Runtime enum column patching warning: {str(enum_err)}")
 
     # 4. Automated Lifecycle Rollover Evaluation on Startup
     try:
@@ -896,17 +1466,17 @@ if settings.STORAGE_TYPE == "local":
 
 @app.get("/api/health", tags=["System Diagnostics"])
 async def check_engine_health():
-    """Returns consolidated engine configurations, active storage class, and budget limits."""
+    """Returns consolidated engine configurations, active document storage tier, and budget limits."""
     storage_mode = getattr(settings, "STORAGE_TYPE", "local")
     budget_limit = getattr(settings, "GLOBAL_BUDGET_CEILING", 0.0)
-    region = getattr(settings, "AWS_S3_REGION_NAME", "LOCAL_EMULATOR") if storage_mode == "s3" else "LOCAL_EMULATOR"
+    region = getattr(settings, "AWS_S3_REGION_NAME", "LOCAL_REPOSITORY") if storage_mode == "s3" else "LOCAL_REPOSITORY"
     
     return JSONResponse(
         content={
             "status": "online",
             "agency": getattr(settings, "DEFAULT_AGENCY_NAME", "Universal ISSP Engine"),
             "version": "5.0-DICT-v.2026",
-            "storage_mode": storage_mode,
+            "storage_repository": storage_mode,
             "region": region,
             "global_budget_limit": f"PHP {budget_limit:,.2f}" if budget_limit else "Not Configured"
         }

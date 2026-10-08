@@ -1,6 +1,6 @@
 // frontend/src/views/admin/Queue/ConsolidatedQueue.jsx
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
@@ -9,13 +9,19 @@ import {
   returnProposal, 
   overrideProposal, 
   deleteProposal, 
+  batchApproveProposals,
   getDepartments, 
   getIctProjects, 
   getOutcomes,
-  getAllNeedsAssessments
+  getStrategicConcerns,
+  getAllNeedsAssessments,
+  getStrategicCategories,
+  getUacsCatalog,
+  getPolicySettings
 } from "../../../api/admin";
 import { getComments, postComment, resolveComment } from "../../../api/dept";
 import StatusPill from "../../../components/common/StatusPill";
+import CompilerSyncButton from "../../../components/common/CompilerSyncButton";
 import { 
   ShieldCheck, 
   FileText, 
@@ -42,28 +48,63 @@ import {
   ClipboardCheck,
   Calendar,
   Info,
-  Filter,
+  SlidersHorizontal,
+  CheckCheck,
+  Building,
+  Tag,
+  ArrowRight,
+  CornerDownRight,
   Layers,
+  HelpCircle,
   Coins
 } from "lucide-react";
+
+/**
+ * Strips numeric accounting code prefixes to display clean, official account titles.
+ * Example: "50604050 03 - ICT Equipment (CO)" -> "ICT Equipment (CO)"
+ */
+const cleanUacsTitle = (uacsStr) => {
+  if (!uacsStr) return "";
+  const s = String(uacsStr).trim();
+  if (s.includes(" - ")) {
+    return s.split(" - ", 2)[1].trim();
+  }
+  return s.replace(/^\d{8}(?:\s+\d{2})?\s*[-–]?\s*/, "").trim() || s;
+};
 
 export default function ConsolidatedQueue() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
   const location = useLocation();
+  const navigate = useNavigate();
 
-  // Primary Classification Tabs: All, Strategic Buckets, Expenditure Classes, or Needs Linked
-  const [activeTab, setActiveTab] = useState("all"); 
+  // Core Data Lists
   const [proposals, setProposals] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [projects, setProjects] = useState([]);
   const [outcomes, setOutcomes] = useState([]);
+  const [strategicConcerns, setStrategicConcerns] = useState([]);
   const [needsAssessments, setNeedsAssessments] = useState([]);
+  const [strategicCategories, setStrategicCategories] = useState([]);
+  const [uacsCatalog, setUacsCatalog] = useState([]);
+  const [policySettings, setPolicySettings] = useState({
+    capitalization_threshold: 50000.00,
+    major_outlay_review_threshold: 2000000.00,
+    hardware_replacement_buffer_units: 3,
+    canvas_expiration_warning_days: 14
+  });
+
+  // UI & Loading States
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Server-Side Pagination, Filtering & Debounced Search States
+  // Multi-Select Batch Approvals
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [batchApproving, setBatchApproving] = useState(false);
+
+  // Classification Tab & Server-Side Filters
+  const [activeTab, setActiveTab] = useState("all"); 
   const [deptFilter, setDeptFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [fundFilter, setFundFilter] = useState("");
@@ -73,17 +114,22 @@ export default function ConsolidatedQueue() {
   const [skip, setSkip] = useState(0);
   const [limit] = useState(25);
 
-  // Deep-Linking Highlight State
+  // Deep-Linking Row Highlight State
   const [highlightedId, setHighlightedId] = useState(null);
 
-  // Override Modal State (DICT v.2026 Aligned + Sec 8.0 Provenance)
+  // Administrative Review / Governance Assignment Modal State
   const [activeOverrideItem, setActiveOverrideItem] = useState(null);
   const [overrideItemName, setOverrideItemName] = useState("");
   const [overrideCategory, setOverrideCategory] = useState("Hardware");
   const [overrideUnitCost, setOverrideUnitCost] = useState("");
+  
+  // Governance Allocation Gate: "project_bound" | "intake_pool" | "standalone"
+  const [governanceMode, setGovernanceMode] = useState("standalone");
   const [overrideStrategicCat, setOverrideStrategicCat] = useState("Office Productivity");
   const [overrideProjectId, setOverrideProjectId] = useState("");
+  
   const [overrideOutcomeId, setOverrideOutcomeId] = useState("");
+  const [overrideConcernId, setOverrideConcernId] = useState("");
   const [overrideNeedsAssessmentId, setOverrideNeedsAssessmentId] = useState("");
   const [overrideOfficeLoc, setOverrideOfficeLoc] = useState("Central Office");
   const [overrideFundSource, setOverrideFundSource] = useState("General Appropriations Act (GAA)");
@@ -91,7 +137,13 @@ export default function ConsolidatedQueue() {
   const [overrideJustification, setOverrideJustification] = useState("");
   const [overrideDevStatus, setOverrideDevStatus] = useState("N/A");
   const [overrideCreatedByStudents, setOverrideCreatedByStudents] = useState(false);
+  const [overrideUacsCode, setOverrideUacsCode] = useState("");
   const [submittingOverride, setSubmittingOverride] = useState(false);
+
+  // Return Modal State (Action Items & Mandatory Feedback)
+  const [returnModalItem, setReturnModalItem] = useState(null);
+  const [returnRemark, setReturnRemark] = useState("");
+  const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
 
   // Comments / Inline Revision Remarks Modal State
   const [activeDiscussionItem, setActiveDiscussionItem] = useState(null);
@@ -101,88 +153,104 @@ export default function ConsolidatedQueue() {
 
   const token = user?.token || user?.accessToken || localStorage.getItem("access_token") || "";
 
-  // Dynamic Year Sequence Fallback (Supports 1 to N Years)
-  const activeYears = (planningYears && planningYears.length > 0) ? planningYears : [2026, 2027, 2028];
+  // Dynamic Year Sequence (1 to N Years)
+  const activeYears = useMemo(() => {
+    return (planningYears && planningYears.length > 0) ? planningYears : [2028, 2029, 2030];
+  }, [planningYears]);
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
     return "₱" + num.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
-  // Capitalization and UACS Auto-Resolution Helper (DBM ₱50,000.00 Threshold + Training Expenses Code)
-  const getAutoClassification = (name, cost, categoryType, strategicCat, isStudentCreated) => {
+  // Capitalization & UACS Auto-Resolution Helper (Zero Hardcoding)
+  const getAutoClassification = useCallback((name, cost, categoryType, strategicCat, isStudentCreated) => {
     if (isStudentCreated) {
+      const swMatch = uacsCatalog.find(u => u.uacs_code.startsWith("50604070"));
       return {
         expClass: "Capital Outlay",
-        uacs: "50604070 01 - ICT Software (Perpetual CO)"
+        uacs: swMatch ? `${swMatch.uacs_code} - ${swMatch.account_title}` : "50604070 01 - ICT Software (Perpetual CO)"
       };
     }
 
     if (categoryType === "Subscription") {
+      const subMatch = uacsCatalog.find(u => u.is_subscription_default) || uacsCatalog.find(u => u.uacs_code.startsWith("50299070"));
       return {
         expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50299070 00 - ICT Software Subscription (MOOE)"
+        uacs: subMatch ? `${subMatch.uacs_code} - ${subMatch.account_title}` : "50299070 00 - ICT Software Subscription (MOOE)"
       };
     }
 
     const unit = parseFloat(cost) || 0;
-    const isCO = unit >= 50000.00;
+    const capThreshold = policySettings.capitalization_threshold || 50000.00;
+    const isCO = unit >= capThreshold;
     const lower = (name || "").toLowerCase();
 
-    // Mandated by DICT Guidelines Pg. 24: Training Expenses (MOOE)
+    // Mandated Training Expenses (MOOE) per DICT Guidelines
     if (lower.includes("training") || lower.includes("seminar") || lower.includes("workshop")) {
+      const trMatch = uacsCatalog.find(u => u.uacs_code.startsWith("50202010"));
       return {
         expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50202010 00 - Training Expenses (MOOE)"
+        uacs: trMatch ? `${trMatch.uacs_code} - ${trMatch.account_title}` : "50202010 00 - Training Expenses (MOOE)"
       };
     }
 
-    if (strategicCat === "Continuing Costs/Expenses") {
-      if (lower.includes("subscription") || lower.includes("cloud") || lower.includes("internet")) {
+    if (strategicCat === "Continuing Costs/Expenses" || strategicCat === "Continuing Costs") {
+      if (lower.includes("subscription") || lower.includes("cloud") || lower.includes("internet") || lower.includes("bandwidth")) {
+        const subMatch = uacsCatalog.find(u => u.is_subscription_default) || uacsCatalog.find(u => u.uacs_code.startsWith("50299070"));
         return {
           expClass: "Maintenance and Other Operating Expenses",
-          uacs: "50299070 00 - ICT Software Subscription (MOOE)"
+          uacs: subMatch ? `${subMatch.uacs_code} - ${subMatch.account_title}` : "50299070 00 - ICT Software Subscription (MOOE)"
         };
       }
+      const consultMatch = uacsCatalog.find(u => u.uacs_code.startsWith("50211030"));
       return {
         expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50211030 00 - Consulting/Outsourced Development (MOOE)"
+        uacs: consultMatch ? `${consultMatch.uacs_code} - ${consultMatch.account_title}` : "50211030 00 - Consulting/Outsourced Development (MOOE)"
       };
     }
 
     if (strategicCat === "Office Productivity") {
       if (lower.includes("printer") || lower.includes("scanner") || lower.includes("plotter")) {
+        const prefix = isCO ? "50604050 07" : "50203210 07";
+        const prMatch = uacsCatalog.find(u => u.uacs_code.startsWith(prefix));
         return {
           expClass: isCO ? "Capital Outlay" : "Maintenance and Other Operating Expenses",
-          uacs: isCO ? "50604050 07 - Printing Equipment (CO)" : "50203210 07 - Semi-Expendable Printing Equipment (MOOE)"
+          uacs: prMatch ? `${prMatch.uacs_code} - ${prMatch.account_title}` : (isCO ? "50604050 07 - Printing Equipment (CO)" : "50203210 07 - Semi-Expendable Printing Equipment (MOOE)")
         };
       }
-      if (lower.includes("suite") || lower.includes("license") || lower.includes("subscription")) {
+      if (lower.includes("suite") || lower.includes("license") || lower.includes("subscription") || lower.includes("cloud")) {
+        const subMatch = uacsCatalog.find(u => u.is_subscription_default) || uacsCatalog.find(u => u.uacs_code.startsWith("50299070"));
         return {
           expClass: "Maintenance and Other Operating Expenses",
-          uacs: "50299070 00 - ICT Software Subscription (MOOE)"
+          uacs: subMatch ? `${subMatch.uacs_code} - ${subMatch.account_title}` : "50299070 00 - ICT Software Subscription (MOOE)"
         };
       }
+      const eqPrefix = isCO ? "50604050 03" : "50203210 03";
+      const eqMatch = uacsCatalog.find(u => u.uacs_code.startsWith(eqPrefix));
       return {
         expClass: isCO ? "Capital Outlay" : "Maintenance and Other Operating Expenses",
-        uacs: isCO ? "50604050 03 - ICT Equipment (CO)" : "50203210 03 - Semi-Expendable ICT Equipment (MOOE)"
+        uacs: eqMatch ? `${eqMatch.uacs_code} - ${eqMatch.account_title}` : (isCO ? "50604050 03 - ICT Equipment (CO)" : "50203210 03 - Semi-Expendable ICT Equipment (MOOE)")
       };
     }
 
     if (lower.includes("contractor") || lower.includes("consulting") || lower.includes("development")) {
+      const consultMatch = uacsCatalog.find(u => u.uacs_code.startsWith("50211030"));
       return {
         expClass: "Maintenance and Other Operating Expenses",
-        uacs: "50211030 00 - Consulting/Outsourced Development (MOOE)"
+        uacs: consultMatch ? `${consultMatch.uacs_code} - ${consultMatch.account_title}` : "50211030 00 - Consulting/Outsourced Development (MOOE)"
       };
     }
 
+    const defaultPrefix = isCO ? "50604050 03" : "50203210 03";
+    const defaultMatch = uacsCatalog.find(u => u.uacs_code.startsWith(defaultPrefix));
     return {
       expClass: isCO ? "Capital Outlay" : "Maintenance and Other Operating Expenses",
-      uacs: isCO ? "50604050 03 - ICT Equipment (CO)" : "50203210 03 - Semi-Expendable ICT Equipment (MOOE)"
+      uacs: defaultMatch ? `${defaultMatch.uacs_code} - ${defaultMatch.account_title}` : (isCO ? "50604050 03 - ICT Equipment (CO)" : "50203210 03 - Semi-Expendable ICT Equipment (MOOE)")
     };
-  };
+  }, [policySettings.capitalization_threshold, uacsCatalog]);
 
-  // Sync URL Query Parameters into filters (Global Search & Dashboard Deep-Links)
+  // Sync URL Query Parameters into filters (Global Search & Deep Links)
   useEffect(() => {
     const searchParams = new URLSearchParams(location.search);
     const searchVal = searchParams.get("search");
@@ -208,7 +276,7 @@ export default function ConsolidatedQueue() {
     }
   }, [location.search]);
 
-  // Debounce search input to prevent network spam while ensuring live reactive search execution
+  // Debounce search input for responsive execution
   useEffect(() => {
     const handler = setTimeout(() => {
       setDebouncedSearch(searchTerm);
@@ -217,22 +285,41 @@ export default function ConsolidatedQueue() {
     return () => clearTimeout(handler);
   }, [searchTerm]);
 
-  const loadReferenceData = async () => {
+  const loadReferenceData = useCallback(async () => {
     try {
-      const [depts, projs, outs, needs] = await Promise.all([
+      const [depts, projs, outs, concerns, needs, cats, uacs, policies] = await Promise.all([
         getDepartments(token).catch(() => []),
         getIctProjects(token, activeCycle).catch(() => []),
         getOutcomes(token, activeCycle).catch(() => []),
-        getAllNeedsAssessments(token).catch(() => [])
+        getStrategicConcerns(token, activeCycle).catch(() => []),
+        getAllNeedsAssessments(token).catch(() => []),
+        getStrategicCategories(token).catch(() => []),
+        getUacsCatalog(token).catch(() => []),
+        getPolicySettings(token).catch(() => null)
       ]);
       setDepartments(Array.isArray(depts) ? depts : []);
       setProjects(Array.isArray(projs) ? projs : []);
       setOutcomes(Array.isArray(outs) ? outs : []);
+      setStrategicConcerns(Array.isArray(concerns) ? concerns : []);
       setNeedsAssessments(Array.isArray(needs) ? needs : []);
+      if (Array.isArray(cats) && cats.length > 0) {
+        setStrategicCategories(cats);
+      }
+      if (Array.isArray(uacs) && uacs.length > 0) {
+        setUacsCatalog(uacs);
+      }
+      if (policies && typeof policies === "object") {
+        setPolicySettings({
+          capitalization_threshold: parseFloat(policies.capitalization_threshold) || 50000.00,
+          major_outlay_review_threshold: parseFloat(policies.major_outlay_review_threshold) || 2000000.00,
+          hardware_replacement_buffer_units: parseInt(policies.hardware_replacement_buffer_units, 10) || 3,
+          canvas_expiration_warning_days: parseInt(policies.canvas_expiration_warning_days, 10) || 14
+        });
+      }
     } catch (e) {
-      console.warn("Could not load reference data:", e);
+      console.warn("Could not load queue reference data:", e);
     }
-  };
+  }, [token, activeCycle]);
 
   const fetchQueue = useCallback(async () => {
     if (!token) return;
@@ -244,7 +331,9 @@ export default function ConsolidatedQueue() {
       if (statusFilter) params.status_filter = statusFilter;
       if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
 
-      if (!["all", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
+      if (activeTab === "pending_review") {
+        params.status_filter = "submitted";
+      } else if (!["all", "intake_pool", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
         params.strategic_category = activeTab;
       }
 
@@ -254,6 +343,7 @@ export default function ConsolidatedQueue() {
 
       setProposals(itemsList);
       setTotalCount(totalItemsCount);
+      setSelectedIds(new Set());
     } catch (err) {
       setError(err.message || "Network error loading queue.");
     } finally {
@@ -265,7 +355,7 @@ export default function ConsolidatedQueue() {
     if (token) {
       loadReferenceData();
     }
-  }, [token, activeCycle]);
+  }, [token, loadReferenceData]);
 
   useEffect(() => {
     if (token) {
@@ -289,9 +379,73 @@ export default function ConsolidatedQueue() {
     }
   }, [location.state, proposals]);
 
+  const handleTabChange = (tabId) => {
+    setActiveTab(tabId);
+    setSkip(0);
+    setSelectedIds(new Set());
+  };
+
+  /**
+   * Action: Approve Single Proposal
+   * Checks for mandatory Program Outcome & UACS Code assignment,
+   * quarantines unlinked capital outlays in Intake Pool,
+   * and prevents unlinked items from distorting Table B.1 and Part IV.A.
+   */
   const handleApprove = async (id, itemName) => {
     setError(null);
     setSuccess(null);
+
+    const target = proposals.find(p => p.id === id);
+    if (!target) return;
+
+    // Gate 1: Mandatory Program Outcome Assignment (Part I.A.4)
+    if (!target.outcome_id && (!target.outcome || !target.outcome.id)) {
+      setError(`Cannot approve '${itemName}': Assign an Organizational Outcome (Part I.A.4) first via Review & Classify.`);
+      openOverrideModal(target);
+      return;
+    }
+
+    // Gate 2: Mandatory UACS Code Assignment (Table B.4)
+    if (!target.uacs_object_code) {
+      setError(`Cannot approve '${itemName}': Assign an official UACS Object Code (Table B.4) first via Review & Classify.`);
+      openOverrideModal(target);
+      return;
+    }
+
+    const totalCost = Number(target.total_cost || (target.unit_cost * target.total_qty) || 0);
+    const capThreshold = policySettings.capitalization_threshold || 50000.00;
+    const majorThreshold = policySettings.major_outlay_review_threshold || 2000000.00;
+    const isMajor = totalCost >= majorThreshold;
+    const isCapitalOutlay = totalCost >= capThreshold || (target.uacs_object_code || "").toLowerCase().includes("(co)") || (target.expenditure_class || "").toLowerCase().includes("capital");
+    const isProjectCat = (target.strategic_category || "").toLowerCase().includes("project");
+    const isOfficeProd = (target.strategic_category || "").toLowerCase().includes("office productivity");
+    const isServiceOrContractor = ["services", "contractor", "consulting"].some(k => 
+      (target.category || "").toLowerCase().includes(k) || 
+      (target.item_name || "").toLowerCase().includes(k)
+    );
+
+    // Gate 3: Major Outlay Review Gate (>= ₱2M Rule)
+    if (isMajor && (!target.project_id || target.system_development_status === "N/A")) {
+      setError(`Major Outlay Review Gate: '${itemName}' exceeds ${formatPHP(majorThreshold)}. Verify its ICT Project linkage and development status before approving.`);
+      openOverrideModal(target);
+      return;
+    }
+
+    // Gate 4: Unlinked Capital Outlay / Contractor / Service Sitting in Office Productivity
+    if (!target.project_id && (isCapitalOutlay || isServiceOrContractor) && isOfficeProd) {
+      setError(`Classification Required: '${itemName}' (${formatPHP(totalCost)}) is an unlinked Capital Outlay or Service. Classify its spending bucket or link it to an ICT Project.`);
+      openOverrideModal(target);
+      return;
+    }
+
+    // Gate 5: Unlinked Items Quarantine Warning
+    if (!target.project_id && (isCapitalOutlay || isProjectCat)) {
+      if (!window.confirm(`'${itemName}' (${formatPHP(totalCost)}) is not linked to an ICT Project. Approving it will place it in the Intake Pool, excluding it from the compiled ISSP (Part IV.A and Table B.1) until assigned to a Project Charter in Part III.E. Proceed with intake approval?`)) {
+        openOverrideModal(target);
+        return;
+      }
+    }
+
     try {
       await approveProposal(token, id);
       setSuccess(`Proposal line item '${itemName}' approved successfully.`);
@@ -301,47 +455,205 @@ export default function ConsolidatedQueue() {
     }
   };
 
-  const handleReturn = async (id, itemName) => {
+  const openReturnModal = (item) => {
+    setReturnModalItem(item);
+    setReturnRemark("Please attach an updated market quotation canvas and clarify technical specifications.");
+  };
+
+  const submitReturnWithInstructions = async (e) => {
+    e.preventDefault();
+    if (!returnModalItem || !returnRemark.trim()) return;
+
+    setIsSubmittingReturn(true);
     setError(null);
     setSuccess(null);
     try {
-      await returnProposal(token, id);
-      setSuccess(`Proposal line item '${itemName}' returned for revisions.`);
+      await returnProposal(token, returnModalItem.id);
+
+      await postComment(returnModalItem.id, {
+        text: returnRemark.trim(),
+        proposal_id: returnModalItem.id,
+        requires_department_action: true
+      });
+
+      setSuccess(`Proposal '${returnModalItem.item_name}' returned to department with flagged action items.`);
+      setReturnModalItem(null);
+      setReturnRemark("");
       fetchQueue();
     } catch (err) {
-      setError(err.message || "Return failed.");
+      setError(err.message || "Failed to return proposal with instructions.");
+    } finally {
+      setIsSubmittingReturn(false);
     }
   };
 
   const handleDeleteProposal = async (id, itemName) => {
-    if (!window.confirm(`Permanently remove proposal '${itemName}' from Part IV.A?`)) return;
+    if (!window.confirm(`Permanently remove proposal '${itemName}' from queue?`)) return;
     try {
       await deleteProposal(token, id);
       setSuccess(`Proposal '${itemName}' deleted.`);
       fetchQueue();
     } catch (err) {
-      setError(err.message);
+      setError(err.message || "Deletion failed.");
     }
   };
 
+  // Multi-Select Batch Approvals
+  const submittedProposalsOnPage = useMemo(() => {
+    return proposals.filter(p => p.status === "Submitted");
+  }, [proposals]);
+
+  const allSubmittedSelected = useMemo(() => {
+    if (submittedProposalsOnPage.length === 0) return false;
+    return submittedProposalsOnPage.every(p => selectedIds.has(p.id));
+  }, [submittedProposalsOnPage, selectedIds]);
+
+  const toggleSelectAllSubmitted = () => {
+    const next = new Set(selectedIds);
+    if (allSubmittedSelected) {
+      submittedProposalsOnPage.forEach(p => next.delete(p.id));
+    } else {
+      submittedProposalsOnPage.forEach(p => next.add(p.id));
+    }
+    setSelectedIds(next);
+  };
+
+  const toggleSelectRow = (id) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    setSelectedIds(next);
+  };
+
+  const handleBatchApprove = async () => {
+    if (selectedIds.size === 0) return;
+
+    const unassigned = Array.from(selectedIds).filter(id => {
+      const p = proposals.find(item => item.id === id);
+      return p && (!p.outcome_id && (!p.outcome || !p.outcome.id));
+    });
+
+    if (unassigned.length > 0 && outcomes.length === 0) {
+      setError(`Batch approval blocked: ${unassigned.length} selected proposal(s) require a Program Outcome, but none are registered for cycle ${activeCycle}.`);
+      return;
+    }
+
+    // Check if any selected item is an unlinked capital outlay
+    const unlinkedCapOutlays = Array.from(selectedIds).filter(id => {
+      const p = proposals.find(item => item.id === id);
+      if (!p || p.project_id) return false;
+      const total = Number(p.total_cost || (p.unit_cost * p.total_qty) || 0);
+      const isCapital = total >= (policySettings.capitalization_threshold || 50000.00) || (p.uacs_object_code || "").toLowerCase().includes("(co)") || (p.expenditure_class || "").toLowerCase().includes("capital");
+      return isCapital;
+    });
+
+    let promptMsg = `Batch approve ${selectedIds.size} submitted proposal(s)? Proposals without explicitly assigned outcomes will inherit the cycle's statutory default outcome.`;
+    if (unlinkedCapOutlays.length > 0) {
+      promptMsg = `${unlinkedCapOutlays.length} selected proposal(s) are capital outlays (>= ₱50k) without a linked ICT Project. Approving them will place them into the Intake Pool to prevent Table B.1 distortion until bound to a project. Continue?`;
+    }
+
+    if (!window.confirm(promptMsg)) return;
+
+    setBatchApproving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await batchApproveProposals(token, Array.from(selectedIds));
+      setSuccess(`Successfully approved ${selectedIds.size} proposal(s).`);
+      setSelectedIds(new Set());
+      fetchQueue();
+    } catch (err) {
+      setError(err.message || "Failed to process batch approval.");
+    } finally {
+      setBatchApproving(false);
+    }
+  };
+
+  const getDepartmentName = useCallback((id, item = null) => {
+    if (item?.target_office_automated) return item.target_office_automated;
+    if (item?.department?.name) return item.department.name;
+    const d = departments.find(dept => (dept.department_id || dept.id) === id);
+    return d ? (d.department_name || d.name) : "Central Office";
+  }, [departments]);
+
+  const getNeedsAssessment = useCallback((id) => {
+    if (!id) return null;
+    return needsAssessments.find(na => String(na.id) === String(id));
+  }, [needsAssessments]);
+
+  // Open the administrative review & governance assignment modal
   const openOverrideModal = (item) => {
     setActiveOverrideItem(item);
     setOverrideItemName(item.item_name || "");
     setOverrideCategory(item.category || "Hardware");
     setOverrideUnitCost(String(item.unit_cost || "0"));
-    setOverrideStrategicCat(item.strategic_category || "Office Productivity");
-    setOverrideProjectId(item.project_id || "");
-    setOverrideOutcomeId(String(item.outcome_id || (outcomes[0]?.id || "")));
+
+    // Check project linkage and determine initial governance allocation mode
+    const pId = item.project_id ? String(item.project_id) : "";
+    setOverrideProjectId(pId);
+    const pObj = pId ? projects.find(p => String(p.id) === String(pId)) : null;
+
+    const stratCatLower = (item.strategic_category || "").toLowerCase();
+    const itemCatLower = (item.category || "").toLowerCase();
+    const itemNameLower = (item.item_name || "").toLowerCase();
+
+    if (pId) {
+      setGovernanceMode("project_bound");
+      setOverrideStrategicCat(pObj?.project_category || "Internal ICT Projects");
+      setOverrideFundSource(pObj?.funding_source || item.fund_source || "General Appropriations Act (GAA)");
+    } else if (stratCatLower.includes("project")) {
+      setGovernanceMode("intake_pool");
+      setOverrideStrategicCat(item.strategic_category || "Internal ICT Projects");
+      setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
+    } else if (item.category === "Subscription" || stratCatLower.includes("continuing") || itemNameLower.includes("subscription") || itemNameLower.includes("cloud")) {
+      setGovernanceMode("standalone");
+      setOverrideStrategicCat("Continuing Costs/Expenses");
+      setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
+    } else {
+      // Intelligently identify if it's a Capital Outlay or Contractor/Consulting Service
+      const isCapital = parseFloat(item.unit_cost || 0) >= (policySettings.capitalization_threshold || 50000.00);
+      const isService = itemCatLower === "services" || itemNameLower.includes("contractor") || itemNameLower.includes("consulting") || itemNameLower.includes("migration");
+
+      if (isCapital || isService) {
+        setGovernanceMode("intake_pool");
+        setOverrideStrategicCat("Internal ICT Projects");
+      } else {
+        setGovernanceMode("standalone");
+        setOverrideStrategicCat("Office Productivity");
+      }
+      setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
+    }
+
+    // Auto-suggest Program Outcome if unassigned
+    setOverrideOutcomeId(item.outcome_id ? String(item.outcome_id) : (outcomes[0]?.id ? String(outcomes[0].id) : ""));
     setOverrideNeedsAssessmentId(item.needs_assessment_id ? String(item.needs_assessment_id) : "");
-    setOverrideOfficeLoc(item.office_location || "Central Office");
-    setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
+    
+    const defaultOffice = item.target_office_automated || getDepartmentName(item.department_id, item) || item.office_location || "Central Office";
+    setOverrideOfficeLoc(item.office_location || defaultOffice);
+    
     setOverrideJustification(item.justification || "");
     setOverrideDevStatus(item.system_development_status || "N/A");
-    setOverrideCreatedByStudents(Boolean(item.created_by_students));
+    setOverrideCreatedByStudents(Boolean(item.created_by_students || item.is_in_house_turnover));
+    setOverrideUacsCode(item.uacs_object_code || "");
     
+    const linkedNa = needsAssessments.find(n => String(n.id) === String(item.needs_assessment_id));
+    const concernId = linkedNa?.strategic_concern_id ? String(linkedNa.strategic_concern_id) : "";
+    setOverrideConcernId(concernId);
+
     const prefill = {};
-    activeYears.forEach(year => {
-      prefill[String(year)] = item.yearly_quantities?.[String(year)] ?? 0;
+    activeYears.forEach((year, idx) => {
+      let q = item.yearly_quantities?.[String(year)] ?? 
+              item.yearly_quantities?.[year] ?? 
+              item.yearly_quantities?.[`Year ${idx + 1}`];
+      if (q === undefined) {
+        if (idx === 0) q = item.year_1_qty;
+        else if (idx === 1) q = item.year_2_qty;
+        else if (idx === 2) q = item.year_3_qty;
+      }
+      prefill[String(year)] = q !== undefined ? parseInt(q, 10) || 0 : 0;
     });
     setOverrideQuantities(prefill);
   };
@@ -349,17 +661,49 @@ export default function ConsolidatedQueue() {
   // Derived Override Calculations
   const overrideTotalQty = Object.values(overrideQuantities).reduce((a, b) => a + (parseInt(b, 10) || 0), 0);
   const overrideTotalOutlay = (parseFloat(overrideUnitCost) || 0) * overrideTotalQty;
-  const isOverrideMajorOutlay = overrideTotalOutlay >= 2000000.00;
-  const overrideAutoClass = getAutoClassification(
-    overrideItemName, 
-    overrideUnitCost, 
-    overrideCategory, 
-    overrideStrategicCat, 
-    overrideCreatedByStudents
-  );
+  const majorReviewThreshold = policySettings.major_outlay_review_threshold || 2000000.00;
+  const isOverrideMajorOutlay = overrideTotalOutlay >= majorReviewThreshold;
+  
+  const overrideAutoClass = useMemo(() => {
+    return getAutoClassification(
+      overrideItemName, 
+      overrideUnitCost, 
+      overrideCategory, 
+      overrideStrategicCat, 
+      overrideCreatedByStudents
+    );
+  }, [getAutoClassification, overrideItemName, overrideUnitCost, overrideCategory, overrideStrategicCat, overrideCreatedByStudents]);
 
-  const handleSaveOverride = async (e) => {
-    e.preventDefault();
+  // Derive effective UACS and Expenditure Class directly from manual selection or dynamic auto-class
+  const resolvedEffectiveUacs = useMemo(() => {
+    return overrideUacsCode || overrideAutoClass.uacs;
+  }, [overrideUacsCode, overrideAutoClass.uacs]);
+
+  const resolvedEffectiveExpClass = useMemo(() => {
+    if (overrideCreatedByStudents) {
+      return "Capital Outlay";
+    }
+    if (overrideCategory === "Subscription") {
+      return "Maintenance and Other Operating Expenses";
+    }
+    const matched = uacsCatalog.find(u => 
+      resolvedEffectiveUacs.startsWith(u.uacs_code) || `${u.uacs_code} - ${u.account_title}` === resolvedEffectiveUacs
+    );
+    if (matched && matched.expenditure_class) {
+      return matched.expenditure_class;
+    }
+    if (resolvedEffectiveUacs.includes("(CO)")) {
+      return "Capital Outlay";
+    }
+    if (resolvedEffectiveUacs.includes("(MOOE)")) {
+      return "Maintenance and Other Operating Expenses";
+    }
+    return overrideAutoClass.expClass;
+  }, [overrideCreatedByStudents, overrideCategory, resolvedEffectiveUacs, uacsCatalog, overrideAutoClass.expClass]);
+
+  // Administrative Override & Classification Submission Handler
+  const handleSaveOverride = async (e, approveImmediately = false) => {
+    if (e && e.preventDefault) e.preventDefault();
     setError(null);
     setSuccess(null);
 
@@ -369,32 +713,81 @@ export default function ConsolidatedQueue() {
       return;
     }
 
+    if (!overrideOutcomeId) {
+      setError("Program Alignment Requirement: Assign an Organizational Outcome (Part I.A.4) before proceeding.");
+      return;
+    }
+
+    if (governanceMode === "project_bound" && !overrideProjectId) {
+      setError("Project Linkage Requirement: Choose an ICT Project from Part III.E, or switch to 'Intake Pool' / 'Standalone OpEx'.");
+      return;
+    }
+
     if (isOverrideMajorOutlay && overrideDevStatus === "N/A") {
-      setError("Rule 2 Violation: Total outlay exceeds ₱2,000,000.00. Please select a System Development Status ('For Development' or 'For Enhancement').");
+      setError(`Major Outlay Review Gate: Total outlay exceeds ${formatPHP(majorReviewThreshold)}. Select a System Development Status ('For Development' or 'For Enhancement').`);
       return;
     }
 
     setSubmittingOverride(true);
     try {
+      const selectedProj = (governanceMode === "project_bound" && overrideProjectId) 
+        ? projects.find(p => String(p.id) === String(overrideProjectId))
+        : null;
+
+      let finalStrategicCat = overrideStrategicCat;
+      let finalProjectId = null;
+
+      if (governanceMode === "project_bound" && selectedProj) {
+        finalProjectId = selectedProj.id;
+        finalStrategicCat = selectedProj.project_category || "Internal ICT Projects";
+      } else if (governanceMode === "intake_pool") {
+        finalProjectId = null;
+        finalStrategicCat = "Internal ICT Projects";
+      } else {
+        finalProjectId = null;
+        finalStrategicCat = overrideCategory === "Subscription" ? "Continuing Costs/Expenses" : (overrideStrategicCat || "Office Productivity");
+      }
+
+      const finalFundSource = selectedProj?.funding_source || overrideFundSource;
+      const selectedStratObj = strategicCategories.find(s => s.name === finalStrategicCat);
+      const effectiveUacs = resolvedEffectiveUacs;
+      const effectiveExpClass = resolvedEffectiveExpClass;
+
       await overrideProposal(token, activeOverrideItem.id, {
         item_name: overrideItemName.trim(),
         unit_cost: costNum,
         category: overrideCategory,
-        strategic_category: overrideStrategicCat,
-        project_id: overrideProjectId || null,
+        strategic_category: finalStrategicCat,
+        strategic_category_id: selectedStratObj ? selectedStratObj.id : null,
+        outcome_id: overrideOutcomeId ? parseInt(overrideOutcomeId, 10) : null,
+        project_id: finalProjectId,
         needs_assessment_id: overrideNeedsAssessmentId || null,
         office_location: overrideOfficeLoc,
-        fund_source: overrideFundSource,
+        fund_source: finalFundSource,
         justification: overrideJustification.trim() || null,
         system_development_status: overrideDevStatus,
         created_by_students: overrideCreatedByStudents,
+        is_in_house_turnover: overrideCreatedByStudents,
+        uacs_object_code: effectiveUacs,
+        expenditure_class: effectiveExpClass,
         yearly_quantities: overrideQuantities
       });
-      setSuccess(`Parameters overridden and reclassified for: '${overrideItemName}'`);
+
+      if (approveImmediately) {
+        await approveProposal(token, activeOverrideItem.id);
+        if (governanceMode === "intake_pool") {
+          setSuccess(`'${overrideItemName}' approved into the Intake Pool. Remember to link it to an ICT Project in the Projects Portfolio before compiling.`);
+        } else {
+          setSuccess(`Classification committed and proposal '${overrideItemName}' approved successfully!`);
+        }
+      } else {
+        setSuccess(`Governance classification saved for '${overrideItemName}'.`);
+      }
+
       setActiveOverrideItem(null);
       fetchQueue();
     } catch (err) {
-      setError(err.message || "Administrative override rejected by governance rules.");
+      setError(err.message || "Administrative classification update rejected by governance rules.");
     } finally {
       setSubmittingOverride(false);
     }
@@ -439,22 +832,55 @@ export default function ConsolidatedQueue() {
     }
   };
 
-  const getDepartmentName = (id, item = null) => {
-    if (item?.target_office_automated) return item.target_office_automated;
-    if (item?.department?.name) return item.department.name;
-    const d = departments.find(dept => (dept.department_id || dept.id) === id);
-    return d ? (d.department_name || d.name) : "Central Office";
-  };
+  // Dynamic Tabs Array with Accurate Real-time Intake Pool Counter
+  const dynamicTabs = useMemo(() => {
+    const unlinkedApprovedCount = proposals.filter(p => {
+      const totalCostNum = Number(p.total_cost || (p.unit_cost * p.total_qty) || 0);
+      const capThreshold = policySettings.capitalization_threshold || 50000.00;
+      const isCapitalOutlay = totalCostNum >= capThreshold || (p.uacs_object_code || "").toLowerCase().includes("(co)") || (p.expenditure_class || "").toLowerCase().includes("capital");
+      const isStandalone = ["office productivity", "continuing costs/expenses", "continuing costs"].includes((p.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
+      return p.status === "Approved" && !p.project_id && !isStandalone;
+    }).length;
 
-  const getNeedsAssessment = (id) => {
-    if (!id) return null;
-    return needsAssessments.find(na => String(na.id) === String(id));
-  };
+    const pendingCount = proposals.filter(p => p.status === "Submitted").length;
+
+    return [
+      { id: "all", label: "All Line Items" },
+      { id: "pending_review", label: `Pending Review (${pendingCount})`, isAlert: pendingCount > 0 },
+      { id: "intake_pool", label: `Intake Pool (${unlinkedApprovedCount})`, isWarning: unlinkedApprovedCount > 0 },
+      ...(strategicCategories.length > 0
+        ? strategicCategories.map(c => ({ id: c.name, label: c.name }))
+        : [
+            { id: "Office Productivity", label: "Office Productivity" },
+            { id: "Internal ICT Projects", label: "Internal Projects" },
+            { id: "Cross-Agency ICT Projects", label: "Cross-Agency" },
+            { id: "Continuing Costs/Expenses", label: "Continuing Costs" }
+          ]
+      ),
+      { id: "Capital Outlay", label: "Capital Outlay (CO)" },
+      { id: "MOOE", label: "MOOE Services" },
+      { id: "needs_linked", label: "Needs Linked" }
+    ];
+  }, [proposals, strategicCategories, policySettings.capitalization_threshold]);
 
   const filteredProposals = proposals.filter(item => {
+    const totalCostNum = Number(item.total_cost || (item.unit_cost * item.total_qty) || 0);
+    const capThreshold = policySettings.capitalization_threshold || 50000.00;
+    const isCapitalOutlay = totalCostNum >= capThreshold || (item.uacs_object_code || "").toLowerCase().includes("(co)") || (item.expenditure_class || "").toLowerCase().includes("capital");
+    const isStandalone = ["office productivity", "continuing costs/expenses", "continuing costs"].includes((item.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
+
+    if (activeTab === "pending_review") {
+      return item.status === "Submitted";
+    }
+    if (activeTab === "intake_pool") {
+      return item.status === "Approved" && !item.project_id && !isStandalone;
+    }
     if (activeTab === "Capital Outlay") return item.expenditure_class === "Capital Outlay";
     if (activeTab === "MOOE") return item.expenditure_class !== "Capital Outlay";
     if (activeTab === "needs_linked") return Boolean(item.needs_assessment_id);
+    if (!["all", "pending_review", "intake_pool", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
+      if ((item.strategic_category || "").toLowerCase() !== activeTab.toLowerCase()) return false;
+    }
     if (fundFilter && item.fund_source !== fundFilter && !item.fund_source?.startsWith(fundFilter)) return false;
     return true;
   });
@@ -467,31 +893,50 @@ export default function ConsolidatedQueue() {
         <div>
           <h2 className="text-slate-900 dark:text-white font-serif font-bold text-base flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-            <span>Master Review Queue (Part IV.A Financial Ledger)</span>
+            <span>Master Review Queue &amp; Governance Intake</span>
           </h2>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
-            Audit, reclassify, and approve resource proposals. Enforces DBM capitalization thresholds (₱50k CO vs MOOE) and Section 8.0 Needs Assessment provenance linkages.
+            Audit department submissions, assign UACS Object Codes ({formatPHP(policySettings.capitalization_threshold)} capitalization threshold), and govern pipeline compilation. Approved proposals enter the <strong>Intake Pool</strong> until formally linked to an ICT Project or designated as Standalone Operational expenses.
           </p>
         </div>
-        <button
-          onClick={fetchQueue}
-          disabled={loading}
-          className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>Sync Queue</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {selectedIds.size > 0 && (
+            <button
+              onClick={handleBatchApprove}
+              disabled={batchApproving}
+              className="px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-bold flex items-center gap-1.5 shadow-sm text-xs cursor-pointer transition-all animate-fadeIn"
+            >
+              <CheckCheck className="w-4 h-4" />
+              <span>{batchApproving ? "Approving..." : `Batch Approve (${selectedIds.size})`}</span>
+            </button>
+          )}
+          <CompilerSyncButton 
+            moduleName="budget" 
+            activeCycle={activeCycle} 
+            token={token} 
+            onSaveAndSync={fetchQueue} 
+            label="Verify Pipeline"
+          />
+          <button
+            onClick={fetchQueue}
+            disabled={loading}
+            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>Sync Queue</span>
+          </button>
+        </div>
       </div>
 
       {error && (
-        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
           <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
           <span>{error}</span>
         </div>
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
           <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
           <span>{success}</span>
         </div>
@@ -500,26 +945,19 @@ export default function ConsolidatedQueue() {
       {/* Tabs & Search Filter Toolbar */}
       <div className="flex flex-col gap-3 bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-xs">
         <div className="flex flex-wrap gap-1.5 p-1 bg-slate-100 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 self-start">
-          {[
-            { id: "all", label: "All Line Items" },
-            { id: "Office Productivity", label: "Office Productivity" },
-            { id: "Internal ICT Projects", label: "Internal Projects" },
-            { id: "Cross-Agency ICT Projects", label: "Cross-Agency" },
-            { id: "Continuing Costs/Expenses", label: "Continuing Costs" },
-            { id: "Capital Outlay", label: "Capital Outlay (CO)" },
-            { id: "MOOE", label: "MOOE Services" },
-            { id: "needs_linked", label: "Needs Linked (Sec 8.0)" }
-          ].map(tab => (
+          {dynamicTabs.map(tab => (
             <button
               key={tab.id}
-              onClick={() => { setSkip(0); setActiveTab(tab.id); }}
-              className={`px-3 py-1.5 font-bold rounded-lg transition-all text-[11px] cursor-pointer ${
+              onClick={() => handleTabChange(tab.id)}
+              className={`px-3 py-1.5 font-bold rounded-lg transition-all text-[11px] cursor-pointer flex items-center gap-1.5 ${
                 activeTab === tab.id 
                   ? "bg-blue-600 text-white shadow-xs" 
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800"
               }`}
             >
-              {tab.label}
+              <span>{tab.label}</span>
+              {tab.isAlert && <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />}
+              {tab.isWarning && <span className="w-2 h-2 rounded-full bg-rose-400" />}
             </button>
           ))}
         </div>
@@ -532,7 +970,7 @@ export default function ConsolidatedQueue() {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Search resource, UACS code, or project..."
-              className="w-full pl-9 pr-8 py-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-xs text-slate-900 dark:text-white outline-none focus:border-blue-500"
+              className="w-full pl-9 pr-8 py-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-xs text-slate-900 dark:text-white outline-none focus:border-blue-500 placeholder-slate-400"
             />
             {searchTerm && (
               <button
@@ -549,7 +987,7 @@ export default function ConsolidatedQueue() {
           <div className="flex flex-wrap items-center gap-3 w-full md:w-auto justify-end">
             <select
               value={deptFilter}
-              onChange={(e) => { setSkip(0); setDeptFilter(e.target.value); }}
+              onChange={(e) => { setSkip(0); setSelectedIds(new Set()); setDeptFilter(e.target.value); }}
               className="p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-300 font-semibold cursor-pointer outline-none text-xs"
             >
               <option value="">-- All Departments --</option>
@@ -562,7 +1000,7 @@ export default function ConsolidatedQueue() {
 
             <select
               value={fundFilter}
-              onChange={(e) => { setSkip(0); setFundFilter(e.target.value); }}
+              onChange={(e) => { setSkip(0); setSelectedIds(new Set()); setFundFilter(e.target.value); }}
               className="p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-300 font-semibold cursor-pointer outline-none text-xs"
             >
               <option value="">-- All Fund Sources --</option>
@@ -574,7 +1012,7 @@ export default function ConsolidatedQueue() {
 
             <select
               value={statusFilter}
-              onChange={(e) => { setSkip(0); setStatusFilter(e.target.value); }}
+              onChange={(e) => { setSkip(0); setSelectedIds(new Set()); setStatusFilter(e.target.value); }}
               className="p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-300 font-semibold cursor-pointer outline-none text-xs"
             >
               <option value="">-- All Statuses --</option>
@@ -598,15 +1036,25 @@ export default function ConsolidatedQueue() {
           ) : filteredProposals.length > 0 ? (
             <table className="w-full text-left border-collapse text-[11px]">
               <thead>
-                <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[9.5px]">
-                  <th className="py-3 px-3.5 w-44">Department / Office</th>
-                  <th className="py-3 px-3.5">Requested Resource &amp; Provenance</th>
+                <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[9.5px]">
+                  <th className="py-3 px-3 w-8 text-center">
+                    <input 
+                      type="checkbox"
+                      checked={allSubmittedSelected}
+                      onChange={toggleSelectAllSubmitted}
+                      disabled={submittedProposalsOnPage.length === 0}
+                      className="w-3.5 h-3.5 accent-blue-600 rounded cursor-pointer"
+                      title="Select all submitted proposals on this page"
+                    />
+                  </th>
+                  <th className="py-3 px-3.5 w-40">Department / Office</th>
+                  <th className="py-3 px-3.5">Requested Resource &amp; Pipeline Status</th>
                   <th className="py-3 px-3.5">UACS Code &amp; Class</th>
                   <th className="py-3 px-3.5">Financing Source</th>
                   <th className="py-3 px-3.5">Target Schedule</th>
                   <th className="py-3 px-3.5 text-right">Cost (Unit / Total)</th>
                   <th className="py-3 px-3.5 text-center">Quotation State</th>
-                  <th className="py-3 px-3.5 text-center">Status</th>
+                  <th className="py-3 px-3.5 text-center">Review State</th>
                   <th className="py-3 px-3.5 text-right">Actions</th>
                 </tr>
               </thead>
@@ -615,8 +1063,16 @@ export default function ConsolidatedQueue() {
                   const filename = item.canvas_evidence_url ? item.canvas_evidence_url.split("/").pop() : null;
                   const totalCost = Number(item.total_cost || (item.unit_cost * item.total_qty) || 0);
                   const isCanvasExpired = item.canvas_expiration_date && new Date(item.canvas_expiration_date) < new Date();
-                  const isStudentSystem = Boolean(item.created_by_students);
+                  const isStudentSystem = Boolean(item.created_by_students || item.is_in_house_turnover);
                   const linkedNa = getNeedsAssessment(item.needs_assessment_id);
+                  const isSubmitted = item.status === "Submitted";
+                  const isApproved = item.status === "Approved";
+                  const hasAssignedOutcome = Boolean(item.outcome_id || item.outcome?.id);
+                  const linkedProjTitle = item.project_rel?.project_title || projects.find(p => String(p.id) === String(item.project_id))?.project_title;
+                  
+                  const capThreshold = policySettings.capitalization_threshold || 50000.00;
+                  const isCapitalOutlay = totalCost >= capThreshold || (item.uacs_object_code || "").toLowerCase().includes("(co)") || (item.expenditure_class || "").toLowerCase().includes("capital");
+                  const isStandaloneOperational = ["office productivity", "continuing costs/expenses", "continuing costs"].includes((item.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
 
                   return (
                     <tr 
@@ -625,9 +1081,25 @@ export default function ConsolidatedQueue() {
                       className={`transition-colors ${
                         item.id === highlightedId 
                           ? "bg-blue-50/80 dark:bg-blue-955/40 border-l-4 border-l-blue-600" 
+                          : selectedIds.has(item.id)
+                          ? "bg-blue-50/40 dark:bg-blue-950/20"
                           : "hover:bg-slate-50/80 dark:hover:bg-slate-955/30"
                       }`}
                     >
+                      {/* Checkbox */}
+                      <td className="py-3.5 px-3 text-center align-top">
+                        {isSubmitted ? (
+                          <input 
+                            type="checkbox"
+                            checked={selectedIds.has(item.id)}
+                            onChange={() => toggleSelectRow(item.id)}
+                            className="w-3.5 h-3.5 accent-blue-600 rounded cursor-pointer mt-1"
+                          />
+                        ) : (
+                          <span className="w-3.5 h-3.5 block" />
+                        )}
+                      </td>
+
                       {/* Department */}
                       <td className="py-3.5 px-3.5 align-top">
                         <div className="font-bold text-slate-900 dark:text-white">
@@ -638,26 +1110,43 @@ export default function ConsolidatedQueue() {
                         </span>
                       </td>
 
-                      {/* Resource Description & Badges */}
+                      {/* Resource Description & Pipeline Linkage Badges */}
                       <td className="py-3.5 px-3.5 align-top max-w-xs space-y-1.5">
                         <div className="font-bold text-slate-900 dark:text-white text-xs">{item.item_name}</div>
                         
                         <div className="flex flex-wrap items-center gap-1.5">
-                          {item.outcome?.outcome_name && (
+                          {/* Program Outcome Badge */}
+                          {hasAssignedOutcome ? (
                             <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 truncate max-w-[150px]">
-                              {item.outcome.outcome_name}
+                              {item.outcome?.outcome_name || `Outcome #${item.outcome_id}`}
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/10 dark:text-rose-300 dark:border-rose-500/20">
+                              Outcome Pending
                             </span>
                           )}
 
-                          {item.project_rel?.project_title && (
-                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20 truncate max-w-[150px]">
-                              {item.project_rel.project_title}
+                          {/* Pipeline Compilation Status Badges */}
+                          {linkedProjTitle ? (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20 flex items-center gap-1 truncate max-w-[170px]" title={`Compiled in ISSP via project: ${linkedProjTitle}`}>
+                              <Layers className="w-2.5 h-2.5 shrink-0" />
+                              <span>Project: {linkedProjTitle}</span>
                             </span>
-                          )}
+                          ) : isApproved && isStandaloneOperational ? (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20 flex items-center gap-1" title="Compiled in ISSP as standalone operating outlay">
+                              <Check className="w-2.5 h-2.5" />
+                              <span>Compiled (Standalone)</span>
+                            </span>
+                          ) : isApproved ? (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20 flex items-center gap-1" title="Approved in queue but unlinked to an ICT Project. Quarantined from PDF until assigned to a project portfolio in Part III.E.">
+                              <FolderKanban className="w-2.5 h-2.5" />
+                              <span>Intake Pool (Awaiting Project)</span>
+                            </span>
+                          ) : null}
 
                           {isStudentSystem && (
                             <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20">
-                              Student Software
+                              Turnover Software
                             </span>
                           )}
 
@@ -669,7 +1158,7 @@ export default function ConsolidatedQueue() {
 
                           {item.is_expansion && (
                             <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700">
-                              Expansion Project
+                              Expansion
                             </span>
                           )}
 
@@ -679,15 +1168,20 @@ export default function ConsolidatedQueue() {
                               className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-500/10 dark:text-teal-300 dark:border-teal-500/20 cursor-help"
                               title={linkedNa ? `Linked Needs Assessment: ${linkedNa.title}\nProblem: ${linkedNa.current_problem}` : `Needs Assessment ID: ${item.needs_assessment_id}`}
                             >
-                              Sec 8.0 Linked: {linkedNa?.title ? linkedNa.title.slice(0, 24) + "..." : "Attached"}
+                              Needs Linked: {linkedNa?.title ? linkedNa.title.slice(0, 22) + "..." : "Attached"}
                             </span>
                           )}
                         </div>
                       </td>
 
-                      {/* UACS & Class */}
+                      {/* Clean UACS & Class Presentation */}
                       <td className="py-3.5 px-3.5 align-top">
-                        <div className="font-mono text-[10px] text-slate-700 dark:text-slate-300 font-semibold">{item.uacs_object_code || "50604050 03"}</div>
+                        <div className="font-semibold text-slate-800 dark:text-slate-200 text-xs">
+                          {cleanUacsTitle(item.uacs_object_code) || "ICT Equipment (CO)"}
+                        </div>
+                        <div className="font-mono text-[9px] text-slate-400 mt-0.5">
+                          {item.uacs_object_code ? item.uacs_object_code.split(" - ")[0] : "50604050 03"}
+                        </div>
                         <span className={`inline-block mt-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono ${
                           item.expenditure_class === "Capital Outlay"
                             ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20"
@@ -712,7 +1206,7 @@ export default function ConsolidatedQueue() {
 
                       {/* Cost */}
                       <td className="py-3.5 px-3.5 align-top text-right font-mono">
-                        <div className="text-slate-500 text-[10px]">{formatPHP(item.unit_cost)}</div>
+                        <div className="text-slate-500 dark:text-slate-400 text-[10px]">{formatPHP(item.unit_cost)}</div>
                         <div className="font-bold text-slate-900 dark:text-white text-xs">{formatPHP(totalCost)}</div>
                       </td>
 
@@ -734,11 +1228,11 @@ export default function ConsolidatedQueue() {
                               <ExternalLink className="w-2.5 h-2.5 shrink-0" />
                             </a>
                             {isCanvasExpired ? (
-                              <span className="block px-2 py-0.2 rounded-full bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-500/10 dark:text-rose-400 dark:border-rose-500/20 text-[8.5px] font-bold uppercase">
+                              <span className="block px-2 py-0.2 rounded-full bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-500/10 dark:text-rose-400 dark:border-rose-500/20 text-[8.5px] font-bold uppercase font-mono">
                                 Expired
                               </span>
                             ) : (
-                              <span className="block text-[8.5px] text-slate-400 font-mono">Verified</span>
+                              <span className="block text-[8.5px] text-slate-400 dark:text-slate-500 font-mono">Verified</span>
                             )}
                           </div>
                         ) : (
@@ -748,7 +1242,7 @@ export default function ConsolidatedQueue() {
                         )}
                       </td>
 
-                      {/* Status */}
+                      {/* Review State */}
                       <td className="py-3.5 px-3.5 align-top text-center">
                         <StatusPill status={item.status} />
                       </td>
@@ -776,14 +1270,14 @@ export default function ConsolidatedQueue() {
                               <button
                                 onClick={() => openOverrideModal(item)}
                                 className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white border border-blue-200 dark:bg-blue-500/10 dark:hover:bg-blue-600 dark:text-blue-400 dark:hover:text-white dark:border-blue-500/20 transition-colors cursor-pointer"
-                                title="Administrative Override"
+                                title="Classify & Review Parameters"
                               >
                                 <Edit className="w-3.5 h-3.5" />
                               </button>
                               <button
-                                onClick={() => handleReturn(item.id, item.item_name)}
+                                onClick={() => openReturnModal(item)}
                                 className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white border border-rose-200 dark:bg-rose-500/10 dark:hover:bg-rose-600 dark:text-rose-400 dark:hover:text-white dark:border-rose-500/20 transition-colors cursor-pointer font-bold"
-                                title="Return to Department"
+                                title="Return to Department with Instructions"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
                               </button>
@@ -793,7 +1287,7 @@ export default function ConsolidatedQueue() {
                               <button
                                 onClick={() => openOverrideModal(item)}
                                 className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
-                                title="Override Item"
+                                title="Classify & Review Parameters"
                               >
                                 <Edit className="w-3.5 h-3.5" />
                               </button>
@@ -814,7 +1308,7 @@ export default function ConsolidatedQueue() {
               </tbody>
             </table>
           ) : (
-            <div className="text-center py-20 text-slate-400 italic">
+            <div className="text-center py-20 text-slate-400 dark:text-slate-500 italic">
               No proposal line items found matching active parameters.
             </div>
           )}
@@ -823,7 +1317,7 @@ export default function ConsolidatedQueue() {
 
       {/* Pagination Controls */}
       <div className="flex items-center justify-between p-4 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-xl shadow-xs">
-        <span className="text-slate-500 text-xs">
+        <span className="text-slate-500 dark:text-slate-400 text-xs">
           Showing <strong>{totalCount > 0 ? skip + 1 : 0}</strong> to <strong>{Math.min(skip + limit, totalCount)}</strong> of <strong>{totalCount}</strong> items
         </span>
         <div className="flex gap-2">
@@ -846,34 +1340,123 @@ export default function ConsolidatedQueue() {
         </div>
       </div>
 
-      {/* OVERRIDE MODAL (DICT v.2026 Aligned + Sec 8.0 Provenance) */}
+      {/* OVERRIDE & GOVERNANCE ASSIGNMENT MODAL (Guided 4-Step Pipeline) */}
       {activeOverrideItem && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-xl p-6 space-y-4 shadow-2xl overflow-y-auto max-h-[90vh]">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-2xl p-6 space-y-4 shadow-2xl overflow-y-auto max-h-[90vh]">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
               <div>
-                <h3 className="font-bold text-slate-900 dark:text-white text-sm">Administrative Override Console</h3>
-                <span className="text-[10px] text-slate-500 font-mono">Resource ID: {activeOverrideItem.id}</span>
+                <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <span>Administrative Review &amp; Governance Classification</span>
+                </h3>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">Proposal ID: {activeOverrideItem.id}</span>
               </div>
               <button onClick={() => setActiveOverrideItem(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveOverride} className="space-y-4 text-xs">
+            {/* Department's Raw Submission Summary Card */}
+            <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+              <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2">
+                <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider flex items-center gap-1.5">
+                  <FileText className="w-3.5 h-3.5 text-blue-500" />
+                  <span>Department's Raw Submission</span>
+                </span>
+                <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500">
+                  Submitting Unit: <strong className="text-slate-700 dark:text-slate-300">{getDepartmentName(activeOverrideItem.department_id, activeOverrideItem)}</strong>
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                <div>
+                  <span className="text-slate-400 dark:text-slate-500 text-[9px] uppercase font-bold block">Raw Item Label:</span>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">{activeOverrideItem.item_name}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 dark:text-slate-500 text-[9px] uppercase font-bold block">Original Unit Cost:</span>
+                  <span className="font-mono font-bold text-slate-800 dark:text-slate-200">{formatPHP(activeOverrideItem.unit_cost)}</span>
+                </div>
+              </div>
+
+              <div className="text-[11px]">
+                <span className="text-slate-400 dark:text-slate-500 text-[9px] uppercase font-bold block">Requested Quantities Schedule:</span>
+                <div className="flex flex-wrap gap-2 pt-1 font-mono text-[10px]">
+                  {activeYears.map((yr, idx) => {
+                    const q = activeOverrideItem.yearly_quantities?.[String(yr)] ?? 
+                              activeOverrideItem.yearly_quantities?.[`Year ${idx + 1}`] ?? 
+                              (idx === 0 ? activeOverrideItem.year_1_qty : idx === 1 ? activeOverrideItem.year_2_qty : idx === 2 ? activeOverrideItem.year_3_qty : 0) ?? 0;
+                    return (
+                      <span key={yr} className="px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                        FY {yr}: <strong>{q} units</strong>
+                      </span>
+                    );
+                  })}
+                  <span className="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900">
+                    Total: {activeOverrideItem.total_qty || (activeOverrideItem.yearly_quantities ? Object.values(activeOverrideItem.yearly_quantities || {}).reduce((a, b) => a + (parseInt(b, 10) || 0), 0) : 0)} units
+                  </span>
+                </div>
+              </div>
+
+              {activeOverrideItem.justification && (
+                <div className="text-[11px]">
+                  <span className="text-slate-400 dark:text-slate-500 text-[9px] uppercase font-bold block">Technical Justification:</span>
+                  <p className="text-slate-700 dark:text-slate-300 italic whitespace-pre-wrap leading-relaxed bg-white dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 mt-1">
+                    "{activeOverrideItem.justification}"
+                  </p>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-200 dark:border-slate-800 text-[10px]">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 dark:text-slate-500 uppercase text-[9px] font-bold">Attached Proof / Quotation:</span>
+                  {activeOverrideItem.canvas_evidence_url ? (
+                    <a 
+                      href={activeOverrideItem.canvas_evidence_url} 
+                      target="_blank" 
+                      rel="noreferrer"
+                      className="text-blue-600 dark:text-blue-400 hover:underline font-semibold inline-flex items-center gap-1"
+                    >
+                      <span>View Proof Document ({activeOverrideItem.supplier_name || "Quotation"})</span>
+                      <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
+                  ) : (activeOverrideItem.created_by_students || activeOverrideItem.is_in_house_turnover) ? (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                      In-House / Non-Commercial Turnover (Quotation Exempt)
+                    </span>
+                  ) : (
+                    <span className="text-rose-600 dark:text-rose-400 font-bold">
+                      No Quotation Canvas Attached
+                    </span>
+                  )}
+                </div>
+
+                {activeOverrideItem.canvas_expiration_date && (
+                  <span className="text-slate-400 dark:text-slate-500 font-mono text-[9.5px]">
+                    Expiry: {new Date(activeOverrideItem.canvas_expiration_date).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Guided Administrative Governance Assignment Form */}
+            <form onSubmit={(e) => handleSaveOverride(e, false)} className="space-y-4 text-xs pt-1">
+              
+              {/* Resource Item Label */}
               <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-500">Resource Item Label</label>
+                <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">Resource Item Label</label>
                 <input
                   type="text" required value={overrideItemName} onChange={(e) => setOverrideItemName(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-semibold outline-none focus:border-blue-500"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-semibold outline-none focus:border-blue-500"
                 />
               </div>
 
-              {/* Student-Developed System Flag */}
+              {/* Student / In-House Turnover Flag */}
               <div className="p-3 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <span className="font-bold text-slate-800 dark:text-slate-200 block text-[11px]">System Created by Students</span>
-                  <span className="text-[9.5px] text-slate-500 block">Classified as Capital Outlay (ICT Software); quotation canvas is optional.</span>
+                  <span className="font-bold text-slate-800 dark:text-slate-200 block text-[11px]">In-House / Non-Commercial Turnover</span>
+                  <span className="text-[9.5px] text-slate-500 dark:text-slate-400 block">Classified as Capital Outlay (ICT Software); commercial quotation is optional.</span>
                 </div>
                 <input
                   type="checkbox"
@@ -883,158 +1466,409 @@ export default function ConsolidatedQueue() {
                 />
               </div>
 
-              {/* Organizational Outcome (Part I.A.4 Link) */}
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
-                  <GraduationCap className="w-3.5 h-3.5 text-blue-500" />
-                  <span>Broader Scope: Organizational Outcome (Part I.A.4)</span>
+              {/* STEP 1: Program Outcome Assignment (Part I.A.4) */}
+              <div className="space-y-1.5 p-3.5 bg-blue-50/50 dark:bg-blue-955/20 border border-blue-200 dark:border-blue-900/60 rounded-xl">
+                <label className="text-[10px] uppercase font-bold text-blue-900 dark:text-blue-300 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center font-mono text-[9px] font-bold">1</span>
+                    <GraduationCap className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                    <span>Program Alignment (Part I.A.4 Organizational Outcome)</span>
+                  </span>
+                  <span className="text-[9px] text-rose-500 font-bold">*Mandatory</span>
                 </label>
                 <select
                   value={overrideOutcomeId}
                   onChange={(e) => setOverrideOutcomeId(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer"
+                  required
+                  className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer font-semibold text-xs"
                 >
+                  <option value="">-- Select Organizational Outcome --</option>
                   {outcomes.map(o => (
                     <option key={o.id} value={String(o.id)}>
                       {o.outcome_name} ({o.type_label})
                     </option>
                   ))}
                 </select>
+                <span className="text-[9.5px] text-slate-500 dark:text-slate-400 block pt-0.5">
+                  Establishes statutory accountability and links this outlay to institutional key result areas.
+                </span>
               </div>
 
-              {/* Linked Section 8.0 Department Needs Assessment */}
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
-                  <ClipboardCheck className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
-                  <span>Link to Department Needs Assessment (Section 8.0)</span>
-                </label>
-                <select
-                  value={overrideNeedsAssessmentId}
-                  onChange={(e) => {
-                    const selectedId = e.target.value;
-                    setOverrideNeedsAssessmentId(selectedId);
-                    const matched = needsAssessments.find(n => String(n.id) === selectedId);
-                    if (matched && !overrideJustification) {
-                      setOverrideJustification(`[Justified by Needs Assessment]: ${matched.current_problem}`);
-                    }
-                  }}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer"
-                >
-                  <option value="">-- None / Standalone Line Item --</option>
-                  {needsAssessments
-                    .filter(na => !activeOverrideItem?.department_id || na.department_id === activeOverrideItem.department_id)
-                    .map(na => (
-                      <option key={na.id} value={String(na.id)}>
-                        [{na.mfo_alignment?.toUpperCase() || "MFO"}] {na.title}
+              {/* STEP 2: Root Problem Provenance (Strategic Concern & Section 8.0 Needs Assessment) */}
+              <div className="space-y-3 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <span className="w-4 h-4 rounded-full bg-slate-700 text-white flex items-center justify-center font-mono text-[9px] font-bold">2</span>
+                  <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Strategic Concern &amp; Needs Assessment Linkage (Part II.A &amp; Section 8.0)</span>
+                </span>
+
+                <div className="space-y-1.5">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400">
+                    Parent Strategic Concern (Part II.A Root Problem)
+                  </label>
+                  <select
+                    value={overrideConcernId}
+                    onChange={(e) => {
+                      const cId = e.target.value;
+                      setOverrideConcernId(cId);
+                      const concern = strategicConcerns.find(c => String(c.id) === String(cId));
+                      if (concern?.outcome_id) {
+                        setOverrideOutcomeId(String(concern.outcome_id));
+                      }
+                      if (concern?.intended_use && !overrideJustification) {
+                        setOverrideJustification(concern.intended_use);
+                      }
+                    }}
+                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs"
+                  >
+                    <option value="">-- No Specific Strategic Concern --</option>
+                    {strategicConcerns.map(c => (
+                      <option key={c.id} value={String(c.id)}>
+                        [{c.mfo}] {c.critical_system} — {c.problems.slice(0, 50)}...
                       </option>
                     ))}
-                  {needsAssessments.some(na => activeOverrideItem?.department_id && na.department_id !== activeOverrideItem.department_id) && (
-                    <optgroup label="Other Department Needs Assessments">
-                      {needsAssessments
-                        .filter(na => activeOverrideItem?.department_id && na.department_id !== activeOverrideItem.department_id)
-                        .map(na => (
-                          <option key={na.id} value={String(na.id)}>
-                            [{na.department_name || `Dept ${na.department_id}`}] {na.title}
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                    <ClipboardCheck className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
+                    <span>Linked Department Needs Assessment (Section 8.0)</span>
+                  </label>
+                  <select
+                    value={overrideNeedsAssessmentId}
+                    onChange={(e) => {
+                      const selectedId = e.target.value;
+                      setOverrideNeedsAssessmentId(selectedId);
+                      const matched = needsAssessments.find(n => String(n.id) === selectedId);
+                      if (matched) {
+                        if (!overrideJustification) {
+                          setOverrideJustification(`[Justified by Needs Assessment]: ${matched.current_problem}`);
+                        }
+                        if (matched.strategic_concern_id) {
+                          setOverrideConcernId(String(matched.strategic_concern_id));
+                          const concern = strategicConcerns.find(c => String(c.id) === String(matched.strategic_concern_id));
+                          if (concern?.outcome_id) {
+                            setOverrideOutcomeId(String(concern.outcome_id));
+                          }
+                        }
+                      }
+                    }}
+                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs"
+                  >
+                    <option value="">-- None / Standalone Line Item --</option>
+                    {needsAssessments
+                      .filter(na => !activeOverrideItem?.department_id || na.department_id === activeOverrideItem.department_id)
+                      .map(na => (
+                        <option key={na.id} value={String(na.id)}>
+                          [{na.mfo_alignment?.toUpperCase() || "MFO"}] {na.title}
+                        </option>
+                      ))}
+                    {needsAssessments.some(na => activeOverrideItem?.department_id && na.department_id !== activeOverrideItem.department_id) && (
+                      <optgroup label="Other Department Needs Assessments">
+                        {needsAssessments
+                          .filter(na => activeOverrideItem?.department_id && na.department_id !== activeOverrideItem.department_id)
+                          .map(na => (
+                            <option key={na.id} value={String(na.id)}>
+                              [{na.department_name || `Dept ${na.department_id}`}] {na.title}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </div>
+              </div>
+
+              {/* STEP 3: Strategic Allocation Gate & ICT Project Portfolio (Part III.E) */}
+              <div className="space-y-3 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <span className="w-4 h-4 rounded-full bg-slate-700 text-white flex items-center justify-center font-mono text-[9px] font-bold">3</span>
+                  <FolderKanban className="w-3.5 h-3.5 text-purple-500" />
+                  <span>Governance Allocation Gate &amp; Strategic Portfolio (Part III.E)</span>
+                </span>
+
+                {/* 3-Mode Allocation Gate Selector */}
+                <div className="space-y-2">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 block">
+                    Pipeline Allocation Intent (Prevents Unlinked Cost Leak into Table B.1)
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
+                      governanceMode === "project_bound"
+                        ? "bg-purple-50 dark:bg-purple-955/40 border-purple-400 text-purple-900 dark:text-purple-200 ring-1 ring-purple-400"
+                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
+                    }`}>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="govMode"
+                          checked={governanceMode === "project_bound"}
+                          onChange={() => {
+                            setGovernanceMode("project_bound");
+                            if (projects.length > 0 && !overrideProjectId) {
+                              setOverrideProjectId(String(projects[0].id));
+                              setOverrideStrategicCat(projects[0].project_category || "Internal ICT Projects");
+                            }
+                          }}
+                          className="accent-purple-600"
+                        />
+                        <span className="font-bold text-xs">Bind to ICT Project</span>
+                      </div>
+                      <span className="text-[9.5px] opacity-75 mt-1 block">Compiles under target Part III.E charter</span>
+                    </label>
+
+                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
+                      governanceMode === "intake_pool"
+                        ? "bg-amber-50 dark:bg-amber-955/40 border-amber-400 text-amber-900 dark:text-amber-200 ring-1 ring-amber-400"
+                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
+                    }`}>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="govMode"
+                          checked={governanceMode === "intake_pool"}
+                          onChange={() => {
+                            setGovernanceMode("intake_pool");
+                            setOverrideProjectId("");
+                            setOverrideStrategicCat("Internal ICT Projects");
+                          }}
+                          className="accent-amber-600"
+                        />
+                        <span className="font-bold text-xs">Place in Intake Pool</span>
+                      </div>
+                      <span className="text-[9.5px] opacity-75 mt-1 block">Approved but quarantined from PDF</span>
+                    </label>
+
+                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
+                      governanceMode === "standalone"
+                        ? "bg-blue-50 dark:bg-blue-955/40 border-blue-400 text-blue-900 dark:text-blue-200 ring-1 ring-blue-400"
+                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
+                    }`}>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="govMode"
+                          checked={governanceMode === "standalone"}
+                          onChange={() => {
+                            setGovernanceMode("standalone");
+                            setOverrideProjectId("");
+                            setOverrideStrategicCat(overrideCategory === "Subscription" ? "Continuing Costs/Expenses" : "Office Productivity");
+                          }}
+                          className="accent-blue-600"
+                        />
+                        <span className="font-bold text-xs">Standalone OpEx</span>
+                      </div>
+                      <span className="text-[9.5px] opacity-75 mt-1 block">Compiles under routine office outlays</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Dynamic Explanatory Callout Banner based on Governance Mode */}
+                {governanceMode === "intake_pool" && (
+                  <div className="p-2.5 bg-amber-50 dark:bg-amber-955/30 border border-amber-300 dark:border-amber-900/60 rounded-xl text-[10.5px] text-amber-900 dark:text-amber-300 flex items-start gap-1.5 animate-fadeIn">
+                    <Info className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Intake Pool Quarantining Active:</strong> This proposal will be approved into the departmental intake pool. It will <strong>NOT</strong> leak into Table B.1 or Table IV.A until an administrator assigns it to a Part III.E Project Charter in the Projects Portfolio.
+                    </span>
+                  </div>
+                )}
+
+                {governanceMode === "project_bound" && (
+                  <div className="space-y-1.5 animate-fadeIn">
+                    <label className="text-[9.5px] uppercase font-bold text-purple-700 dark:text-purple-300 flex items-center justify-between">
+                      <span>Select Target ICT Project Portfolio Charter (Part III.E)</span>
+                      <span className="text-rose-500 font-bold">*Required</span>
+                    </label>
+                    <select
+                      value={overrideProjectId}
+                      required={governanceMode === "project_bound"}
+                      onChange={(e) => {
+                        const pId = e.target.value;
+                        setOverrideProjectId(pId);
+                        if (pId) {
+                          const pObj = projects.find(p => String(p.id) === String(pId));
+                          if (pObj) {
+                            setOverrideStrategicCat(pObj.project_category || "Internal ICT Projects");
+                            if (pObj.funding_source) {
+                              setOverrideFundSource(pObj.funding_source);
+                            }
+                          }
+                        }
+                      }}
+                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs font-semibold"
+                    >
+                      <option value="">-- Choose Target ICT Project --</option>
+                      {projects.filter(p => !((p.project_category || "").toLowerCase().includes("cross"))).length > 0 && (
+                        <optgroup label="Part III.E.1 Internal ICT Projects">
+                          {projects
+                            .filter(p => !((p.project_category || "").toLowerCase().includes("cross")))
+                            .map(p => (
+                              <option key={p.id} value={p.id}>[Internal] {p.project_title}</option>
+                            ))}
+                        </optgroup>
+                      )}
+                      {projects.filter(p => (p.project_category || "").toLowerCase().includes("cross")).length > 0 && (
+                        <optgroup label="Part III.E.2 Cross-Agency ICT Projects">
+                          {projects
+                            .filter(p => (p.project_category || "").toLowerCase().includes("cross"))
+                            .map(p => (
+                              <option key={p.id} value={p.id}>[Cross-Agency] {p.project_title}</option>
+                            ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400">Resource Nature</label>
+                    <select
+                      value={overrideCategory} 
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setOverrideCategory(val);
+                        if (val === "Subscription" && governanceMode === "standalone") {
+                          setOverrideStrategicCat("Continuing Costs/Expenses");
+                        }
+                      }}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none text-xs"
+                    >
+                      <option value="Hardware">Hardware Equipment</option>
+                      <option value="Software">Software Packages (COTS / Licenses)</option>
+                      <option value="Subscription">Subscription (Cloud / SaaS)</option>
+                      <option value="Services">Services (Consulting / Maintenance)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                      <span>Spending Bucket (Table B.1)</span>
+                      {governanceMode === "project_bound" && <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>}
+                    </label>
+                    <select
+                      value={overrideStrategicCat}
+                      onChange={(e) => setOverrideStrategicCat(e.target.value)}
+                      disabled={governanceMode === "project_bound" || governanceMode === "intake_pool"}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer font-semibold text-xs disabled:opacity-60"
+                    >
+                      {strategicCategories.length > 0 ? (
+                        strategicCategories.map((sc) => (
+                          <option key={sc.id || sc.name} value={sc.name}>
+                            {sc.name}
                           </option>
-                        ))}
-                    </optgroup>
-                  )}
-                </select>
-                {overrideNeedsAssessmentId && (
-                  <span className="text-[10px] text-teal-600 dark:text-teal-400 font-mono block">
-                    ✓ Connected with Section 8.0 Needs Assessment
-                  </span>
+                        ))
+                      ) : (
+                        <>
+                          <option value="Office Productivity">Office Productivity</option>
+                          <option value="Internal ICT Projects">Internal ICT Projects</option>
+                          <option value="Cross-Agency ICT Projects">Cross-Agency Projects</option>
+                          <option value="Continuing Costs/Expenses">Continuing Costs/Expenses</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Helpful Guidance Callout for Packaged Software vs Custom Systems */}
+                {overrideCategory === "Software" && (
+                  <div className="p-2.5 bg-blue-50 dark:bg-blue-955/30 border border-blue-200 dark:border-blue-900/50 rounded-xl text-[10px] text-blue-800 dark:text-blue-300 flex items-start gap-1.5 leading-relaxed">
+                    <Info className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Procurement Scope Note:</strong> Use this line item for Commercial Off-The-Shelf (COTS) software licenses and perpetual seat packages (e.g. AutoCAD, SPSS, Adobe CC, Windows Server CALs). Enterprise systems running multi-user workflows (e.g. HRIS, Student Portal) must be managed under <strong>Part III.D Information Systems</strong>.
+                    </span>
+                  </div>
                 )}
               </div>
 
-              {/* Classification Category & Strategic Bucket */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">Classification</label>
+              {/* STEP 4: Deployment Location, Fund Source, UACS & Accounting */}
+              <div className="space-y-3 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <span className="w-4 h-4 rounded-full bg-slate-700 text-white flex items-center justify-center font-mono text-[9px] font-bold">4</span>
+                  <Tag className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Deployment Location, Funding &amp; UACS Accounting (Table B.4)</span>
+                </span>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400">Unit Cost (PHP ₱)</label>
+                    <input
+                      type="number" step="0.01" min="0" required value={overrideUnitCost} onChange={(e) => setOverrideUnitCost(e.target.value)}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono font-bold outline-none focus:border-blue-500 text-xs"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400">Deployment Location</label>
+                    <input
+                      type="text"
+                      required
+                      value={overrideOfficeLoc}
+                      onChange={(e) => setOverrideOfficeLoc(e.target.value)}
+                      placeholder="e.g. Planning Division, Central Office, Field Branch..."
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                    <span>Financing Fund Source</span>
+                    {governanceMode === "project_bound" && <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>}
+                  </label>
                   <select
-                    value={overrideCategory} onChange={(e) => setOverrideCategory(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none"
+                    value={overrideFundSource}
+                    onChange={(e) => setOverrideFundSource(e.target.value)}
+                    disabled={governanceMode === "project_bound"}
+                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs disabled:opacity-60"
                   >
-                    <option value="Hardware">Hardware</option>
-                    <option value="Software">Software</option>
-                    <option value="Subscription">Subscription</option>
+                    <option value="General Appropriations Act (GAA)">General Appropriations Act (GAA)</option>
+                    <option value="Foreign-Assisted Projects (FAP)">Foreign-Assisted Projects (FAP)</option>
+                    <option value="Locally Funded">Locally Funded</option>
+                    <option value="Other Income Generating Sources">Other Income</option>
                   </select>
                 </div>
 
-                <div className="space-y-1.5">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">Spending Bucket</label>
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400">
+                      UACS Object Code &amp; Title (Table B.4 Ledger)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setOverrideUacsCode(overrideAutoClass.uacs)}
+                      className="text-[9.5px] text-blue-600 dark:text-blue-400 hover:underline font-mono cursor-pointer"
+                    >
+                      Reset to Auto-Resolved
+                    </button>
+                  </div>
                   <select
-                    value={overrideStrategicCat}
-                    onChange={(e) => setOverrideStrategicCat(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer"
+                    value={resolvedEffectiveUacs}
+                    onChange={(e) => setOverrideUacsCode(e.target.value)}
+                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs outline-none cursor-pointer font-semibold"
                   >
-                    <option value="Office Productivity">Office Productivity</option>
-                    <option value="Internal ICT Projects">Internal ICT Projects</option>
-                    <option value="Cross-Agency ICT Projects">Cross-Agency Projects</option>
-                    <option value="Continuing Costs/Expenses">Continuing Costs/Expenses</option>
+                    <option value={overrideAutoClass.uacs}>
+                      [Auto-Resolved]: {overrideAutoClass.uacs} ({overrideAutoClass.expClass})
+                    </option>
+                    {uacsCatalog.map(u => {
+                      const fullCode = `${u.uacs_code} - ${u.account_title}`;
+                      if (fullCode === overrideAutoClass.uacs) return null;
+                      return (
+                        <option key={u.id} value={fullCode}>
+                          {fullCode} ({u.expenditure_class})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               </div>
 
-              {/* Unit Cost & Location */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">Unit Cost (PHP ₱)</label>
-                  <input
-                    type="number" step="0.01" min="0" required value={overrideUnitCost} onChange={(e) => setOverrideUnitCost(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono font-bold outline-none focus:border-blue-500"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">Deployment Location</label>
-                  <select
-                    value={overrideOfficeLoc}
-                    onChange={(e) => setOverrideOfficeLoc(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer"
-                  >
-                    <option value="Central Office">Central Office</option>
-                    <option value="Field/Regional Office">Field/Regional Office</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Financing Fund Source */}
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-500">Financing Fund Source</label>
-                <select
-                  value={overrideFundSource}
-                  onChange={(e) => setOverrideFundSource(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer"
-                >
-                  <option value="General Appropriations Act (GAA)">GAA (National Budget)</option>
-                  <option value="Foreign-Assisted Projects (FAP)">FAP (Loans / Grants)</option>
-                  <option value="Locally Funded">Locally Funded</option>
-                  <option value="Other Income Generating Sources">Other Income</option>
-                </select>
-              </div>
-
-              {/* Associated ICT Project */}
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-500">Associated Strategic Project (Part III.E)</label>
-                <select
-                  value={overrideProjectId}
-                  onChange={(e) => setOverrideProjectId(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer"
-                >
-                  <option value="">-- No Specific Project (Office / Continuing) --</option>
-                  {projects.map(p => (
-                    <option key={p.id} value={p.id}>{p.project_title}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Rule 2: Major Outlays Development Status Parameter */}
+              {/* Major Outlays Development Status Parameter */}
               {isOverrideMajorOutlay && (
                 <div className="p-3 bg-amber-50 dark:bg-amber-955/30 border border-amber-200 dark:border-amber-900/60 rounded-xl space-y-2 animate-fadeIn">
-                  <span className="block text-[10px] text-amber-800 dark:text-amber-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                  <span className="block text-[10px] text-amber-800 dark:text-amber-400 font-bold uppercase tracking-wider flex items-center gap-1 font-mono">
                     <ShieldAlert className="w-4 h-4 shrink-0" />
-                    <span>Outlay &ge; ₱2,000,000.00 (Rule 2 Tag Mandated)</span>
+                    <span>Major Outlay &ge; {formatPHP(majorReviewThreshold)} (Development Tag Mandated)</span>
                   </span>
                   <select
                     value={overrideDevStatus}
@@ -1049,9 +1883,9 @@ export default function ConsolidatedQueue() {
 
               {/* Multi-Year Physical Targets Grid */}
               <div className="space-y-2.5 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
-                <span className="block text-[10px] uppercase font-bold text-slate-500 tracking-wider flex items-center gap-1.5">
+                <span className="block text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider flex items-center gap-1.5">
                   <Calendar className="w-3.5 h-3.5 text-blue-500" />
-                  <span>Adjust Multi-Year Quantities</span>
+                  <span>Adjust Multi-Year Quantities ({activeYears.length} Years Horizon)</span>
                 </span>
                 <div className="space-y-2">
                   {activeYears.map(year => (
@@ -1073,7 +1907,7 @@ export default function ConsolidatedQueue() {
                 </div>
 
                 <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center text-[10.5px] font-mono">
-                  <span className="text-slate-500">Total Units: <strong>{overrideTotalQty}</strong></span>
+                  <span className="text-slate-500 dark:text-slate-400">Total Units: <strong>{overrideTotalQty}</strong></span>
                   <span className="text-blue-600 dark:text-blue-400 font-bold">Total Cost: {formatPHP(overrideTotalOutlay)}</span>
                 </div>
               </div>
@@ -1082,32 +1916,102 @@ export default function ConsolidatedQueue() {
               <div className="p-3 bg-blue-50 dark:bg-blue-955/30 border border-blue-200 dark:border-blue-900/60 rounded-xl text-[10px] text-blue-800 dark:text-blue-300 leading-relaxed space-y-1">
                 <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[9px]">
                   <Info className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                  <span>Live DBM Auto-Classification Resolution</span>
+                  <span>Live DBM Classification &amp; Parity Resolution</span>
                 </div>
-                <div>
-                  Class: <strong className="uppercase">{overrideAutoClass.expClass}</strong> &bull; UACS: <code className="font-mono">{overrideAutoClass.uacs}</code>
+                <div className="font-mono">
+                  Expenditure Class: <strong className="uppercase font-bold">{resolvedEffectiveExpClass}</strong> &bull; Resolved UACS: <code>{resolvedEffectiveUacs}</code>
+                </div>
+                <div className="text-[9.5px] text-slate-500 dark:text-slate-400 font-sans">
+                  *Threshold: &ge; {formatPHP(policySettings.capitalization_threshold)} is Capital Outlay (CO); recurring subscriptions are mandatory MOOE.
                 </div>
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-500">Administrative Override Reason</label>
+                <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">Administrative Review Justification</label>
                 <textarea
                   rows={2}
                   value={overrideJustification}
                   onChange={(e) => setOverrideJustification(e.target.value)}
-                  placeholder="Record justification for DBM and audit trail..."
+                  placeholder="Record justification for audit trail and compliance reporting..."
                   className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white resize-none outline-none"
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={submittingOverride}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
-              >
-                <Save className="w-4 h-4" />
-                <span>{submittingOverride ? "Saving Override..." : "Commit Administrative Override"}</span>
+              {/* Dual Modal Action Buttons: Save vs Save & Approve */}
+              <div className="flex gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+                <button
+                  type="submit"
+                  disabled={submittingOverride}
+                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs shadow-xs"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{submittingOverride ? "Saving..." : "Save Classification"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={submittingOverride}
+                  onClick={(e) => handleSaveOverride(e, true)}
+                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm text-xs"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{submittingOverride ? "Authorizing..." : "Save & Approve Proposal"}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* RETURN WITH REVISION INSTRUCTIONS MODAL */}
+      {returnModalItem && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white text-sm">Return Proposal for Revisions</h3>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">Resource: {returnModalItem.item_name}</span>
+              </div>
+              <button onClick={() => setReturnModalItem(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer">
+                <X className="w-5 h-5" />
               </button>
+            </div>
+
+            <form onSubmit={submitReturnWithInstructions} className="space-y-4 text-xs">
+              <div className="space-y-1.5">
+                <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">
+                  Revision Instructions (Will be flagged as Action Item in Department Inbox)
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  value={returnRemark}
+                  onChange={e => setReturnRemark(e.target.value)}
+                  placeholder="Detail missing documentation, expired quotation updates, or required quantity adjustments..."
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none resize-none leading-relaxed"
+                />
+              </div>
+
+              <div className="p-3 bg-amber-50 dark:bg-amber-955/20 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300 rounded-xl text-[10.5px]">
+                Returning this proposal unlocks editing for the department and locks submission until this action item is marked resolved.
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setReturnModalItem(null)}
+                  className="px-4 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold cursor-pointer text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingReturn}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold cursor-pointer shadow-sm text-xs"
+                >
+                  {isSubmittingReturn ? "Returning..." : "Confirm Return"}
+                </button>
+              </div>
             </form>
           </div>
         </div>
@@ -1117,10 +2021,10 @@ export default function ConsolidatedQueue() {
       {activeDiscussionItem && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-xl flex flex-col h-[520px] shadow-2xl overflow-hidden">
-            <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-950">
+            <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-955">
               <div>
                 <h3 className="text-slate-900 dark:text-white font-bold text-sm">Discussions &amp; Remarks</h3>
-                <p className="text-[10px] text-slate-500 font-mono">Proposal: {activeDiscussionItem.item_name}</p>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">Proposal: {activeDiscussionItem.item_name}</p>
               </div>
               <button onClick={() => setActiveDiscussionItem(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer">
                 <X className="w-5 h-5" />
@@ -1135,7 +2039,7 @@ export default function ConsolidatedQueue() {
                       <span className="font-bold text-blue-600 dark:text-blue-400">{c.author_name}</span>
                       <span className="text-slate-400 font-mono">{new Date(c.timestamp).toLocaleTimeString()}</span>
                     </div>
-                    <p className="text-slate-700 dark:text-slate-300">{c.text}</p>
+                    <p className="text-slate-700 dark:text-slate-300 leading-relaxed text-xs">{c.text}</p>
                     
                     {c.requires_department_action && (
                       <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center">
@@ -1149,7 +2053,7 @@ export default function ConsolidatedQueue() {
                         ) : (
                           <button
                             onClick={() => handleResolveComment(c.id)}
-                            className="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
+                            className="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2.5 py-1 rounded-lg cursor-pointer transition-colors shadow-2xs"
                           >
                             Resolve Action
                           </button>

@@ -9,25 +9,25 @@ import DeptDashboard from "./views/department/Dashboard/DeptDashboard";
 import InventoryManager from "./views/department/Inventory/InventoryManager";
 import NeedsAssessment from "./views/department/Needs/NeedsAssessment";
 import UnifiedProposals from "./views/department/Proposals/UnifiedProposals";
-import QuotationManager from "./views/department/Proposals/QuotationManager";
-import GlacierConsole from "./views/department/Proposals/GlacierConsole";
+import ProposedSystems from "./views/department/Systems/ProposedSystems";
 import ActionInbox from "./views/department/Proposals/ActionInbox";
 import CatalogViewer from "./views/department/Catalog/CatalogViewer";
 import ProfileSettings from "./views/department/Profile/ProfileSettings";
+import DeptDocumentVault from "./views/department/Vault/DeptDocumentVault";
 
-// Supply User Workspace (DICT Annex 1)
+// Supply User Workspace (DICT Annex 1 Master Inventory)
 import SupplyInventory from "./views/supply/SupplyInventory";
 
 // Administrator & Governance Workspaces
 import Dashboard from "./views/admin/Dashboard/Dashboard";
 import ConsolidatedQueue from "./views/admin/Queue/ConsolidatedQueue";
 import CeilingControl from "./views/admin/Budget/CeilingControl";
+import CategorizationManager from "./views/admin/Governance/CategorizationManager";
 import ComplianceAnalytics from "./views/admin/Analytics/ComplianceAnalytics";
 import NarrativeManager from "./views/admin/Narrative/NarrativeManager";
 import DiagramVault from "./views/admin/Narrative/DiagramVault";
-import MithiSurveys from "./views/admin/Narrative/MithiSurveys";
 import UserWhitelisting from "./views/admin/Users/UserWhitelisting";
-import CatalogManager from "./views/admin/catalog/CatalogManager";
+import CatalogManager from "./views/admin/Catalog/CatalogManager";
 import AuditTrails from "./views/admin/Audit/AuditTrails";
 import DocumentVault from "./views/shared/DocumentVault/DocumentVault";
 
@@ -36,21 +36,14 @@ import OrganizationalOutcomes from "./views/admin/Narrative/OrganizationalOutcom
 import StrategicConcernsManager from "./views/admin/Narrative/StrategicConcernsManager";
 import InformationSystemsManager from "./views/admin/Systems/InformationSystemsManager";
 import InternalProjectsManager from "./views/admin/Projects/InternalProjectsManager";
-import CrossProjectsManager from "./views/admin/Narrative/CrossProjectsManager";
 import PerformanceMetricsManager from "./views/admin/Narrative/PerformanceMetricsManager";
-import CostBreakdownManager from "./views/admin/Narrative/CostBreakdownManager";
 import InvestmentSummaryViewer from "./views/admin/Budget/InvestmentSummaryViewer";
-import GanttScheduleManager from "./views/admin/Narrative/GanttScheduleManager";
 import StaffPositionsManager from "./views/admin/Narrative/StaffPositionsManager";
-import DocumentStructureManager from "./views/admin/Narrative/DocumentStructureManager";
+import FrameworkChecklists from "./views/admin/Governance/FrameworkChecklists";
 
-// Retained Administrative Registries & Surveys
-import CampusManager from "./views/admin/Campus/CampusManager";
+// Standard Registries
 import GlossaryManager from "./views/admin/Glossary/GlossaryManager";
 import InstructionsManager from "./views/admin/Instructions/InstructionsManager";
-import ServerCapacityManager from "./views/admin/Inventory/ServerCapacityManager";
-import OsCensusManager from "./views/admin/Inventory/OsCensusManager";
-import OfficeSoftwareManager from "./views/admin/Inventory/OfficeSoftwareManager";
 
 import { useAuth } from "./context/AuthContext";
 import { NotificationProvider } from "./context/NotificationContext";
@@ -131,11 +124,12 @@ export default function App() {
             <Route index element={<Navigate to="dashboard" replace />} />
             <Route path="dashboard" element={<DeptDashboard />} />
             <Route path="proposals" element={<UnifiedProposals />} />
+            <Route path="quotations" element={<Navigate to="/dept/proposals" replace />} />
+            <Route path="proposed-systems" element={<ProposedSystems />} />
+            <Route path="systems" element={<Navigate to="/dept/proposed-systems" replace />} />
             <Route path="inventory" element={<InventoryManager />} />
             <Route path="needs" element={<NeedsAssessment />} />
-            <Route path="quotations" element={<QuotationManager />} />
-            <Route path="glacier" element={<GlacierConsole />} />
-            <Route path="vault" element={<DocumentVault />} />
+            <Route path="vault" element={<DeptDocumentVault />} />
             <Route path="inbox" element={<ActionInbox />} />
             <Route path="catalog" element={<CatalogViewer />} />
             <Route path="profile" element={<ProfileSettings />} />
@@ -168,36 +162,50 @@ export default function App() {
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="queue" element={<ConsolidatedQueue />} />
             <Route path="budget" element={<CeilingControl />} />
+            <Route path="categorizations" element={<CategorizationManager />} />
             <Route path="analytics" element={<ComplianceAnalytics />} />
             
             <Route path="narratives" element={<NarrativeManager />} />
             <Route path="diagrams" element={<DiagramVault />} />
-            <Route path="mithi" element={<MithiSurveys />} />
             <Route path="users" element={<UserWhitelisting />} />
             <Route path="catalog" element={<CatalogManager />} />
             <Route path="audit" element={<AuditTrails />} />
             <Route path="vault" element={<DocumentVault />} />
+            <Route path="inventory" element={<SupplyInventory />} />
 
             {/* Core Singularity Workspaces */}
             <Route path="outcomes" element={<OrganizationalOutcomes />} />
+            
             <Route path="narratives/concerns" element={<StrategicConcernsManager />} />
+            <Route path="concerns" element={<Navigate to="narratives/concerns" replace />} />
+            
+            {/* Information Systems Routes (Part II.C & Part III.D) */}
             <Route path="systems" element={<InformationSystemsManager />} />
+            <Route path="systems/operational" element={<InformationSystemsManager />} />
+            <Route path="systems/proposed" element={<InformationSystemsManager />} />
+
+            {/* Unified ICT Projects Portfolio Routes (Part III.E.1 & Part III.E.2) */}
+            <Route path="projects" element={<Navigate to="projects/internal" replace />} />
             <Route path="projects/internal" element={<InternalProjectsManager />} />
-            <Route path="narratives/cross-projects" element={<CrossProjectsManager />} />
-            <Route path="narratives/gantt" element={<GanttScheduleManager />} />
+            {/* Redirect legacy duplicate cross-projects routes to unified portfolio */}
+            <Route path="narratives/cross-projects" element={<Navigate to="/admin/projects/internal" replace />} />
+            <Route path="projects/cross" element={<Navigate to="/admin/projects/internal" replace />} />
+
+            {/* Performance Metrics (Part III.F) */}
             <Route path="narratives/metrics" element={<PerformanceMetricsManager />} />
-            <Route path="narratives/costs" element={<CostBreakdownManager />} />
+            <Route path="metrics" element={<Navigate to="narratives/metrics" replace />} />
+
+            {/* Financial Parity & Staff Positions */}
             <Route path="parity-summary" element={<InvestmentSummaryViewer />} />
             <Route path="narratives/staff-positions" element={<StaffPositionsManager />} />
-            <Route path="narratives/structure" element={<DocumentStructureManager />} />
+            <Route path="staff-positions" element={<Navigate to="narratives/staff-positions" replace />} />
 
-            {/* Mapped Administrative Registries & Surveys */}
-            <Route path="campuses" element={<CampusManager />} />
+            {/* Framework Checklists (Cybersecurity, E-Gov, DRBCP) */}
+            <Route path="framework" element={<FrameworkChecklists />} />
+
+            {/* Standard Registries */}
             <Route path="glossary" element={<GlossaryManager />} />
             <Route path="instructions" element={<InstructionsManager />} />
-            <Route path="inventory/server-capacity" element={<ServerCapacityManager />} />
-            <Route path="inventory/os-census" element={<OsCensusManager />} />
-            <Route path="inventory/software-census" element={<OfficeSoftwareManager />} />
             <Route path="profile" element={<ProfileSettings />} />
           </Route>
 

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, EmailStr, field_validator, model_validato
 
 from app.config import settings
 
-# Import canonical enums directly from database models as the single source of truth
+# Import canonical enums from database models for backwards compatibility and fallback options
 from app.database.models import (
     RoleTag, 
     ProposalStatus, 
@@ -28,14 +28,10 @@ from app.database.models import (
     TransactionComplexity,
     ResultHierarchy,
     AssetStatus, 
-    ScopeChoice,
-    NodeType,
-    PageOrientation,
-    ContentType,
-    AssetRole
+    ScopeChoice
 )
 
-# DICT Annex 1 Standard Inventory Classification Catalog
+# DICT Annex 1 Standard Inventory Classification Catalog fallback
 try:
     from app.database.models import DictAssetCategory
 except ImportError:
@@ -48,6 +44,7 @@ except ImportError:
         PRINTER = "Printer"
         NETWORK_SWITCH = "Network Switch"
         OTHERS_EQUIPMENT = "Others (ICT Equipment)"
+
         OFFICE_PRODUCTIVITY = "Office Productivity Tool"
         GRAMMAR_CHECKER = "Grammar checker"
         GRAPHICS_SIMULATION = "Graphics and Simulation Software"
@@ -68,10 +65,7 @@ def sanitize_text(v: Optional[str]) -> Optional[str]:
     return v
 
 def clean_optional_string(v: Any) -> Optional[str]:
-    """
-    Coerces empty strings, whitespace, or string representations of null
-    ('null', 'none', 'undefined', '') into None.
-    """
+    """Coerces empty strings, whitespace, or string representations of null into None."""
     if v is None:
         return None
     s = str(v).strip()
@@ -102,10 +96,7 @@ def deserialize_dict_if_string(v: Any) -> Dict[Any, Any]:
     return res if isinstance(res, dict) else {}
 
 def coerce_optional_uuid(v: Any) -> Optional[Union[uuid.UUID, str]]:
-    """
-    Safely converts empty strings, string UUIDs, or None to Optional[uuid.UUID] or string.
-    Prevents Pydantic validation failures when frontend components submit empty selectors.
-    """
+    """Safely converts empty strings, string UUIDs, or None to Optional[uuid.UUID] or string."""
     if v is None:
         return None
     if isinstance(v, uuid.UUID):
@@ -121,10 +112,7 @@ def coerce_optional_uuid(v: Any) -> Optional[Union[uuid.UUID, str]]:
     return v
 
 def coerce_enum(enum_cls: Any, v: Any) -> Any:
-    """
-    Bi-directional, case-insensitive enum coercion.
-    Resolves member names, values, and SafeEnumStr instances seamlessly.
-    """
+    """Bi-directional, case-insensitive enum coercion with string fallback."""
     if v is None:
         return None
     if isinstance(v, enum_cls):
@@ -133,18 +121,15 @@ def coerce_enum(enum_cls: Any, v: Any) -> Any:
     if not v_str or v_str.lower() in ("none", "null", "undefined", ""):
         return None
 
-    # 1. Exact value or name match
     for member in enum_cls:
         if member.value == v_str or member.name == v_str:
             return member
 
-    # 2. Case-insensitive value or name match
     v_lower = v_str.lower()
     for member in enum_cls:
         if member.value.lower() == v_lower or member.name.lower() == v_lower:
             return member
 
-    # 3. Normalized underscore/space match
     v_normalized = v_lower.replace(" ", "_").replace("-", "_")
     for member in enum_cls:
         if member.name.lower() == v_normalized:
@@ -156,129 +141,7 @@ def coerce_enum(enum_cls: Any, v: Any) -> Any:
         for member in enum_cls:
             if v_lower in member.value.lower() or member.name.lower() in v_lower:
                 return member
-        return v
-
-
-# ==========================================================
-# 0. DOCUMENT TREE ARCHITECTURE SCHEMAS
-# ==========================================================
-
-class IsspVocabularyBase(BaseModel):
-    display_title: str = Field(..., max_length=255, description="Official DICT title header")
-    toc_label: str = Field(..., max_length=255, description="Short label for Table of Contents")
-
-
-class IsspVocabularyCreate(IsspVocabularyBase):
-    pass
-
-
-class IsspVocabularyResponse(IsspVocabularyBase):
-    id: int
-    node_id: int
-    model_config = ConfigDict(from_attributes=True)
-
-
-class IsspContentBase(BaseModel):
-    content_type: ContentType
-    json_data: Dict[str, Any] = Field(..., description="Structured JSON payload")
-
-    @field_validator('content_type', mode='before')
-    @classmethod
-    def coerce_content_type(cls, v: Any) -> Any:
-        return coerce_enum(ContentType, v)
-
-
-class IsspContentCreate(IsspContentBase):
-    pass
-
-
-class IsspContentResponse(IsspContentBase):
-    id: int
-    node_id: int
-    model_config = ConfigDict(from_attributes=True)
-
-
-class IsspAssetBase(BaseModel):
-    file_path: str = Field(..., max_length=255, description="S3 or local storage URL")
-    asset_role: AssetRole
-    custom_title: Optional[str] = Field(None, max_length=255, description="Header text for full page diagrams")
-    aspect_ratio_preserve: bool = Field(True, description="Enforce aspect ratio bounds")
-
-    @field_validator('asset_role', mode='before')
-    @classmethod
-    def coerce_asset_role(cls, v: Any) -> Any:
-        return coerce_enum(AssetRole, v)
-
-
-class IsspAssetCreate(IsspAssetBase):
-    node_id: int
-
-
-class IsspAssetResponse(IsspAssetBase):
-    id: int
-    node_id: int
-    model_config = ConfigDict(from_attributes=True)
-
-
-class IsspNodeBase(BaseModel):
-    node_type: NodeType
-    system_key: str = Field(..., max_length=100, description="Unique system lookup key")
-    sequence_order: Decimal = Field(..., description="Decimal sorting order index")
-    page_orientation: PageOrientation = Field(PageOrientation.LANDSCAPE)
-    force_page_break: bool = Field(False)
-
-    @field_validator('node_type', mode='before')
-    @classmethod
-    def coerce_node_type(cls, v: Any) -> Any:
-        return coerce_enum(NodeType, v)
-
-    @field_validator('page_orientation', mode='before')
-    @classmethod
-    def coerce_page_orientation(cls, v: Any) -> Any:
-        return coerce_enum(PageOrientation, v) or PageOrientation.LANDSCAPE
-
-
-class IsspNodeCreate(IsspNodeBase):
-    parent_id: Optional[int] = None
-
-
-class IsspNodeUpdate(BaseModel):
-    node_type: Optional[NodeType] = None
-    system_key: Optional[str] = None
-    sequence_order: Optional[Decimal] = None
-    page_orientation: Optional[PageOrientation] = None
-    force_page_break: Optional[bool] = None
-    parent_id: Optional[int] = None
-
-    @field_validator('node_type', mode='before')
-    @classmethod
-    def coerce_node_type(cls, v: Any) -> Any:
-        return coerce_enum(NodeType, v)
-
-    @field_validator('page_orientation', mode='before')
-    @classmethod
-    def coerce_page_orientation(cls, v: Any) -> Any:
-        return coerce_enum(PageOrientation, v)
-
-
-class IsspNodeReorderPayload(BaseModel):
-    node_id: int
-    parent_id: Optional[int] = None
-    sequence_order: Decimal
-
-
-class IsspNodeResponse(IsspNodeBase):
-    id: int
-    parent_id: Optional[int] = None
-    created_at: datetime
-    vocabulary: Optional[IsspVocabularyResponse] = None
-    contents: List[IsspContentResponse] = []
-    assets: List[IsspAssetResponse] = []
-    children: List["IsspNodeResponse"] = []
-    model_config = ConfigDict(from_attributes=True)
-
-
-IsspNodeResponse.model_rebuild()
+        return v_str
 
 
 # ==========================================================
@@ -362,8 +225,10 @@ class CatalogItemResponse(CatalogItemSchema):
 
 class SupplyInventoryCreate(BaseModel):
     department_id: int = Field(..., description="Target Department / Office ID")
+    issp_period: Optional[str] = Field(default=None, description="Active ISSP planning period snapshot")
+    replacement_proposal_id: Optional[Union[uuid.UUID, str]] = Field(default=None, description="Linked proposal that consumed this unit")
     item_name: str = Field(..., max_length=200, description="Name of Unit / ICT Resource Description")
-    dict_category: Optional[DictAssetCategory] = Field(
+    dict_category: Optional[Union[DictAssetCategory, str]] = Field(
         default=None, 
         description="Official DICT Annex 1 Standard Category (e.g. Desktop, Laptop, Servers, WAF)"
     )
@@ -375,10 +240,10 @@ class SupplyInventoryCreate(BaseModel):
     specs: Optional[str] = Field(None, description="Hardware Specifications")
     exact_model: Optional[str] = Field(None, max_length=200, description="Exact Brand and Model")
     quantity: int = Field(1, ge=1, description="Physical Unit Count")
-    status: AssetStatus = Field(default=AssetStatus.FUNCTIONAL, description="Operational Condition")
+    status: Union[AssetStatus, str] = Field(default="Functional", description="Operational Condition")
     date_acquired: datetime = Field(default_factory=datetime.utcnow, description="Date Acquired")
     acquired_price: Decimal = Field(default=Decimal("0.00"), ge=0, description="Historical Acquisition Price (PHP)")
-    office_location: OfficeLocation = Field(default=OfficeLocation.CENTRAL_OFFICE)
+    office_location: Union[OfficeLocation, str] = Field(default="Central Office")
     is_central_office: bool = Field(default=True)
     is_end_of_life: bool = Field(default=False)
     is_backup: bool = Field(default=False)
@@ -394,12 +259,17 @@ class SupplyInventoryCreate(BaseModel):
     @field_validator('status', mode='before')
     @classmethod
     def coerce_status(cls, v: Any) -> Any:
-        return coerce_enum(AssetStatus, v) or AssetStatus.FUNCTIONAL
+        return str(getattr(v, 'value', v) or "Functional")
 
     @field_validator('office_location', mode='before')
     @classmethod
     def coerce_location(cls, v: Any) -> Any:
-        return coerce_enum(OfficeLocation, v) or OfficeLocation.CENTRAL_OFFICE
+        return str(getattr(v, 'value', v) or "Central Office")
+
+    @field_validator('replacement_proposal_id', mode='before')
+    @classmethod
+    def coerce_replacement_id(cls, v: Any) -> Any:
+        return coerce_optional_uuid(v)
 
     @field_validator('item_name', 'specs', 'exact_model', 'other_category_name', mode='before')
     @classmethod
@@ -424,8 +294,14 @@ class SupplyInventoryResponse(SupplyInventoryCreate):
 
 class OrganizationalOutcomeCreate(BaseModel):
     type_label: str = Field(default="Organizational Outcome", example="Organizational Outcome")
-    outcome_name: str = Field(..., max_length=255, example="Public Service Modernization Program")
+    outcome_name: str = Field(..., max_length=255, example="Citizen Frontline Public Services Program")
     description: Optional[str] = Field(None, example="Quality frontline public service delivery and administrative operations.")
+
+
+class OrganizationalOutcomeUpdate(BaseModel):
+    type_label: Optional[str] = None
+    outcome_name: Optional[str] = None
+    description: Optional[str] = None
 
 
 class OrganizationalOutcomeResponse(BaseModel):
@@ -440,6 +316,8 @@ class OrganizationalOutcomeResponse(BaseModel):
     def populate_aliases(self) -> 'OrganizationalOutcomeResponse':
         if not self.program_name and self.outcome_name:
             self.program_name = self.outcome_name
+        elif not self.outcome_name and self.program_name:
+            self.outcome_name = self.program_name
         return self
 
     model_config = ConfigDict(from_attributes=True)
@@ -463,14 +341,35 @@ class HumanCapitalResponse(HumanCapitalCreate):
 class StakeholderAnalysisCreate(BaseModel):
     stakeholder_group: str = Field(..., example="General Public / Citizens")
     transaction_processed_incoming: Optional[str] = Field(None, example="Online Applications, Inquiries, and Filings")
-    complexity_incoming: TransactionComplexity = Field(default=TransactionComplexity.SIMPLE)
+    complexity_incoming: str = Field(default="Simple", example="Simple to Complex")
     transaction_processed_outgoing: Optional[str] = Field(None, example="Permits, Clearances, Certificates, and Statements")
-    complexity_outgoing: TransactionComplexity = Field(default=TransactionComplexity.SIMPLE)
+    complexity_outgoing: str = Field(default="Simple", example="Simple to Highly Technical")
 
     @field_validator('complexity_incoming', 'complexity_outgoing', mode='before')
     @classmethod
-    def coerce_complexity_enums(cls, v: Any) -> Any:
-        return coerce_enum(TransactionComplexity, v)
+    def coerce_complexity_strings(cls, v: Any) -> str:
+        if v is None:
+            return "Simple"
+        if hasattr(v, "value"):
+            return str(v.value)
+        return str(v).strip()
+
+
+class StakeholderAnalysisUpdate(BaseModel):
+    stakeholder_group: Optional[str] = None
+    transaction_processed_incoming: Optional[str] = None
+    complexity_incoming: Optional[str] = None
+    transaction_processed_outgoing: Optional[str] = None
+    complexity_outgoing: Optional[str] = None
+
+    @field_validator('complexity_incoming', 'complexity_outgoing', mode='before')
+    @classmethod
+    def coerce_complexity_strings(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if hasattr(v, "value"):
+            return str(v.value)
+        return str(v).strip()
 
 
 class StakeholderAnalysisResponse(BaseModel):
@@ -499,8 +398,8 @@ class StakeholderAnalysisResponse(BaseModel):
 
 class StrategicConcernCreate(BaseModel):
     outcome_id: Optional[int] = None
-    mfo: str = Field(..., example="Frontline Service Modernization")
-    critical_system: str = Field(..., example="Enterprise Resource Planning System")
+    mfo: str = Field(..., example="Citizen Frontline Public Services Program")
+    critical_system: str = Field(..., example="Citizen Frontline Registry and Electronic Payment System")
     problems: str = Field(..., example="High transaction latency and legacy manual verification delays.")
     intended_use: str = Field(..., example="Deploy containerized microservices and automated digital payment integration.")
     order_index: int = Field(default=0)
@@ -551,12 +450,18 @@ class CybersecurityControlResponse(CybersecurityControlCreate):
 
 
 class EGovernmentChecklistCreate(BaseModel):
-    program_name: str = Field(..., example="eGovPay")
+    program_name: str = Field(..., example="2. GOVERNMENT DIGITAL PAYMENT SYSTEM FOR COLLECTION AND DISBURSEMENT")
     is_utilized: bool = Field(default=False)
     url_or_system_name: Optional[str] = None
     equivalent_system_details: Optional[str] = None
+    equivalent_system_name: Optional[str] = Field(default=None, description="Name of equivalent in-house or outsourced system")
+    equivalent_system_url: Optional[str] = Field(default=None, description="Portal address of equivalent system")
+    has_other_payment_platform: bool = Field(default=False, description="Using other digital or electronic payment platform")
     is_manual: bool = Field(default=False, description="Manual processing / transaction in place")
     is_proposed_development: bool = Field(default=False, description="Proposed development of equivalent system")
+    proposed_development_name: Optional[str] = Field(default=None, description="Name or details of proposed equivalent system")
+    total_employees: Optional[str] = Field(default=None, description="Total number of agency employees")
+    active_pnpki_count: Optional[str] = Field(default=None, description="Total employees with active PNPKI certificates")
     is_proposed_equivalent: Optional[bool] = Field(default=False, description="Alias for is_proposed_development")
     adoption_ratio: Optional[str] = Field(None, example="50% of eligible employees with active PNPKI certificates")
     channels_json: Optional[List[str]] = Field(default_factory=list, example=["Website", "Email", "Mobile", "Landline", "Social Media"])
@@ -574,6 +479,31 @@ class EGovernmentChecklistCreate(BaseModel):
         return self
 
 
+class EGovernmentChecklistUpdate(BaseModel):
+    program_name: Optional[str] = None
+    is_utilized: Optional[bool] = None
+    url_or_system_name: Optional[str] = None
+    equivalent_system_details: Optional[str] = None
+    equivalent_system_name: Optional[str] = None
+    equivalent_system_url: Optional[str] = None
+    has_other_payment_platform: Optional[bool] = None
+    is_manual: Optional[bool] = None
+    is_proposed_development: Optional[bool] = None
+    proposed_development_name: Optional[str] = None
+    total_employees: Optional[str] = None
+    active_pnpki_count: Optional[str] = None
+    adoption_ratio: Optional[str] = None
+    channels_json: Optional[List[str]] = None
+    is_connected_to_portal: Optional[bool] = None
+
+    @field_validator('channels_json', mode='before')
+    @classmethod
+    def deserialize_channels(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        return deserialize_list_if_string(v)
+
+
 class EGovernmentChecklistResponse(EGovernmentChecklistCreate):
     id: int
     issp_period: str
@@ -585,66 +515,126 @@ class EGovernmentChecklistResponse(EGovernmentChecklistCreate):
 # ==========================================================
 
 class InformationSystemCreate(BaseModel):
+    """
+    Department-friendly intake model for Information Systems proposals.
+    Includes direct linkage to major ICT Projects (Part III.E).
+    """
+    department_id: Optional[int] = Field(default=None, description="Proposing Department ID")
+    needs_assessment_id: Optional[Union[uuid.UUID, str]] = Field(default=None, description="Linked Section 8.0 Needs Assessment")
     strategic_concern_id: Optional[Union[uuid.UUID, str]] = None
-    name: str = Field(..., max_length=255, example="Enterprise Document Management System")
-    status: SystemStatus = Field(default=SystemStatus.OPERATIONAL)
-    classification: SystemClassification = Field(default=SystemClassification.OPERATIONS_FRONTLINE)
-    hosting_type: SystemHostingType = Field(default=SystemHostingType.HYBRID)
-    online_url: Optional[str] = None
+    project_id: Optional[Union[uuid.UUID, str]] = Field(default=None, description="Linked Major ICT Project ID (Part III.E)")
+    name: str = Field(..., max_length=255, example="Citizen Frontline Registry and Electronic Payment System")
+    status: Union[SystemStatus, str] = Field(default="For Development")
+    submission_status: str = Field(default="Draft", description="Draft | Submitted | Approved | Returned")
+    rejection_reason: Optional[str] = None
+    classification: Optional[Union[SystemClassification, str]] = Field(default="Operations - Frontline Service")
+    
+    # Financial Cost Proposal (Aggregated into Part III.E Project Costs)
+    proposed_cost: Decimal = Field(default=Decimal("0.00"), ge=0, description="Estimated total budget or development outlay for this system")
+    is_client_facing: bool = Field(default=True, description="Public/client facing or internal back-office")
+
+    # 100% DICT Template Multi-Classification Checkboxes (Template Pages 11 & 20)
+    is_support_to_operations: bool = Field(default=False, description="Support to Operations")
+    is_general_administrative: bool = Field(default=False, description="General Administrative Systems")
+    is_operations: bool = Field(default=True, description="Operations")
+
+    # Subordinated frontline details (DICT Part II.C & III.D)
+    is_frontline_service: bool = Field(default=True, description="Directly used for public/client service delivery")
+    frontline_hosting_type: Union[SystemHostingType, str] = Field(default="Online", description="Online | On-premise | Hybrid")
+    online_url: Optional[str] = Field(default=None, description="Public web portal address")
+    is_non_frontline_service: bool = Field(default=False, description="Supports core mandate but not directly used by clients/public")
+    hosting_type: Optional[Union[SystemHostingType, str]] = Field(default=None, description="Legacy alias for frontline_hosting_type")
+
     description_and_purpose: str = Field(default="")
-    enhancement_details: Optional[str] = Field(default=None, description="Details of enhancements to be done when status is 'For Enhancement'")
-    development_strategy: DevelopmentStrategy = Field(default=DevelopmentStrategy.OUTSOURCED)
-    development_platform: str = Field(default="", example="Python FastAPI, React, PostgreSQL")
-    database_name: str = Field(default="", example="production_db")
-    data_storage_type: str = Field(default="", example="Enterprise Cloud Storage")
-    internal_users: str = Field(default="", example="Administrative Staff, Division Officers")
-    external_users: str = Field(default="", example="General Public, Commercial Entities")
-    system_owner_office: str = Field(default="", example="Management Information Systems Division")
+    enhancement_details: Optional[str] = Field(default=None, description="Details of enhancements when status is 'For Enhancement'")
+    development_strategy: Union[DevelopmentStrategy, str] = Field(default="Outsourced")
+    development_platform: str = Field(default="Web-Based Architecture", example="Python FastAPI, React, PostgreSQL")
+    database_name: str = Field(default="AppDatabase", example="production_db")
+    data_storage_type: str = Field(default="Cloud / On-premise Storage", example="GovCloud Enterprise NVMe Storage")
+    internal_users: str = Field(default="Department Personnel", example="Administrative Staff, Division Officers")
+    external_users: str = Field(default="General Public", example="General Public, Corporate Entities")
+    system_owner_office: str = Field(default="Department Office", example="Public Frontline Services Division")
+    
+    # Interoperability Capabilities
     is_integrated_with_others: bool = Field(default=False)
     internal_integrated_systems: Optional[str] = None
     external_integrated_systems: Optional[str] = None
     generates_data_for_others: bool = Field(default=False)
     processes_data_from_others: bool = Field(default=False)
     is_deployed_on_shared_platform: bool = Field(default=False)
+    
+    # Data Privacy Act (PIA) Compliance
     processes_personal_information: bool = Field(default=False)
     has_undergone_pia: bool = Field(default=False)
+    pia_target_date_text: Optional[str] = Field(default=None, max_length=100, description="Target audit date if PIA is not yet completed")
 
-    @field_validator('strategic_concern_id', mode='before')
+    @field_validator('strategic_concern_id', 'needs_assessment_id', 'project_id', mode='before')
     @classmethod
-    def coerce_concern_id(cls, v: Any) -> Any:
+    def coerce_ids(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('status', mode='before')
+    @field_validator('status', 'classification', 'hosting_type', 'frontline_hosting_type', 'development_strategy', mode='before')
     @classmethod
-    def coerce_status(cls, v: Any) -> Any:
-        return coerce_enum(SystemStatus, v) or SystemStatus.OPERATIONAL
+    def coerce_str_enums(cls, v: Any) -> str:
+        return str(getattr(v, 'value', v) or "")
 
-    @field_validator('classification', mode='before')
-    @classmethod
-    def coerce_classification(cls, v: Any) -> Any:
-        return coerce_enum(SystemClassification, v)
+    @model_validator(mode='after')
+    def sync_frontline_and_hosting(self) -> 'InformationSystemCreate':
+        if self.hosting_type and not self.frontline_hosting_type:
+            self.frontline_hosting_type = self.hosting_type
+        elif self.frontline_hosting_type and not self.hosting_type:
+            self.hosting_type = self.frontline_hosting_type
 
-    @field_validator('hosting_type', mode='before')
-    @classmethod
-    def coerce_hosting(cls, v: Any) -> Any:
-        return coerce_enum(SystemHostingType, v) or SystemHostingType.HYBRID
+        if self.is_client_facing and not self.is_frontline_service:
+            self.is_frontline_service = True
+        elif not self.is_client_facing and self.is_frontline_service:
+            self.is_client_facing = True
 
-    @field_validator('development_strategy', mode='before')
-    @classmethod
-    def coerce_strategy(cls, v: Any) -> Any:
-        return coerce_enum(DevelopmentStrategy, v)
+        class_str = str(getattr(self.classification, 'value', self.classification) or "").lower()
+        if class_str:
+            if "support" in class_str:
+                self.is_support_to_operations = True
+            if "general administrative" in class_str or "administrative" in class_str:
+                self.is_general_administrative = True
+            if "operations" in class_str or "frontline" in class_str:
+                self.is_operations = True
+            if "frontline" in class_str:
+                if "non-frontline" in class_str:
+                    self.is_non_frontline_service = True
+                    self.is_frontline_service = False
+                else:
+                    self.is_frontline_service = True
+                    self.is_non_frontline_service = False
+
+        if not self.is_support_to_operations and not self.is_general_administrative and not self.is_operations:
+            self.is_operations = True
+
+        return self
 
 
 class InformationSystemUpdate(BaseModel):
+    department_id: Optional[int] = None
+    needs_assessment_id: Optional[Union[uuid.UUID, str]] = None
     strategic_concern_id: Optional[Union[uuid.UUID, str]] = None
+    project_id: Optional[Union[uuid.UUID, str]] = None
     name: Optional[str] = None
-    status: Optional[SystemStatus] = None
-    classification: Optional[SystemClassification] = None
-    hosting_type: Optional[SystemHostingType] = None
+    status: Optional[str] = None
+    submission_status: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    classification: Optional[str] = None
+    proposed_cost: Optional[Decimal] = Field(None, ge=0)
+    is_client_facing: Optional[bool] = None
+    is_support_to_operations: Optional[bool] = None
+    is_general_administrative: Optional[bool] = None
+    is_operations: Optional[bool] = None
+    is_frontline_service: Optional[bool] = None
+    frontline_hosting_type: Optional[str] = None
     online_url: Optional[str] = None
+    is_non_frontline_service: Optional[bool] = None
+    hosting_type: Optional[str] = None
     description_and_purpose: Optional[str] = None
     enhancement_details: Optional[str] = None
-    development_strategy: Optional[DevelopmentStrategy] = None
+    development_strategy: Optional[str] = None
     development_platform: Optional[str] = None
     database_name: Optional[str] = None
     data_storage_type: Optional[str] = None
@@ -659,38 +649,31 @@ class InformationSystemUpdate(BaseModel):
     is_deployed_on_shared_platform: Optional[bool] = None
     processes_personal_information: Optional[bool] = None
     has_undergone_pia: Optional[bool] = None
+    pia_target_date_text: Optional[str] = None
 
-    @field_validator('strategic_concern_id', mode='before')
+    @field_validator('strategic_concern_id', 'needs_assessment_id', 'project_id', mode='before')
     @classmethod
-    def coerce_concern_id(cls, v: Any) -> Any:
+    def coerce_ids(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('status', mode='before')
+    @field_validator('status', 'classification', 'hosting_type', 'frontline_hosting_type', 'development_strategy', mode='before')
     @classmethod
-    def coerce_status(cls, v: Any) -> Any:
-        return coerce_enum(SystemStatus, v)
-
-    @field_validator('classification', mode='before')
-    @classmethod
-    def coerce_classification(cls, v: Any) -> Any:
-        return coerce_enum(SystemClassification, v)
-
-    @field_validator('hosting_type', mode='before')
-    @classmethod
-    def coerce_hosting(cls, v: Any) -> Any:
-        return coerce_enum(SystemHostingType, v)
-
-    @field_validator('development_strategy', mode='before')
-    @classmethod
-    def coerce_strategy(cls, v: Any) -> Any:
-        return coerce_enum(DevelopmentStrategy, v)
+    def coerce_str_enums(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        return str(getattr(v, 'value', v) or "")
 
 
 class InformationSystemResponse(InformationSystemCreate):
     id: Union[uuid.UUID, str]
     issp_period: str
+    department_name: Optional[str] = None
+    project_title: Optional[str] = None
+    needs_assessment_title: Optional[str] = None
+    proposed_cost: Decimal = Decimal("0.00")
+    is_client_facing: bool = True
 
-    @field_validator('id', 'strategic_concern_id', mode='before')
+    @field_validator('id', 'strategic_concern_id', 'needs_assessment_id', 'project_id', mode='before')
     @classmethod
     def coerce_ids(cls, v: Any) -> Any:
         return coerce_optional_uuid(v) or v
@@ -698,43 +681,78 @@ class InformationSystemResponse(InformationSystemCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SystemApprovalPayload(BaseModel):
+    strategic_concern_id: Optional[Union[uuid.UUID, str]] = None
+    project_id: Optional[Union[uuid.UUID, str]] = None
+    status: str = Field(default="For Development", description="Operational | For Development | For Enhancement")
+    action: str = Field(default="APPROVE", description="APPROVE | RETURN")
+    rejection_reason: Optional[str] = None
+
+    @field_validator('strategic_concern_id', 'project_id', mode='before')
+    @classmethod
+    def coerce_ids(cls, v: Any) -> Any:
+        return coerce_optional_uuid(v)
+
+
 # ==========================================================
 # 7. PART III.E & III.F: ICT PROJECTS & PMF
 # ==========================================================
 
+class ProjectLinksPayload(BaseModel):
+    proposal_ids: List[Union[uuid.UUID, str]] = Field(default_factory=list, description="IDs of proposals to bind to this project")
+    system_ids: List[Union[uuid.UUID, str]] = Field(default_factory=list, description="IDs of systems to bind to this project")
+
+    @field_validator('proposal_ids', 'system_ids', mode='before')
+    @classmethod
+    def coerce_uuid_list(cls, v: Any) -> List[Any]:
+        if not isinstance(v, list):
+            return []
+        return [coerce_optional_uuid(i) for i in v if i]
+
+
 class IctProjectCreate(BaseModel):
     system_id: Optional[Union[uuid.UUID, str]] = None
-    project_title: str = Field(..., max_length=255, example="Enterprise Cloud Infrastructure Modernization")
-    project_category: ProjectCategory = Field(default=ProjectCategory.INTERNAL_ICT_PROJECT)
+    project_title: str = Field(..., max_length=255, example="Citizen Frontline Portal Modernization and GovCloud Migration Project")
+    project_category: Union[ProjectCategory, str] = Field(default="Internal ICT Projects")
     description: Optional[str] = Field(default="")
     objectives: Optional[str] = Field(default="")
+    
+    # Strategic Alignment Checklists
     aligns_pip: bool = Field(default=False)
     aligns_ncsp: bool = Field(default=False)
     aligns_egmp: bool = Field(default=False)
     aligns_pcb: bool = Field(default=False)
-    aligns_others: bool = Field(default=False, description="DICT Part III.E Strategic Alignment 'Others (Specify)'")
-    aligns_others_specify: Optional[str] = Field(default=None, max_length=255, description="Specific program if aligns_others is True")
+    aligns_others: bool = Field(default=False, description="Strategic Alignment 'Others (Specify)'")
+    aligns_others_specify: Optional[str] = Field(default=None, max_length=255)
+    
+    # Dynamic Harmonization Framework Criteria
+    harmonization_criteria: Dict[str, bool] = Field(
+        default_factory=dict,
+        description="Dynamic harmonization criteria map, e.g. {'National Prioritization': true, 'PeGIF': true, ...}"
+    )
+
+    # Legacy booleans preserved for backward compatibility
     harmonizes_national_priority: bool = Field(default=False)
     harmonizes_resource_optimization: bool = Field(default=False)
     harmonizes_pegif: bool = Field(default=False)
     harmonizes_cross_collaboration: bool = Field(default=False)
     harmonizes_scalability: bool = Field(default=False)
+    
     duration_start_year: Optional[int] = Field(default=2026, example=2026)
     duration_end_year: Optional[int] = Field(default=2028, example=2028)
     
-    # Dynamic annual deliverables dictionary supporting arbitrary year spans (1 to N years)
+    # Dynamic Multi-Year Deliverables / Milestones Map (2 to 5+ Years)
     annual_deliverables: Dict[str, str] = Field(
         default_factory=dict, 
-        description="Dynamic year-keyed deliverables map, e.g. {'Year 1': '...', 'Year 2': '...'}"
+        description="Dynamic year-keyed deliverables map, e.g. {'2028': '...', '2029': '...', '2030': '...'}"
     )
     
-    # Backward-compatible properties for 3-year templates
     year_1_deliverables: Optional[str] = Field(default="")
     year_2_deliverables: Optional[str] = Field(default="")
     year_3_deliverables: Optional[str] = Field(default="")
     
     implementing_unit: Optional[str] = Field(default="ICT Management Office")
-    funding_source: FundSource = Field(default=FundSource.GAA)
+    funding_source: Union[FundSource, str] = Field(default="General Appropriations Act (GAA)")
     lead_agency: Optional[str] = None
     partner_agencies: Optional[str] = None
 
@@ -743,32 +761,41 @@ class IctProjectCreate(BaseModel):
     def coerce_system_id(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('project_category', mode='before')
+    @field_validator('project_category', 'funding_source', mode='before')
     @classmethod
-    def coerce_proj_cat(cls, v: Any) -> Any:
-        return coerce_enum(ProjectCategory, v) or ProjectCategory.INTERNAL_ICT_PROJECT
+    def coerce_cat_funding(cls, v: Any) -> str:
+        return str(getattr(v, 'value', v) or "")
 
-    @field_validator('funding_source', mode='before')
+    @field_validator('annual_deliverables', 'harmonization_criteria', mode='before')
     @classmethod
-    def coerce_funding(cls, v: Any) -> Any:
-        return coerce_enum(FundSource, v) or FundSource.GAA
-
-    @field_validator('annual_deliverables', mode='before')
-    @classmethod
-    def deserialize_annual_deliverables(cls, v: Any) -> Dict[str, str]:
-        parsed = deserialize_dict_if_string(v)
-        return {str(k): str(val) for k, val in parsed.items()} if parsed else {}
+    def deserialize_dynamic_dicts(cls, v: Any) -> Dict[str, Any]:
+        return deserialize_dict_if_string(v)
 
     @model_validator(mode='after')
-    def sync_deliverables(self) -> 'IctProjectCreate':
+    def sync_criteria_and_deliverables(self) -> 'IctProjectCreate':
+        if not self.harmonization_criteria:
+            self.harmonization_criteria = {
+                "National Prioritization (PDP 2023-2028)": self.harmonizes_national_priority,
+                "Resource Optimization (GovNet, GovCloud)": self.harmonizes_resource_optimization,
+                "PeGIF Standardized APIs & Interoperability": self.harmonizes_pegif,
+                "Cross-Agency Collaboration (JMC / MOA)": self.harmonizes_cross_collaboration,
+                "Scalability and Sustainability (SPAR / PREXC)": self.harmonizes_scalability
+            }
+        else:
+            for k, val in self.harmonization_criteria.items():
+                k_lower = k.lower()
+                b_val = bool(val)
+                if "priority" in k_lower or "pdp" in k_lower: self.harmonizes_national_priority = b_val
+                if "resource" in k_lower or "cloud" in k_lower or "govnet" in k_lower: self.harmonizes_resource_optimization = b_val
+                if "interoperability" in k_lower or "pegif" in k_lower or "api" in k_lower: self.harmonizes_pegif = b_val
+                if "cross" in k_lower or "collaboration" in k_lower or "jmc" in k_lower: self.harmonizes_cross_collaboration = b_val
+                if "scalability" in k_lower or "sustainability" in k_lower or "spar" in k_lower or "prexc" in k_lower: self.harmonizes_scalability = b_val
+
         if not self.annual_deliverables:
             deliverables = {}
-            if self.year_1_deliverables:
-                deliverables["Year 1"] = self.year_1_deliverables
-            if self.year_2_deliverables:
-                deliverables["Year 2"] = self.year_2_deliverables
-            if self.year_3_deliverables:
-                deliverables["Year 3"] = self.year_3_deliverables
+            if self.year_1_deliverables: deliverables["Year 1"] = self.year_1_deliverables
+            if self.year_2_deliverables: deliverables["Year 2"] = self.year_2_deliverables
+            if self.year_3_deliverables: deliverables["Year 3"] = self.year_3_deliverables
             self.annual_deliverables = deliverables
         else:
             if not self.year_1_deliverables and "Year 1" in self.annual_deliverables:
@@ -783,7 +810,7 @@ class IctProjectCreate(BaseModel):
 class IctProjectUpdate(BaseModel):
     system_id: Optional[Union[uuid.UUID, str]] = None
     project_title: Optional[str] = None
-    project_category: Optional[ProjectCategory] = None
+    project_category: Optional[str] = None
     description: Optional[str] = None
     objectives: Optional[str] = None
     aligns_pip: Optional[bool] = None
@@ -792,6 +819,7 @@ class IctProjectUpdate(BaseModel):
     aligns_pcb: Optional[bool] = None
     aligns_others: Optional[bool] = None
     aligns_others_specify: Optional[str] = None
+    harmonization_criteria: Optional[Dict[str, bool]] = None
     harmonizes_national_priority: Optional[bool] = None
     harmonizes_resource_optimization: Optional[bool] = None
     harmonizes_pegif: Optional[bool] = None
@@ -804,7 +832,7 @@ class IctProjectUpdate(BaseModel):
     year_2_deliverables: Optional[str] = None
     year_3_deliverables: Optional[str] = None
     implementing_unit: Optional[str] = None
-    funding_source: Optional[FundSource] = None
+    funding_source: Optional[str] = None
     lead_agency: Optional[str] = None
     partner_agencies: Optional[str] = None
 
@@ -813,29 +841,28 @@ class IctProjectUpdate(BaseModel):
     def coerce_system_id(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('project_category', mode='before')
+    @field_validator('project_category', 'funding_source', mode='before')
     @classmethod
-    def coerce_proj_cat(cls, v: Any) -> Any:
-        return coerce_enum(ProjectCategory, v)
-
-    @field_validator('funding_source', mode='before')
-    @classmethod
-    def coerce_funding(cls, v: Any) -> Any:
-        return coerce_enum(FundSource, v)
-
-    @field_validator('annual_deliverables', mode='before')
-    @classmethod
-    def deserialize_annual_deliverables(cls, v: Any) -> Optional[Dict[str, str]]:
+    def coerce_cat_funding(cls, v: Any) -> Optional[str]:
         if v is None:
             return None
-        parsed = deserialize_dict_if_string(v)
-        return {str(k): str(val) for k, val in parsed.items()} if parsed else {}
+        return str(getattr(v, 'value', v) or "")
+
+    @field_validator('annual_deliverables', 'harmonization_criteria', mode='before')
+    @classmethod
+    def deserialize_dynamic_dicts(cls, v: Any) -> Optional[Dict[str, Any]]:
+        if v is None:
+            return None
+        return deserialize_dict_if_string(v)
 
 
 class IctProjectResponse(IctProjectCreate):
     id: Union[uuid.UUID, str]
     issp_period: str
     computed_total_project_cost: Decimal = Decimal("0.00")
+    harmonization_criteria: Dict[str, bool] = Field(default_factory=dict)
+    linked_proposals: List[Dict[str, Any]] = Field(default_factory=list, description="Child proposals and items assigned to this project")
+    linked_systems: List[Dict[str, Any]] = Field(default_factory=list, description="Child information systems linked to this project")
 
     @field_validator('id', mode='before')
     @classmethod
@@ -856,11 +883,11 @@ class IctProjectResponse(IctProjectCreate):
 
 
 class CrossAgencyProjectCreate(BaseModel):
-    name: str = Field(..., example="National Single Window Data Exchange")
+    name: str = Field(..., example="National Single Window & Inter-Agency Interoperability Project")
     objectives: str = Field(default="")
     duration: str = Field(default="2026-2028", example="2026-2028")
     deliverables: str = Field(default="")
-    lead_agency: str = Field(default="DICT", example="DICT")
+    lead_agency: str = Field(default="Department of Information and Communications Technology (DICT)", example="DICT")
     implementing_agencies: str = Field(default="")
 
 
@@ -878,18 +905,28 @@ class CrossAgencyProjectResponse(CrossAgencyProjectCreate):
 
 class PerformanceMetricCreate(BaseModel):
     project_id: Optional[Union[uuid.UUID, str]] = None
-    project_title: str = Field(..., example="Enterprise Cloud Infrastructure Modernization")
+    project_title: Optional[str] = Field(default="Institutional ICT Governance", example="Institutional ICT Governance")
     result_hierarchy: str = Field(default="Immediate Outcome", example="Immediate Outcome")
-    indicator: str = Field(..., example="Average transaction completion duration reduction")
-    baseline: str = Field(..., example="3 working days")
-    target: str = Field(..., example="Under 15 minutes")
-    collection_method: str = Field(..., example="Automated application APM analytics")
-    responsibility: str = Field(..., example="ICT Management Division")
+    indicator: str = Field(..., example="Percentage of citizen frontline services accessible online")
+    baseline: str = Field(..., example="35%")
+    target: str = Field(..., example="100% adoption")
+    annual_targets: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Multi-year target milestones, e.g. {'2028': '50%', '2029': '80%', '2030': '100%'}"
+    )
+    collection_method: str = Field(..., example="Application APM analytics")
+    responsibility: str = Field(..., example="Information and Communications Technology Division (ICTD)")
 
     @field_validator('project_id', mode='before')
     @classmethod
     def coerce_project_id(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
+
+    @field_validator('annual_targets', mode='before')
+    @classmethod
+    def deserialize_annual_targets(cls, v: Any) -> Dict[str, str]:
+        parsed = deserialize_dict_if_string(v)
+        return {str(k): str(val) for k, val in parsed.items()} if parsed else {}
 
 
 class PerformanceMetricResponse(BaseModel):
@@ -901,6 +938,7 @@ class PerformanceMetricResponse(BaseModel):
     indicator: str
     baseline: str
     target: str
+    annual_targets: Dict[str, str] = Field(default_factory=dict)
     collection_method: str
     responsibility: str
 
@@ -909,45 +947,58 @@ class PerformanceMetricResponse(BaseModel):
     def coerce_ids(cls, v: Any) -> Any:
         return coerce_optional_uuid(v) or v
 
+    @field_validator('annual_targets', mode='before')
+    @classmethod
+    def deserialize_annual_targets(cls, v: Any) -> Dict[str, str]:
+        parsed = deserialize_dict_if_string(v)
+        return {str(k): str(val) for k, val in parsed.items()} if parsed else {}
+
     model_config = ConfigDict(from_attributes=True)
 
 
 # ==========================================================
-# 8. PART IV.A: RESOURCE REQUIREMENTS (UNIFIED CAPEX & MOOE)
+# 8. PART IV.A: RESOURCE REQUIREMENTS (SIMPLIFIED & UNIFIED)
 # ==========================================================
 
 class ProposalCreatePayload(BaseModel):
-    outcome_id: int = Field(..., description="Target Organizational Outcome ID (Broader Scope)")
+    # Optional provenance fields: Department users submit raw technical needs;
+    # Admin assigns Outcome, Project, Strategic Category, Office, and Fund Source upon review.
+    outcome_id: Optional[int] = Field(None, description="Target Organizational Outcome ID (Broader Scope)")
     department_id: Optional[int] = Field(None, description="Target Department ID (Admin assignment)")
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Department Needs Assessment")
+    strategic_category_id: Optional[int] = Field(None, description="Optional foreign key to StrategicCategory")
     subscription_type: Optional[str] = Field(None, description="Subscription type designation")
     project_key: Optional[str] = Field(None, description="Project key identifier")
+    project_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Strategic ICT Project ID")
     
-    category: ProposalCategory = Field(default=ProposalCategory.HARDWARE, description="Hardware, Software, or Subscription")
-    strategic_category: ProjectCategory = Field(default=ProjectCategory.OFFICE_PRODUCTIVITY)
-    office_location: OfficeLocation = Field(default=OfficeLocation.CENTRAL_OFFICE)
-    fund_source: FundSource = Field(default=FundSource.GAA)
+    # High-level classification intent
+    category: Optional[str] = Field(default="Hardware", description="Hardware, Software, Subscription, or Services")
+    strategic_category: Optional[str] = Field(default="Office Productivity", description="Dynamic Strategic Category")
+    office_location: Optional[str] = Field(default="Central Office")
+    fund_source: Optional[str] = Field(default="General Appropriations Act (GAA)")
     
     item_select: str = Field(default="other", description="Catalog key identifier ('other' for custom requests)")
-    item_name: str = Field(..., max_length=200, description="Name and description of item requested")
+    item_name: str = Field(..., max_length=255, description="Name and description of item requested")
     unit_cost: Decimal = Field(..., ge=0, description="Unit cost in Philippine Peso (PHP)")
 
-    yearly_quantities: Dict[str, int] = Field(default_factory=dict, description="Arbitrary year mapping, e.g. {'2026': 5, '2027': 2, ...}")
-    year_1_qty: int = Field(default=0, ge=0)
-    year_2_qty: int = Field(default=0, ge=0)
-    year_3_qty: int = Field(default=0, ge=0)
+    # Arbitrary multi-year planning horizon (2 to 5+ years)
+    yearly_quantities: Dict[str, int] = Field(
+        default_factory=dict, 
+        description="Arbitrary multi-year quantity mapping, e.g. {'2028': 5, '2029': 2, '2030': 4, ...}"
+    )
+    year_1_qty: Optional[int] = Field(default=0, ge=0)
+    year_2_qty: Optional[int] = Field(default=0, ge=0)
+    year_3_qty: Optional[int] = Field(default=0, ge=0)
 
-    project_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Strategic ICT Project ID")
     justification: Optional[str] = Field(None, description="Detailed technical justification")
-
-    system_development_status: SystemDevelopmentStatus = Field(
-        default=SystemDevelopmentStatus.NOT_APPLICABLE,
-        description="For Development / For Enhancement if budget >= ₱2,000,000.00"
+    system_development_status: Optional[str] = Field(
+        default="N/A",
+        description="For Development / For Enhancement if total budget threshold is reached"
     )
 
     created_by_students: bool = Field(
         default=False, 
-        description="If True, item is Capital Outlay and bypasses market quotation canvas requirements"
+        description="Flag indicating in-house / non-commercial internally developed software"
     )
     is_in_house_turnover: Optional[bool] = Field(
         default=None, 
@@ -956,40 +1007,49 @@ class ProposalCreatePayload(BaseModel):
 
     canvas_evidence_url: Optional[str] = None
     canvas_expiration_date: Optional[datetime] = None
+    supplier_name: Optional[str] = None
     is_expansion: bool = Field(default=False, description="True if adding new capacity rather than replacing retired units")
 
-    uacs_object_code: Optional[UacsObjectCode] = None
-    expenditure_class: Optional[ExpenditureClass] = None
+    uacs_object_code: Optional[str] = None
+    expenditure_class: Optional[str] = None
 
     @field_validator('project_id', 'needs_assessment_id', mode='before')
     @classmethod
     def coerce_uuid_selectors(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('category', mode='before')
+    @field_validator('category', 'strategic_category', 'office_location', 'fund_source', 'system_development_status', mode='before')
     @classmethod
-    def coerce_category(cls, v: Any) -> Any:
-        return coerce_enum(ProposalCategory, v) or ProposalCategory.HARDWARE
+    def coerce_dynamic_string(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        return str(getattr(v, 'value', v) or "").strip()
 
-    @field_validator('strategic_category', mode='before')
+    @field_validator('item_select', mode='before')
     @classmethod
-    def coerce_strategic_cat(cls, v: Any) -> Any:
-        return coerce_enum(ProjectCategory, v) or ProjectCategory.OFFICE_PRODUCTIVITY
+    def clean_item_select(cls, v: Any) -> str:
+        s = clean_optional_string(v)
+        return s if s else "other"
 
-    @field_validator('office_location', mode='before')
+    @field_validator('canvas_evidence_url', 'supplier_name', 'uacs_object_code', 'expenditure_class', mode='before')
     @classmethod
-    def coerce_location(cls, v: Any) -> Any:
-        return coerce_enum(OfficeLocation, v) or OfficeLocation.CENTRAL_OFFICE
+    def clean_empty_strings(cls, v: Any) -> Optional[str]:
+        return clean_optional_string(v)
 
-    @field_validator('fund_source', mode='before')
+    @field_validator('canvas_expiration_date', mode='before')
     @classmethod
-    def coerce_fund_source(cls, v: Any) -> Any:
-        return coerce_enum(FundSource, v) or FundSource.GAA
-
-    @field_validator('system_development_status', mode='before')
-    @classmethod
-    def coerce_dev_status(cls, v: Any) -> Any:
-        return coerce_enum(SystemDevelopmentStatus, v) or SystemDevelopmentStatus.NOT_APPLICABLE
+    def parse_canvas_expiration(cls, v: Any) -> Optional[datetime]:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        s = str(v).strip()
+        if not s or s.lower() in ("none", "null", "undefined", ""):
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
 
     @field_validator('item_name', 'justification', mode='before')
     @classmethod
@@ -1003,18 +1063,38 @@ class ProposalCreatePayload(BaseModel):
         res = {}
         for key, val in parsed.items():
             try:
-                res[str(key)] = int(val) if val is not None else 0
+                res[str(key).strip()] = int(val) if val is not None else 0
             except (ValueError, TypeError):
-                res[str(key)] = 0
+                res[str(key).strip()] = 0
         return res
 
     @model_validator(mode='after')
-    def validate_and_classify_outlays(self) -> 'ProposalCreatePayload':
-        if self.is_in_house_turnover is not None and not self.created_by_students:
-            self.created_by_students = self.is_in_house_turnover
-        elif self.created_by_students and self.is_in_house_turnover is None:
-            self.is_in_house_turnover = True
+    def sync_quantities_and_aliases(self) -> 'ProposalCreatePayload':
+        if not self.category:
+            self.category = "Hardware"
+        if not self.strategic_category:
+            self.strategic_category = "Office Productivity"
+        if not self.office_location:
+            self.office_location = "Central Office"
+        if not self.fund_source:
+            self.fund_source = "General Appropriations Act (GAA)"
+        if not self.system_development_status:
+            self.system_development_status = "N/A"
 
+        # Bidirectional turnover alias sync
+        if self.is_in_house_turnover is not None:
+            self.created_by_students = bool(self.is_in_house_turnover)
+        elif self.created_by_students:
+            self.is_in_house_turnover = True
+        else:
+            self.is_in_house_turnover = False
+            self.created_by_students = False
+
+        # Auto-align strategic category if linked to an internal project
+        if self.project_id and self.strategic_category == "Office Productivity":
+            self.strategic_category = "Internal ICT Projects"
+
+        # Synchronize yearly quantities across any planning horizon
         if self.yearly_quantities and len(self.yearly_quantities) > 0:
             years_sorted = sorted([k for k in self.yearly_quantities.keys() if str(k).isdigit()])
             if len(years_sorted) >= 1:
@@ -1025,54 +1105,10 @@ class ProposalCreatePayload(BaseModel):
                 self.year_3_qty = int(self.yearly_quantities.get(years_sorted[2], 0) or 0)
         else:
             self.yearly_quantities = {
-                "Year 1": self.year_1_qty,
-                "Year 2": self.year_2_qty,
-                "Year 3": self.year_3_qty
+                "Year 1": self.year_1_qty or 0,
+                "Year 2": self.year_2_qty or 0,
+                "Year 3": self.year_3_qty or 0
             }
-
-        total_qty = sum(int(v) for v in self.yearly_quantities.values() if v is not None and (isinstance(v, int) or str(v).isdigit()))
-        total_outlay = self.unit_cost * Decimal(total_qty)
-
-        if self.created_by_students:
-            self.expenditure_class = ExpenditureClass.CAPITAL_OUTLAY
-            self.uacs_object_code = UacsObjectCode.ICT_SOFTWARE
-        else:
-            CAPITALIZATION_THRESHOLD = Decimal("50000.00")
-            item_lower = (self.item_name or "").lower()
-
-            if self.category == ProposalCategory.SUBSCRIPTION:
-                self.expenditure_class = ExpenditureClass.MOOE
-                self.uacs_object_code = UacsObjectCode.ICT_SOFTWARE_SUBSCRIPTION
-            elif self.unit_cost >= CAPITALIZATION_THRESHOLD:
-                self.expenditure_class = ExpenditureClass.CAPITAL_OUTLAY
-                if "printer" in item_lower or "scanner" in item_lower or "plotter" in item_lower:
-                    self.uacs_object_code = UacsObjectCode.PRINTING_EQUIPMENT
-                elif "software" in item_lower:
-                    self.uacs_object_code = UacsObjectCode.ICT_SOFTWARE
-                else:
-                    self.uacs_object_code = UacsObjectCode.ICT_EQUIPMENT
-            else:
-                self.expenditure_class = ExpenditureClass.MOOE
-                if "printer" in item_lower or "scanner" in item_lower or "plotter" in item_lower:
-                    self.uacs_object_code = UacsObjectCode.SEMI_EXPENDABLE_PRINTING
-                elif "subscription" in item_lower or "cloud" in item_lower or "suite" in item_lower:
-                    self.uacs_object_code = UacsObjectCode.ICT_SOFTWARE_SUBSCRIPTION
-                elif "training" in item_lower or "seminar" in item_lower or "workshop" in item_lower:
-                    self.uacs_object_code = UacsObjectCode.ICT_TRAINING
-                elif "contractor" in item_lower or "development" in item_lower:
-                    self.uacs_object_code = UacsObjectCode.ICT_CONSULTING_DEVELOPMENT
-                else:
-                    self.uacs_object_code = UacsObjectCode.SEMI_EXPENDABLE_ICT
-
-            if self.item_select == "other":
-                if not self.justification or len(self.justification.strip()) < 5:
-                    raise ValueError("Technical specifications and justification are mandatory for custom requests.")
-
-        if total_outlay >= Decimal("2000000.00") and self.system_development_status == SystemDevelopmentStatus.NOT_APPLICABLE:
-            raise ValueError(
-                "Proposals with total outlays exceeding ₱2,000,000.00 require a System Development Status option "
-                "('For Development' or 'For Enhancement') per DICT guidelines."
-            )
 
         return self
 
@@ -1081,17 +1117,18 @@ class ProposalResponse(BaseModel):
     id: Union[uuid.UUID, str]
     department_id: int
     issp_period: str
-    outcome_id: int
+    outcome_id: Optional[int] = None
     project_id: Optional[Union[uuid.UUID, str]] = None
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = None
+    strategic_category_id: Optional[int] = None
     
-    category: ProposalCategory = ProposalCategory.HARDWARE
-    strategic_category: ProjectCategory = ProjectCategory.OFFICE_PRODUCTIVITY
-    office_location: OfficeLocation = OfficeLocation.CENTRAL_OFFICE
-    fund_source: FundSource = FundSource.GAA
-    uacs_object_code: UacsObjectCode = UacsObjectCode.ICT_EQUIPMENT
-    expenditure_class: ExpenditureClass = ExpenditureClass.CAPITAL_OUTLAY
-    status: ProposalStatus = ProposalStatus.DRAFT
+    category: str = "Hardware"
+    strategic_category: str = "Office Productivity"
+    office_location: str = "Central Office"
+    fund_source: str = "General Appropriations Act (GAA)"
+    uacs_object_code: str = "50604050 03 - ICT Equipment (CO)"
+    expenditure_class: str = "Capital Outlay"
+    status: str = "Draft"
     
     item_name: str
     item_key: Optional[str] = None
@@ -1105,13 +1142,15 @@ class ProposalResponse(BaseModel):
     total_cost: Decimal = Decimal("0.00")
     
     justification: Optional[str] = None
-    system_development_status: SystemDevelopmentStatus = SystemDevelopmentStatus.NOT_APPLICABLE
+    system_development_status: str = "N/A"
     created_by_students: bool = False
     is_in_house_turnover: bool = False
     
     target_office_automated: Optional[str] = None
     canvas_evidence_url: Optional[str] = None
     canvas_expiration_date: Optional[datetime] = None
+    supplier_name: Optional[str] = None
+    comments: List[Dict[str, Any]] = Field(default_factory=list)
     
     version: int = 1
     is_archived: bool = False
@@ -1123,45 +1162,10 @@ class ProposalResponse(BaseModel):
     def coerce_uuid_fields(cls, v: Any) -> Any:
         return coerce_optional_uuid(v) or v
 
-    @field_validator('category', mode='before')
+    @field_validator('category', 'strategic_category', 'office_location', 'fund_source', 'uacs_object_code', 'expenditure_class', 'status', 'system_development_status', mode='before')
     @classmethod
-    def coerce_category(cls, v: Any) -> Any:
-        return coerce_enum(ProposalCategory, v) or ProposalCategory.HARDWARE
-
-    @field_validator('strategic_category', mode='before')
-    @classmethod
-    def coerce_strategic_category(cls, v: Any) -> Any:
-        return coerce_enum(ProjectCategory, v) or ProjectCategory.OFFICE_PRODUCTIVITY
-
-    @field_validator('office_location', mode='before')
-    @classmethod
-    def coerce_office_location(cls, v: Any) -> Any:
-        return coerce_enum(OfficeLocation, v) or OfficeLocation.CENTRAL_OFFICE
-
-    @field_validator('fund_source', mode='before')
-    @classmethod
-    def coerce_fund_source(cls, v: Any) -> Any:
-        return coerce_enum(FundSource, v) or FundSource.GAA
-
-    @field_validator('uacs_object_code', mode='before')
-    @classmethod
-    def coerce_uacs(cls, v: Any) -> Any:
-        return coerce_enum(UacsObjectCode, v) or UacsObjectCode.ICT_EQUIPMENT
-
-    @field_validator('expenditure_class', mode='before')
-    @classmethod
-    def coerce_exp_class(cls, v: Any) -> Any:
-        return coerce_enum(ExpenditureClass, v) or ExpenditureClass.CAPITAL_OUTLAY
-
-    @field_validator('status', mode='before')
-    @classmethod
-    def coerce_status(cls, v: Any) -> Any:
-        return coerce_enum(ProposalStatus, v) or ProposalStatus.DRAFT
-
-    @field_validator('system_development_status', mode='before')
-    @classmethod
-    def coerce_dev_status(cls, v: Any) -> Any:
-        return coerce_enum(SystemDevelopmentStatus, v) or SystemDevelopmentStatus.NOT_APPLICABLE
+    def coerce_to_string(cls, v: Any) -> str:
+        return str(getattr(v, 'value', v) or "").strip()
 
     @field_validator('yearly_quantities', mode='before')
     @classmethod
@@ -1170,66 +1174,78 @@ class ProposalResponse(BaseModel):
         res = {}
         for key, val in parsed.items():
             try:
-                res[str(key)] = int(val) if val is not None else 0
+                res[str(key).strip()] = int(val) if val is not None else 0
             except (ValueError, TypeError):
-                res[str(key)] = 0
+                res[str(key).strip()] = 0
         return res
+
+    @field_validator('comments', mode='before')
+    @classmethod
+    def deserialize_comments_list(cls, v: Any) -> List[Dict[str, Any]]:
+        return deserialize_list_if_string(v)
 
     @model_validator(mode='after')
     def sync_aliases(self) -> 'ProposalResponse':
-        self.is_in_house_turnover = self.created_by_students
+        self.is_in_house_turnover = bool(self.created_by_students or self.is_in_house_turnover)
+        self.created_by_students = self.is_in_house_turnover
         return self
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class AdminOverridePayload(BaseModel):
+    outcome_id: Optional[int] = Field(None, description="Broader Scope Organizational Outcome ID")
     item_name: Optional[str] = None
     unit_cost: Optional[Decimal] = Field(None, ge=0)
-    year_1_qty: Optional[int] = Field(None, ge=0)
-    year_2_qty: Optional[int] = Field(None, ge=0)
-    year_3_qty: Optional[int] = Field(None, ge=0)
     yearly_quantities: Optional[Dict[str, int]] = None
     justification: Optional[str] = None
     project_id: Optional[Union[uuid.UUID, str]] = None
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = None
-    category: Optional[ProposalCategory] = None
-    strategic_category: Optional[ProjectCategory] = None
-    fund_source: Optional[FundSource] = None
-    office_location: Optional[OfficeLocation] = None
-    system_development_status: Optional[SystemDevelopmentStatus] = None
+    strategic_category_id: Optional[int] = None
+    category: Optional[str] = None
+    strategic_category: Optional[str] = None
+    fund_source: Optional[str] = None
+    office_location: Optional[str] = None
+    uacs_object_code: Optional[str] = None
+    expenditure_class: Optional[str] = None
+    system_development_status: Optional[str] = None
     created_by_students: Optional[bool] = None
     is_in_house_turnover: Optional[bool] = None
+    canvas_evidence_url: Optional[str] = None
+    canvas_expiration_date: Optional[datetime] = None
+    supplier_name: Optional[str] = None
 
     @field_validator('project_id', 'needs_assessment_id', mode='before')
     @classmethod
     def coerce_project_id(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('category', mode='before')
+    @field_validator('category', 'strategic_category', 'fund_source', 'office_location', 'uacs_object_code', 'expenditure_class', 'system_development_status', mode='before')
     @classmethod
-    def coerce_category(cls, v: Any) -> Any:
-        return coerce_enum(ProposalCategory, v)
+    def coerce_to_string(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        return str(getattr(v, 'value', v) or "").strip()
 
-    @field_validator('strategic_category', mode='before')
+    @field_validator('canvas_evidence_url', 'supplier_name', mode='before')
     @classmethod
-    def coerce_strategic_cat(cls, v: Any) -> Any:
-        return coerce_enum(ProjectCategory, v)
+    def clean_optional_strings(cls, v: Any) -> Optional[str]:
+        return clean_optional_string(v)
 
-    @field_validator('fund_source', mode='before')
+    @field_validator('canvas_expiration_date', mode='before')
     @classmethod
-    def coerce_fund_source(cls, v: Any) -> Any:
-        return coerce_enum(FundSource, v)
-
-    @field_validator('office_location', mode='before')
-    @classmethod
-    def coerce_location(cls, v: Any) -> Any:
-        return coerce_enum(OfficeLocation, v)
-
-    @field_validator('system_development_status', mode='before')
-    @classmethod
-    def coerce_dev_status(cls, v: Any) -> Any:
-        return coerce_enum(SystemDevelopmentStatus, v)
+    def parse_canvas_expiration(cls, v: Any) -> Optional[datetime]:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        s = str(v).strip()
+        if not s or s.lower() in ("none", "null", "undefined", ""):
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
 
     @field_validator('yearly_quantities', mode='before')
     @classmethod
@@ -1240,9 +1256,9 @@ class AdminOverridePayload(BaseModel):
         res = {}
         for key, val in parsed.items():
             try:
-                res[str(key)] = int(val) if val is not None else 0
+                res[str(key).strip()] = int(val) if val is not None else 0
             except (ValueError, TypeError):
-                res[str(key)] = 0
+                res[str(key).strip()] = 0
         return res
 
     @model_validator(mode='after')
@@ -1251,6 +1267,10 @@ class AdminOverridePayload(BaseModel):
             self.created_by_students = self.is_in_house_turnover
         elif self.created_by_students is not None and self.is_in_house_turnover is None:
             self.is_in_house_turnover = self.created_by_students
+
+        if self.project_id and self.strategic_category == "Office Productivity":
+            self.strategic_category = "Internal ICT Projects"
+
         return self
 
 
@@ -1271,7 +1291,7 @@ class PartIVBParityResponse(BaseModel):
     certified_grand_total: Decimal
     is_parity_valid: bool = True
     parity_discrepancy: Decimal = Decimal("0.00")
-    year_columns: List[str] = Field(default_factory=list, description="Dynamic list of fiscal year column headers, e.g. ['FY 2026', 'FY 2027', ...]")
+    year_columns: List[str] = Field(default_factory=list, description="Dynamic list of fiscal year column headers, e.g. ['FY 2028', 'FY 2029', 'FY 2030', ...]")
 
 
 # ==========================================================
@@ -1293,7 +1313,7 @@ class DisasterRecoveryTeamResponse(DisasterRecoveryTeamCreate):
 
 class BusinessImpactAnalysisCreate(BaseModel):
     system_id: Optional[Union[uuid.UUID, str]] = None
-    system_name: str = Field(..., example="Frontline Service Portal")
+    system_name: str = Field(..., example="Citizen Frontline Registry and Electronic Payment System")
     classification: str = Field(default="Frontline / Mission-Critical")
     mtpd_hours: int = Field(default=24, ge=1)
     rto_hours: int = Field(default=4, ge=0)
@@ -1329,12 +1349,13 @@ class DRBCPMetricResponse(DRBCPMetricCreate):
 
 
 # ==========================================================
-# 11. NEEDS ASSESSMENT & DEPARTMENT JUSTIFICATIONS
+# 11. NEEDS ASSESSMENT & DEPARTMENT JUSTIFICATIONS (SEC 8.0)
 # ==========================================================
 
 class NeedsAssessmentCreate(BaseModel):
-    title: str = Field(..., example="High-Performance Laboratory Network Upgrade")
-    mfo_alignment: str = Field(..., example="General Public Service Modernization")
+    issp_period: Optional[str] = Field(None, description="Planning period snapshot")
+    title: str = Field(..., example="Online Public Service Registration and E-Payment Processing Latency")
+    mfo_alignment: str = Field(..., example="Citizen Frontline Public Services Program")
     current_problem: str = Field(...)
     proposed_solution: str = Field(...)
     expected_impacts: List[str] = Field(default=[])
@@ -1344,6 +1365,7 @@ class NeedsAssessmentCreate(BaseModel):
 class NeedsAssessmentResponse(BaseModel):
     id: Union[uuid.UUID, str]
     department_id: int
+    issp_period: str
     department_name: Optional[str] = None
     title: str
     mfo_alignment: str
@@ -1371,8 +1393,8 @@ class NeedsAssessmentResponse(BaseModel):
 class AggregateNeedsAssessmentPayload(BaseModel):
     needs_assessment_id: Union[uuid.UUID, str]
     outcome_id: Optional[int] = None
-    mfo: str = Field(..., example="Public Service Modernization")
-    critical_system: str = Field(..., example="Operational Infrastructure Cluster")
+    mfo: str = Field(..., example="Citizen Frontline Public Services Program")
+    critical_system: str = Field(..., example="Citizen Frontline Registry and Electronic Payment System")
     problems: str = Field(...)
     intended_use: str = Field(...)
     order_index: int = Field(default=1)
@@ -1395,6 +1417,7 @@ class BudgetCeilingResponse(BaseModel):
     sub_ceiling: Decimal = Decimal("0.00")
     global_ceiling: Decimal = Decimal("0.00")
     current_spent: Decimal = Decimal("0.00")
+    annual_allocations: Dict[str, Any] = Field(default_factory=dict)
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -1403,13 +1426,10 @@ class UpdateCeilingPayload(BaseModel):
     allocated_capex: Decimal = Field(default=Decimal("0.00"), ge=0)
     allocated_mooe: Decimal = Field(default=Decimal("0.00"), ge=0)
     sub_ceiling: Optional[Decimal] = None
+    annual_allocations: Optional[Dict[str, Any]] = None
 
     @model_validator(mode='after')
     def resolve_sub_ceiling_assignment(self) -> 'UpdateCeilingPayload':
-        """
-        Ensures sub_ceiling matches allocated_capex and allocated_mooe without
-        forcing an arbitrary 70/30 split ratio.
-        """
         if self.sub_ceiling is not None and self.allocated_capex == Decimal("0.00") and self.allocated_mooe == Decimal("0.00"):
             self.allocated_capex = Decimal(str(self.sub_ceiling)).quantize(Decimal("0.01"))
             self.allocated_mooe = Decimal("0.00")
@@ -1426,12 +1446,12 @@ class BulkCeilingValidationPayload(BaseModel):
 
 
 # ==========================================================
-# 13. MASTER NARRATIVES (DICT v.2026 STANDARDIZED SCHEMAS)
+# 13. MASTER NARRATIVES (DICT v.2026 PLAIN-TEXT SCHEMAS)
 # ==========================================================
 
 class ISPlannerSchema(BaseModel):
-    name: str = Field(..., example="Information Systems Planner")
-    position: str = Field(..., example="Lead Systems Analyst")
+    name: str = Field(..., example="Lead Systems Analyst")
+    position: str = Field(..., example="Information Technology Officer I")
     email: Optional[str] = Field(None, example="planner@agency.gov.ph")
     contact_number: Optional[str] = Field(None, example="09190000000")
 
@@ -1445,85 +1465,89 @@ class ManpowerSchema(BaseModel):
     total_employees: int = Field(default=0, ge=0)
     admin_regular: int = Field(default=0, ge=0)
     admin_casual: int = Field(default=0, ge=0)
-    academic_regular: Optional[int] = Field(default=0, ge=0)
-    academic_casual: Optional[int] = Field(default=0, ge=0)
+    technical_regular: Optional[int] = Field(default=0, ge=0)
+    contractual_cos: Optional[int] = Field(default=0, ge=0)
 
 
 class MasterNarrativeUpdate(BaseModel):
     agency_name: Optional[str] = None
-    issp_period_from: Optional[int] = Field(None, example=2026)
-    issp_period_to: Optional[int] = Field(None, example=2028)
+    issp_period_from: Optional[int] = Field(None, example=2028)
+    issp_period_to: Optional[int] = Field(None, example=2030)
     agency_website_url: Optional[str] = None
     website_url: Optional[str] = None
     
-    # Template Page 1 Scope & Amendment Indicators
     is_amendment: Optional[bool] = False
     amendment_number: Optional[str] = None
     scope_choice: Optional[Union[ScopeChoice, str]] = ScopeChoice.DEPARTMENT_WIDE
     scope_json: Optional[Dict[str, Any]] = Field(default_factory=dict)
     is_active: Optional[bool] = False
 
-    # Preparer / Signatory
     signatory_prepared_by: Optional[str] = None
     preparer_position: Optional[str] = None
     preparer_tel: Optional[str] = None
     preparer_fax: Optional[str] = None
     preparer_email: Optional[str] = None
 
-    # Part I.B.1 CIO Specifics
     cio_name: Optional[str] = None
     cio_plantilla_position: Optional[str] = None
     cio_organizational_unit: Optional[str] = None
     cio_email: Optional[str] = None
     cio_contact_no: Optional[str] = None
 
-    # Part I.B.1 Alternate ISSP Focal Person Specifics
     focal_name: Optional[str] = None
     focal_position: Optional[str] = None
     focal_organizational_unit: Optional[str] = None
     focal_email: Optional[str] = None
     focal_contact_no: Optional[str] = None
 
-    # Head of Agency
     head_of_agency_name: Optional[str] = None
     agency_head_position: Optional[str] = Field(None, description="Official title/position of the Head of Agency")
     signatory_approved_by: Optional[str] = None
 
-    # Part I.A Mandates
-    mandate_html: Optional[str] = ""
-    legal_basis: Optional[str] = None
+    # Normalized Clean Plain-Text Fields
+    mandate_text: Optional[str] = ""
     functions: Optional[str] = None
-    vision_html: Optional[str] = ""
-    vision_statement: Optional[str] = None
-    mission_html: Optional[str] = ""
-    mission_statement: Optional[str] = None
-    present_situation_html: Optional[str] = ""
-
-    # Part III.B Enterprise Architecture Dynamic Narrative
+    vision_text: Optional[str] = ""
+    mission_text: Optional[str] = ""
+    present_situation_text: Optional[str] = ""
     enterprise_architecture_narrative: Optional[str] = None
 
-    # Official DICT v.2026 Core Schematics & Branding Seals (Diagram Vault)
+    # Backward-compatible HTML property aliases
+    mandate_html: Optional[str] = None
+    legal_basis: Optional[str] = None
+    vision_html: Optional[str] = None
+    vision_statement: Optional[str] = None
+    mission_html: Optional[str] = None
+    mission_statement: Optional[str] = None
+    present_situation_html: Optional[str] = None
+
+    # Official Schematics & Seals (Canonical 4 Schematics Standard)
     agency_logo_url: Optional[str] = None
     dict_logo_url: Optional[str] = None
     bagong_pilipinas_logo_url: Optional[str] = None
-    cert_logo_url: Optional[str] = None
-    network_diagram_url: Optional[str] = None       # Part II.B.1 Existing LAN/WAN Topology
-    fiber_backbone_url: Optional[str] = None        # Part III.A.1 Proposed Network / Fiber Layout
-    system_architecture_url: Optional[str] = None   # Part III.B Enterprise Architecture Schematic
-    org_chart_url: Optional[str] = None             # Part I.B Overall Agency Org Structure
-    proposed_ict_org_url: Optional[str] = None      # Part III.C Proposed ICT Unit Structure
-    subsystem_network_layouts_json: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    network_diagram_url: Optional[str] = None
+    fiber_backbone_url: Optional[str] = None
+    system_architecture_url: Optional[str] = None
+    org_chart_url: Optional[str] = None
+    existing_ict_org_url: Optional[str] = None
+    proposed_ict_org_url: Optional[str] = None
+    site_development_plan_url: Optional[str] = None
+    process_flow_diagram_url: Optional[str] = None
 
-    # Annex 2 DRBCP Dynamic Sections (Sections 1 to 6)
     drbcp_approval_date: Optional[str] = Field(None, description="Official approval date of the DRBCP")
     drbcp_affected_assets_json: Optional[List[Any]] = None
+    drbcp_recovery_strategy_text: Optional[str] = None
+    drbcp_sop_phases_text: Optional[str] = None
+    drbcp_compliance_narrative_text: Optional[str] = None
+    
+    # Backward-compatible DRBCP aliases
     drbcp_recovery_strategy_html: Optional[str] = None
     drbcp_sop_phases_html: Optional[str] = None
-    drbcp_compliance_narrative_html: Optional[str] = Field(None, description="MITHI Res 2025-01 / SPAR Reporting 4 Pillars")
+    drbcp_compliance_narrative_html: Optional[str] = None
 
-    # Automated Lifecycle Archival Attributes
     is_archived: Optional[bool] = False
     final_pdf_vault_url: Optional[str] = None
+    final_docx_vault_url: Optional[str] = None
 
     planners_json: Optional[List[ISPlannerSchema]] = Field(default=[])
     manpower_json: Optional[ManpowerSchema] = None
@@ -1532,7 +1556,11 @@ class MasterNarrativeUpdate(BaseModel):
     @field_validator(
         'preparer_email', 'cio_email', 'focal_email', 'agency_website_url', 
         'website_url', 'agency_logo_url', 'dict_logo_url', 'bagong_pilipinas_logo_url', 
-        'cert_logo_url', mode='before'
+        'network_diagram_url', 'fiber_backbone_url', 'system_architecture_url',
+        'org_chart_url', 'existing_ict_org_url', 'proposed_ict_org_url',
+        'site_development_plan_url', 'process_flow_diagram_url', 
+        'final_pdf_vault_url', 'final_docx_vault_url',
+        mode='before'
     )
     @classmethod
     def sanitize_emails_and_urls(cls, v: Any) -> Optional[str]:
@@ -1543,7 +1571,7 @@ class MasterNarrativeUpdate(BaseModel):
     def coerce_scope_choice(cls, v: Any) -> Any:
         return coerce_enum(ScopeChoice, v) or ScopeChoice.DEPARTMENT_WIDE
 
-    @field_validator('drbcp_affected_assets_json', 'subsystem_network_layouts_json', mode='before')
+    @field_validator('drbcp_affected_assets_json', mode='before')
     @classmethod
     def deserialize_json_lists(cls, v: Any) -> Any:
         return deserialize_list_if_string(v)
@@ -1552,6 +1580,42 @@ class MasterNarrativeUpdate(BaseModel):
     @classmethod
     def deserialize_scope_json(cls, v: Any) -> Any:
         return deserialize_dict_if_string(v)
+
+    @model_validator(mode='before')
+    @classmethod
+    def synchronize_plain_text_and_html_inputs(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Sync mandate
+            if not data.get("mandate_text"):
+                data["mandate_text"] = data.get("mandate_html") or data.get("legal_basis") or ""
+            # Sync vision
+            if not data.get("vision_text"):
+                data["vision_text"] = data.get("vision_html") or data.get("vision_statement") or ""
+            # Sync mission
+            if not data.get("mission_text"):
+                data["mission_text"] = data.get("mission_html") or data.get("mission_statement") or ""
+            # Sync situation
+            if not data.get("present_situation_text"):
+                data["present_situation_text"] = data.get("present_situation_html") or ""
+            # Sync DRBCP sections
+            if not data.get("drbcp_recovery_strategy_text"):
+                data["drbcp_recovery_strategy_text"] = data.get("drbcp_recovery_strategy_html")
+            if not data.get("drbcp_sop_phases_text"):
+                data["drbcp_sop_phases_text"] = data.get("drbcp_sop_phases_html")
+            if not data.get("drbcp_compliance_narrative_text"):
+                data["drbcp_compliance_narrative_text"] = data.get("drbcp_compliance_narrative_html")
+
+            # Signatories name resolution
+            cio = data.get("cio_name") or data.get("signatory_prepared_by")
+            if cio and str(cio).strip():
+                data["cio_name"] = str(cio).strip()
+                data["signatory_prepared_by"] = str(cio).strip()
+
+            head = data.get("head_of_agency_name") or data.get("signatory_approved_by")
+            if head and str(head).strip():
+                data["head_of_agency_name"] = str(head).strip()
+                data["signatory_approved_by"] = str(head).strip()
+        return data
 
 
 class MasterNarrativeResponse(BaseModel):
@@ -1567,7 +1631,7 @@ class MasterNarrativeResponse(BaseModel):
     scope_json: Optional[Dict[str, Any]] = None
     is_active: bool
     
-    # CIO Signatories
+    # Official Text Signatories (Formal Physical Sign-off Lines)
     signatory_prepared_by: Optional[str] = ""
     cio_name: Optional[str] = None
     preparer_position: Optional[str] = None
@@ -1578,77 +1642,113 @@ class MasterNarrativeResponse(BaseModel):
     preparer_tel: Optional[str] = None
     cio_contact_no: Optional[str] = None
 
-    # Alternate ISSP Focal Person
     focal_name: Optional[str] = None
     focal_position: Optional[str] = None
     focal_organizational_unit: Optional[str] = None
     focal_email: Optional[str] = None
     focal_contact_no: Optional[str] = None
 
-    # Agency Head
     signatory_approved_by: Optional[str] = ""
     head_of_agency_name: Optional[str] = None
     agency_head_position: Optional[str] = None
 
-    # Mandates
+    # Normalized Clean Plain Text Fields
+    mandate_text: str = ""
+    functions: Optional[str] = None
+    vision_text: str = ""
+    mission_text: str = ""
+    present_situation_text: str = ""
+    enterprise_architecture_narrative: Optional[str] = None
+
+    # Backward-compatible HTML aliases populated in response
     mandate_html: Optional[str] = ""
     legal_basis: Optional[str] = None
-    functions: Optional[str] = None
     vision_html: Optional[str] = ""
     vision_statement: Optional[str] = None
     mission_html: Optional[str] = ""
     mission_statement: Optional[str] = None
     present_situation_html: Optional[str] = None
-    
-    # Part III.B Enterprise Architecture Dynamic Narrative
-    enterprise_architecture_narrative: Optional[str] = None
 
-    # Official DICT v.2026 Core Schematics & Branding Seals
+    # Official Logos and Diagrams
     agency_logo_url: Optional[str] = None
     dict_logo_url: Optional[str] = None
     bagong_pilipinas_logo_url: Optional[str] = None
-    cert_logo_url: Optional[str] = None
-    network_diagram_url: Optional[str] = None       # Part II.B.1 Existing Network Infrastructure Topology
-    fiber_backbone_url: Optional[str] = None        # Part III.A.1 Proposed Network / Fiber Layout
-    system_architecture_url: Optional[str] = None   # Part III.B Enterprise Architecture Schematic
-    org_chart_url: Optional[str] = None             # Part I.B Agency Overall Org Structure
-    proposed_ict_org_url: Optional[str] = None      # Part III.C Proposed ICT Unit Structure
-    subsystem_network_layouts_json: List[Dict[str, Any]] = Field(default_factory=list)
+    network_diagram_url: Optional[str] = None
+    fiber_backbone_url: Optional[str] = None
+    system_architecture_url: Optional[str] = None
+    org_chart_url: Optional[str] = None
+    existing_ict_org_url: Optional[str] = None
+    proposed_ict_org_url: Optional[str] = None
+    site_development_plan_url: Optional[str] = None
+    process_flow_diagram_url: Optional[str] = None
 
-    # Annex 2 DRBCP Dynamic Sections (Sections 1 to 6)
     drbcp_approval_date: Optional[str] = None
     drbcp_affected_assets_json: Optional[List[Any]] = Field(default_factory=list)
+    drbcp_recovery_strategy_text: Optional[str] = None
+    drbcp_sop_phases_text: Optional[str] = None
+    drbcp_compliance_narrative_text: Optional[str] = None
+
+    # Backward-compatible DRBCP aliases
     drbcp_recovery_strategy_html: Optional[str] = None
     drbcp_sop_phases_html: Optional[str] = None
     drbcp_compliance_narrative_html: Optional[str] = None
 
-    # Automated Lifecycle Archival Attributes
     is_archived: bool = False
     final_pdf_vault_url: Optional[str] = None
+    final_docx_vault_url: Optional[str] = None
 
     planners_json: List[ISPlannerSchema] = []
     annual_ict_budget: Decimal = Decimal("0.00")
+    authoring_cycle_duration: Optional[int] = 3
 
     @field_validator('scope_choice', mode='before')
     @classmethod
     def coerce_scope_choice(cls, v: Any) -> Any:
         return coerce_enum(ScopeChoice, v)
 
-    @field_validator('drbcp_affected_assets_json', 'subsystem_network_layouts_json', mode='before')
+    @field_validator('drbcp_affected_assets_json', mode='before')
     @classmethod
     def deserialize_json_lists(cls, v: Any) -> Any:
         return deserialize_list_if_string(v)
 
     @model_validator(mode='after')
     def populate_narrative_aliases(self) -> 'MasterNarrativeResponse':
-        self.legal_basis = self.mandate_html
-        self.vision_statement = self.vision_html
-        self.mission_statement = self.mission_html
-        self.cio_name = self.signatory_prepared_by
+        if not self.mandate_text and self.mandate_html:
+            self.mandate_text = self.mandate_html
+        if not self.vision_text and self.vision_html:
+            self.vision_text = self.vision_html
+        if not self.mission_text and self.mission_html:
+            self.mission_text = self.mission_html
+        if not self.present_situation_text and self.present_situation_html:
+            self.present_situation_text = self.present_situation_html
+
+        self.mandate_html = self.mandate_text
+        self.legal_basis = self.mandate_text
+        self.vision_html = self.vision_text
+        self.vision_statement = self.vision_text
+        self.mission_html = self.mission_text
+        self.mission_statement = self.mission_text
+        self.present_situation_html = self.present_situation_text
+        
+        self.drbcp_recovery_strategy_html = self.drbcp_recovery_strategy_text
+        self.drbcp_sop_phases_html = self.drbcp_sop_phases_text
+        self.drbcp_compliance_narrative_html = self.drbcp_compliance_narrative_text
+
+        # Synchronize signatories cleanly
+        if not self.cio_name and self.signatory_prepared_by:
+            self.cio_name = self.signatory_prepared_by
+        elif not self.signatory_prepared_by and self.cio_name:
+            self.signatory_prepared_by = self.cio_name
+
+        if not self.head_of_agency_name and self.signatory_approved_by:
+            self.head_of_agency_name = self.signatory_approved_by
+        elif not self.signatory_approved_by and self.head_of_agency_name:
+            self.signatory_approved_by = self.head_of_agency_name
+
         self.cio_plantilla_position = self.preparer_position
         self.cio_email = self.preparer_email
         self.cio_contact_no = self.preparer_tel
-        self.head_of_agency_name = self.signatory_approved_by
+        
         if not self.agency_head_position:
             self.agency_head_position = getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency")
         if not self.agency_name:
@@ -1665,6 +1765,7 @@ class LifecycleRolloverResponse(BaseModel):
     new_active_cycle: Optional[str] = None
     message: Optional[str] = None
     final_pdf_vault_url: Optional[str] = None
+    final_docx_vault_url: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -1707,7 +1808,7 @@ class CommentResponse(BaseModel):
     field_name: Optional[str] = None
     author_name: str
     author_email: Optional[str] = None
-    author_role: RoleTag
+    author_role: Union[RoleTag, str] = "ROLE_DEPT_USER"
     text: str
     is_resolved: bool = False
     requires_department_action: bool = False
@@ -1724,8 +1825,8 @@ class CommentResponse(BaseModel):
 
     @field_validator('author_role', mode='before')
     @classmethod
-    def coerce_role(cls, v: Any) -> Any:
-        return coerce_enum(RoleTag, v)
+    def coerce_role(cls, v: Any) -> str:
+        return str(getattr(v, 'value', v) or "ROLE_DEPT_USER")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1763,39 +1864,41 @@ class AuditLogEntryResponse(BaseModel):
 class WhitelistedUserCreate(BaseModel):
     email: EmailStr = Field(..., description="Institutional email address")
     assigned_department_id: Optional[int] = None
-    role_tag: RoleTag
+    role_tag: Union[RoleTag, str] = Field(default="ROLE_DEPT_USER")
     password: str = Field(..., min_length=8, description="Mandatory initial password set by Admin for manual onboarding")
 
     @field_validator('role_tag', mode='before')
     @classmethod
-    def coerce_role(cls, v: Any) -> Any:
-        return coerce_enum(RoleTag, v)
+    def coerce_role(cls, v: Any) -> str:
+        return str(getattr(v, 'value', v) or "ROLE_DEPT_USER")
 
 
 class WhitelistedUserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     assigned_department_id: Optional[int] = None
-    role_tag: Optional[RoleTag] = None
+    role_tag: Optional[Union[RoleTag, str]] = None
     password: Optional[str] = Field(None, min_length=8)
 
     @field_validator('role_tag', mode='before')
     @classmethod
-    def coerce_role(cls, v: Any) -> Any:
-        return coerce_enum(RoleTag, v)
+    def coerce_role(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        return str(getattr(v, 'value', v) or "ROLE_DEPT_USER")
 
 
 class WhitelistedUserResponse(BaseModel):
     id: int
     email: EmailStr
-    role_tag: RoleTag
+    role_tag: str
     assigned_department_id: Optional[int] = None
     department_id: Optional[int] = None
     department_name: Optional[str] = None
 
     @field_validator('role_tag', mode='before')
     @classmethod
-    def coerce_role(cls, v: Any) -> Any:
-        return coerce_enum(RoleTag, v)
+    def coerce_role(cls, v: Any) -> str:
+        return str(getattr(v, 'value', v) or "ROLE_DEPT_USER")
 
     @model_validator(mode='before')
     @classmethod
@@ -1815,7 +1918,7 @@ class WhitelistedUserResponse(BaseModel):
         return {
             "id": getattr(data, "id", None),
             "email": getattr(data, "email", None),
-            "role_tag": getattr(data, "role_tag", None),
+            "role_tag": str(getattr(data, "role_tag", "ROLE_DEPT_USER")),
             "assigned_department_id": dept_id,
             "department_id": dept_id,
             "department_name": dept_name
@@ -1825,7 +1928,135 @@ class WhitelistedUserResponse(BaseModel):
 
 
 # ==========================================================
-# 15. AUXILIARY CENSUS & INSTITUTIONAL SCHEMAS
+# 15. DYNAMIC TAXONOMY & GOVERNANCE CATALOG SCHEMAS
+# ==========================================================
+
+class StrategicCategoryCreate(BaseModel):
+    name: str = Field(..., max_length=100, example="Office Productivity")
+    code: Optional[str] = Field(None, max_length=50, example="OFFICE_PRODUCTIVITY")
+    is_project_linked: bool = Field(default=False)
+    is_recurring_expense: bool = Field(default=False)
+    order_index: int = Field(default=0)
+    is_active: bool = Field(default=True)
+    description: Optional[str] = None
+
+
+class StrategicCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    is_project_linked: Optional[bool] = None
+    is_recurring_expense: Optional[bool] = None
+    order_index: Optional[int] = None
+    is_active: Optional[bool] = None
+    description: Optional[str] = None
+
+
+class StrategicCategoryResponse(StrategicCategoryCreate):
+    id: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UacsCatalogItemCreate(BaseModel):
+    uacs_code: str = Field(..., max_length=50, example="50604050 03")
+    account_title: str = Field(..., max_length=200, example="ICT Equipment (CO)")
+    expenditure_class: str = Field(default="Capital Outlay", example="Capital Outlay")
+    is_subscription_default: bool = Field(default=False)
+    is_active: bool = Field(default=True)
+    description: Optional[str] = None
+
+
+class UacsCatalogItemUpdate(BaseModel):
+    uacs_code: Optional[str] = None
+    account_title: Optional[str] = None
+    expenditure_class: Optional[str] = None
+    is_subscription_default: Optional[bool] = None
+    is_active: Optional[bool] = None
+    description: Optional[str] = None
+
+
+class UacsCatalogItemResponse(UacsCatalogItemCreate):
+    id: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HarmonizationCriterionCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=200, example="PeGIF Standardized APIs & Interoperability")
+    is_mandatory: bool = Field(default=False)
+    description: Optional[str] = None
+
+
+class HarmonizationCriterionUpdate(BaseModel):
+    name: Optional[str] = None
+    is_mandatory: Optional[bool] = None
+    description: Optional[str] = None
+
+
+class HarmonizationCriterionResponse(BaseModel):
+    id: int
+    name: str
+    is_mandatory: bool = False
+    description: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DevelopmentStrategyCreate(BaseModel):
+    code: str = Field(..., min_length=2, max_length=50, example="COTS")
+    display_name: str = Field(..., min_length=2, max_length=200, example="Commercial Off-The-Shelf (COTS)")
+    description: Optional[str] = None
+
+
+class DevelopmentStrategyResponse(BaseModel):
+    code: str
+    display_name: str
+    description: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InflationSettingItem(BaseModel):
+    year: int
+    year_index: int
+    rate_percent: float
+    is_base_year: bool = False
+
+
+class InflationSettingsResponse(BaseModel):
+    active_cycle: str
+    start_year: int
+    rates: List[InflationSettingItem]
+
+
+class InflationSettingsUpdate(BaseModel):
+    rates: Dict[str, float] = Field(..., example={"2028": 0.0, "2029": 3.0, "2030": 5.0})
+
+
+class PolicySettingsResponse(BaseModel):
+    capitalization_threshold: float = 50000.00
+    major_outlay_review_threshold: float = 2000000.00
+    hardware_replacement_buffer_units: int = 3
+    canvas_expiration_warning_days: int = 14
+    inflation_rates_by_year: Dict[str, float] = Field(default_factory=dict)
+
+
+class PolicySettingsUpdate(BaseModel):
+    capitalization_threshold: Optional[float] = None
+    major_outlay_review_threshold: Optional[float] = None
+    hardware_replacement_buffer_units: Optional[int] = None
+    canvas_expiration_warning_days: Optional[int] = None
+
+
+class BatchApprovePayload(BaseModel):
+    proposal_ids: List[Union[uuid.UUID, str]] = Field(..., min_length=1)
+
+    @field_validator('proposal_ids', mode='before')
+    @classmethod
+    def coerce_proposal_id_list(cls, v: Any) -> List[Any]:
+        if not isinstance(v, list):
+            return []
+        return [coerce_optional_uuid(i) for i in v if i]
+
+
+# ==========================================================
+# 16. AUXILIARY CENSUS & INSTITUTIONAL SCHEMAS
 # ==========================================================
 
 class CampusCreate(BaseModel):
@@ -1845,6 +2076,11 @@ class CampusResponse(BaseModel):
 class GlossaryTermCreate(BaseModel):
     term: str = Field(..., example="Republic Act No. 10844")
     definition: str = Field(..., example="Department of Information and Communications Technology Act of 2015.")
+
+
+class GlossaryTermUpdate(BaseModel):
+    term: Optional[str] = None
+    definition: Optional[str] = None
 
 
 class GlossaryTermResponse(BaseModel):
@@ -1916,7 +2152,7 @@ class OfficeSoftwareResponse(BaseModel):
 
 class IctStaffPositionCreate(BaseModel):
     position_title: str = Field(..., example="Information Technology Officer I")
-    status: str = Field(..., example="Plantilla")
+    status: str = Field(..., example="Plantilla (Permanent)")
     count: int = Field(1, ge=0)
 
 
@@ -1961,9 +2197,9 @@ class AnnualCostBreakdownResponse(BaseModel):
         res = {}
         for key, val in parsed.items():
             try:
-                res[str(key)] = int(val) if val is not None else 0
+                res[str(key).strip()] = int(val) if val is not None else 0
             except (ValueError, TypeError):
-                res[str(key)] = 0
+                res[str(key).strip()] = 0
         return res
 
     model_config = ConfigDict(from_attributes=True)

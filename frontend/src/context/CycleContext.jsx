@@ -11,22 +11,36 @@ export function CycleProvider({ children }) {
   const [planningYears, setPlanningYears] = useState([2026, 2027, 2028]);
   const [fromYear, setFromYear] = useState(2026);
   const [toYear, setToYear] = useState(2028);
+
   const [agencyName, setAgencyName] = useState(
     import.meta.env?.VITE_DEFAULT_AGENCY_NAME || 
     import.meta.env?.VITE_AGENCY_NAME || 
     "National Government Agency"
+  );
+  const [agencyHeadPosition, setAgencyHeadPosition] = useState(
+    import.meta.env?.VITE_DEFAULT_AGENCY_HEAD_TITLE || "Head of Agency"
   );
   const [agencyLogoUrl, setAgencyLogoUrl] = useState(null);
   const [dictLogoUrl, setDictLogoUrl] = useState(null);
   const [bagongPilipinasLogoUrl, setBagongPilipinasLogoUrl] = useState(null);
   const [cycleLoading, setCycleLoading] = useState(true);
 
+  /**
+   * Computes an arbitrary sequence of fiscal years for any horizon span (1 to N years).
+   * Supports:
+   * - 1-Year Annual Update (e.g., "2028" -> [2028])
+   * - 2-Year Amendment (e.g., "2028-2029" -> [2028, 2029])
+   * - Standard 3-Year Cycle (e.g., "2026-2028" -> [2026, 2027, 2028])
+   * - 5-Year Strategic Horizon (e.g., "2028-2032" -> [2028, 2029, 2030, 2031, 2032])
+   */
   const computeYearsFromPeriod = (period, startHint = null, endHint = null) => {
     if (!period) return { start: 2026, end: 2028, years: [2026, 2027, 2028] };
 
     const parts = String(period).trim().split("-");
-    let start = startHint ? parseInt(startHint, 10) : parseInt(parts[0], 10);
-    let end = endHint ? parseInt(endHint, 10) : (parts.length > 1 ? parseInt(parts[1], 10) : start);
+    let start = startHint !== null && startHint !== undefined ? parseInt(startHint, 10) : parseInt(parts[0], 10);
+    let end = endHint !== null && endHint !== undefined 
+      ? parseInt(endHint, 10) 
+      : (parts.length > 1 ? parseInt(parts[1], 10) : start);
 
     if (isNaN(start)) start = 2026;
     if (isNaN(end)) end = start;
@@ -45,6 +59,9 @@ export function CycleProvider({ children }) {
     return { start, end, years };
   };
 
+  /**
+   * Dynamically sets the active cycle and recalculates the planning years sequence.
+   */
   const setActiveCycle = useCallback((period, customFrom = null, customTo = null) => {
     setActiveCycleState(period);
     const { start, end, years } = computeYearsFromPeriod(period, customFrom, customTo);
@@ -53,13 +70,21 @@ export function CycleProvider({ children }) {
     setPlanningYears(years);
   }, []);
 
+  /**
+   * Updates agency co-branding and seals, clearing values if null.
+   */
   const setAgencyBranding = useCallback((branding) => {
-    if (branding?.agency_name) setAgencyName(branding.agency_name);
-    if (branding?.agency_logo_url !== undefined) setAgencyLogoUrl(branding.agency_logo_url);
-    if (branding?.dict_logo_url !== undefined) setDictLogoUrl(branding.dict_logo_url);
-    if (branding?.bagong_pilipinas_logo_url !== undefined) setBagongPilipinasLogoUrl(branding.bagong_pilipinas_logo_url);
+    if (!branding) return;
+    if (branding.agency_name) setAgencyName(branding.agency_name);
+    if (branding.agency_head_position) setAgencyHeadPosition(branding.agency_head_position);
+    if (branding.agency_logo_url !== undefined) setAgencyLogoUrl(branding.agency_logo_url || null);
+    if (branding.dict_logo_url !== undefined) setDictLogoUrl(branding.dict_logo_url || null);
+    if (branding.bagong_pilipinas_logo_url !== undefined) setBagongPilipinasLogoUrl(branding.bagong_pilipinas_logo_url || null);
   }, []);
 
+  /**
+   * Fetches active cycle metadata, statutory period bounds, and agency seals from the backend.
+   */
   const fetchActiveCycle = useCallback(async () => {
     setCycleLoading(true);
     try {
@@ -80,15 +105,12 @@ export function CycleProvider({ children }) {
         if (data.agency_name) {
           setAgencyName(data.agency_name);
         }
-        if (data.agency_logo_url) {
-          setAgencyLogoUrl(data.agency_logo_url);
+        if (data.agency_head_position) {
+          setAgencyHeadPosition(data.agency_head_position);
         }
-        if (data.dict_logo_url) {
-          setDictLogoUrl(data.dict_logo_url);
-        }
-        if (data.bagong_pilipinas_logo_url) {
-          setBagongPilipinasLogoUrl(data.bagong_pilipinas_logo_url);
-        }
+        setAgencyLogoUrl(data.agency_logo_url || null);
+        setDictLogoUrl(data.dict_logo_url || null);
+        setBagongPilipinasLogoUrl(data.bagong_pilipinas_logo_url || null);
       }
     } catch (e) {
       console.error("Failed to load active cycle and agency branding:", e);
@@ -112,9 +134,14 @@ export function CycleProvider({ children }) {
         setPlanningYears,
         fromYear,
         toYear,
+        startYear: fromYear,
+        endYear: toYear,
         cycleSpan,
         cycleLoading,
         agencyName,
+        setAgencyName,
+        agencyHeadPosition,
+        setAgencyHeadPosition,
         agencyLogoUrl,
         dictLogoUrl,
         bagongPilipinasLogoUrl,

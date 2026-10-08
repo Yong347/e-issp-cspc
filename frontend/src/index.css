@@ -3,12 +3,70 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --canvas-bg: #edf3fa;
+    --canvas-card: #f8fbfe;
+    --canvas-well: #e6eff9;
+    --canvas-border: #cbd8e6;
+    --canvas-muted: #64748b;
+  }
+
+  html {
+    background-color: #edf3fa;
+    color: #1e293b;
+    scroll-behavior: smooth;
+  }
+
+  .dark html {
+    background-color: #0b1329;
+    color: #f1f5f9;
+  }
+
   body {
-    @apply bg-slate-100 text-slate-800 dark:bg-[#0b1329] dark:text-slate-100 antialiased;
+    background-color: #edf3fa;
+    @apply text-slate-800 dark:bg-[#0b1329] dark:text-slate-100 antialiased font-sans;
+    min-height: 100vh;
+  }
+
+  /* Soften stark white surfaces in light mode to soothing tinted ice-blue */
+  :not(.dark) .bg-white {
+    background-color: #f8fbfe;
+  }
+
+  :not(.dark) .bg-slate-50 {
+    background-color: #f0f5fc;
+  }
+
+  :not(.dark) .bg-slate-100 {
+    background-color: #e6eff9;
+  }
+
+  :not(.dark) .border-slate-200,
+  :not(.dark) .border-slate-200\/90 {
+    border-color: #cbd8e6;
+  }
+
+  :not(.dark) .border-slate-300 {
+    border-color: #bccde0;
   }
 }
 
 @layer utilities {
+  /* Eye-friendly light mode surface utility classes */
+  .bg-canvas-light {
+    background-color: #edf3fa;
+  }
+  .bg-canvas-card {
+    background-color: #f8fbfe;
+  }
+  .bg-canvas-well {
+    background-color: #e6eff9;
+  }
+  .border-canvas-border {
+    border-color: #cbd8e6;
+  }
+
+  /* Smooth modal and card entry animations */
   @keyframes fadeIn {
     from {
       opacity: 0;
@@ -24,6 +82,7 @@
     animation: fadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   }
 
+  /* Custom adaptive scrollbars for dense data grids and drawers */
   .custom-scrollbar::-webkit-scrollbar {
     width: 6px;
     height: 6px;
@@ -32,27 +91,43 @@
     background: transparent;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background-color: rgba(148, 163, 184, 0.35);
+    background-color: rgba(148, 163, 184, 0.4);
     border-radius: 9999px;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(148, 163, 184, 0.6);
+    background-color: rgba(100, 116, 139, 0.7);
   }
 
+  .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.25);
+  }
+  .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(148, 163, 184, 0.5);
+  }
+
+  /* Low-glare elevation shadows */
   .shadow-2xs {
-    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+    box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.03);
   }
   .shadow-xs {
-    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.06);
+    box-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.05);
   }
 }
 
+/* Formal government document print media stylesheet */
 @media print {
-  aside, header, footer, nav, .print-hide, .no-print, button {
+  aside,
+  header,
+  footer,
+  nav,
+  .print-hide,
+  .no-print,
+  button {
     display: none !important;
   }
 
-  body, html {
+  body,
+  html {
     background: #ffffff !important;
     color: #000000 !important;
     margin: 0 !important;
@@ -62,7 +137,9 @@
     font-size: 10pt !important;
   }
 
-  .h-screen, .overflow-hidden, .overflow-y-auto {
+  .h-screen,
+  .overflow-hidden,
+  .overflow-y-auto {
     height: auto !important;
     overflow: visible !important;
     display: block !important;
@@ -75,7 +152,9 @@
     background: #ffffff !important;
   }
 
-  #formal-print-area {
+  #formal-print-area,
+  #formal-annex1-print-area,
+  #dept-vault-print-area {
     display: block !important;
     width: 100% !important;
     margin: 0 !important;
