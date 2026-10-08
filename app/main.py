@@ -190,8 +190,8 @@ def patch_runtime_enum_columns():
     3. Excludes legacy purged document tree tables and dynamic database-backed tables.
     4. Re-verifies resilient EncryptedJSON patching across all mappers.
     """
-    if hasattr(models_module, 'enforce_issp_singularity_and_accounting'):
-        models_module.enforce_issp_singularity_and_accounting.__globals__['item_lower'] = ''
+    pass
+
 
     patch_resilient_encrypted_json()
 
@@ -1250,9 +1250,6 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
     
     # 0. Defensively patch models listener globals
-    if hasattr(models_module, 'enforce_issp_singularity_and_accounting'):
-        models_module.enforce_issp_singularity_and_accounting.__globals__['item_lower'] = ''
-
     # 1. Verify and compile database schema structures
     try:
         logger.info("Verifying and registering database schema metadata...")

@@ -580,9 +580,7 @@ def get_inflation_rate_for_year(connection_or_db: Any, cal_year: int, start_year
 
     if rate_percent <= Decimal("0.00"):
         return Decimal("0.00")
-    if rate_percent < Decimal("0.20"):
-        return rate_percent
-    return rate_percent / Decimal("100.0")
+    return (rate_percent / Decimal("100.0")).quantize(Decimal("0.0001"))
 
 
 def get_adjusted_unit_cost_for_year(connection_or_db: Any, base_cost: Decimal, cal_year: int, start_year: int) -> Decimal:

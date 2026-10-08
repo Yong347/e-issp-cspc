@@ -7,9 +7,9 @@ services:
     container_name: issp_postgres
     restart: always
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=issp_core
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-issp_core}
     ports:
       - "5432:5432"
     volumes:
@@ -23,7 +23,7 @@ services:
     ports:
       - "6379:6379"
 
-  # 3. FastAPI Web Server
+  # 3. FastAPI Backend Server
   web:
     build: .
     container_name: issp_backend
@@ -34,40 +34,62 @@ services:
       - uploads_data:/code/uploads
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - ENV=production
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/issp_core
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-issp_core}
       - REDIS_URL=redis://redis:6379/0
-      - STORAGE_TYPE=local
-      - SECRET_KEY=secure_fallback_local_secret_key_12345
-      - DB_ENCRYPTION_KEY=cspc_secure_symmetric_encryption_key_value,cspc_secondary_rotation_key_value
-      - DB_ENCRYPTION_SALT=cspc_issp_secure_static_encryption_salt
-      - DEFAULT_SEED_PASSWORD=secure_seed_password_999
     depends_on:
       - db
       - redis
 
-  # 4. Celery Background Worker (Required for PDF Generation)
+  # 4. Celery Background Worker (Dual-Pass PDF & Word Compilation)
   worker:
     build: .
     container_name: issp_worker
     restart: always
-    command: celery -A app.celery_app worker --loglevel=info --pool=solo
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
     volumes:
       - .:/code
       - uploads_data:/code/uploads
+    env_file:
+      - .env
     environment:
       - ENV=production
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/issp_core
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-issp_core}
       - REDIS_URL=redis://redis:6379/0
-      - STORAGE_TYPE=local
-      - SECRET_KEY=secure_fallback_local_secret_key_12345
-      - DB_ENCRYPTION_KEY=cspc_secure_symmetric_encryption_key_value,cspc_secondary_rotation_key_value
-      - DB_ENCRYPTION_SALT=cspc_issp_secure_static_encryption_salt
+    depends_on:
+      - db
+      - redis
+
+  # 5. Celery Beat Scheduler (Automated Annual Rollover & Expiration Checks)
+  beat:
+    build: .
+    container_name: issp_beat
+    restart: always
+    command: celery -A app.celery_app beat --loglevel=info
+    env_file:
+      - .env
+    environment:
+      - ENV=production
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-issp_core}
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - redis
 
-# Declarations for persistent storage
+  # 6. Production Nginx & React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: issp_frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - web
+
 volumes:
   postgres_data:
   uploads_data:
