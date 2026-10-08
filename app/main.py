@@ -9,6 +9,7 @@ Core Capabilities:
 - Resilience Patching for Cryptographic Decryption & JSON Serialization
 - CORS Security Middleware & Structured JSON Error Handlers
 - Single Source of Truth Router Registrations (Auth, Dept, Admin, Supply)
+- Root Route & Frontend SPA Distribution Serving
 =============================================================================
 """
 
@@ -190,9 +191,6 @@ def patch_runtime_enum_columns():
     3. Excludes legacy purged document tree tables and dynamic database-backed tables.
     4. Re-verifies resilient EncryptedJSON patching across all mappers.
     """
-    pass
-
-
     patch_resilient_encrypted_json()
 
     # Native database enum columns
@@ -1478,3 +1476,25 @@ async def check_engine_health():
             "global_budget_limit": f"PHP {budget_limit:,.2f}" if budget_limit else "Not Configured"
         }
     )
+
+
+# ==========================================================
+# ROOT ROUTE & FRONTEND SPA DISTRIBUTION MOUNT
+# ==========================================================
+
+# Mount frontend production build if present, otherwise serve standard API root JSON
+frontend_dist = os.path.join(settings.BASE_DIR, "frontend", "dist")
+if os.path.exists(frontend_dist) and os.path.isdir(frontend_dist):
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+else:
+    @app.get("/", tags=["Root"])
+    async def root():
+        return JSONResponse(
+            content={
+                "status": "online",
+                "service": f"{settings.DEFAULT_AGENCY_NAME} e-ISSP Compliance Engine",
+                "version": "5.0-DICT-v.2026",
+                "docs": "/docs",
+                "health": "/api/health"
+            }
+        )

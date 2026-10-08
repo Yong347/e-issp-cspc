@@ -37,7 +37,17 @@ class Settings:
         if domain.strip()
     ]
 
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/issp_core")
+    # Normalize DATABASE_URL to avoid "No module named 'psycopg'" dialect mismatches across drivers
+    _raw_db_url = os.getenv(
+        "DATABASE_URL", 
+        "postgresql+psycopg2://postgres:postgres@localhost:5432/issp_core"
+    ).strip()
+    if _raw_db_url.startswith("postgres://"):
+        _raw_db_url = _raw_db_url.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif _raw_db_url.startswith("postgresql://") and not _raw_db_url.startswith("postgresql+"):
+        _raw_db_url = _raw_db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    DATABASE_URL: str = _raw_db_url
+
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     STORAGE_TYPE: str = os.getenv("STORAGE_TYPE", "local").lower().strip()
     
@@ -132,7 +142,7 @@ if is_celery_worker:
             "Ensure the worker container shares the exact same physical DB file volume path "
             "as the FastAPI web server to prevent transaction and state mismatch anomalies."
         )
-    elif settings.DATABASE_URL == "postgresql://postgres:postgres@localhost:5432/issp_core":
+    elif "postgres:postgres@localhost:5432/issp_core" in settings.DATABASE_URL:
         logger.warning(
             "Celery worker is running with the default PostgreSQL fallback URL. "
             "If your FastAPI server is using a different database setup, "

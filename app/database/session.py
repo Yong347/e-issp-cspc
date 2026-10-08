@@ -9,6 +9,13 @@ logger = logging.getLogger("app.database.session")
 
 # Parse the database URL to configure dialect-specific parameters
 db_url = settings.DATABASE_URL
+
+# Auto-normalize Postgres driver to avoid "No module named 'psycopg'" dialect mismatches
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+psycopg2://", 1)
+elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+"):
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
 connect_args = {}
 pool_args = {
     "pool_pre_ping": True,
