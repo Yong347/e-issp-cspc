@@ -4,28 +4,24 @@
  * CENTRALIZED API CLIENT & GLOBAL 401 INTERCEPTOR
  * DICT ISSP v.2026 Compliance Engine Client
  * ==============================================================================
- * Capabilities & Safeguards:
- * - Dynamic Base URL Resolution (VITE_API_URL / VITE_API_BASE_URL fallback)
- * - Automatic Bearer Token Extraction & Authorization Injection
- * - Global 401 Unauthorized Interceptor with Clean Route Preservation
- * - Multi-Part FormData Boundary Protection (Zero Content-Type override)
- * - Comprehensive Human-Readable Error Parsing:
- *    * Pydantic array transformation without machine "body ->" jargon
- *    * DICT Singularity Graph violation list extraction (err.violations)
- *    * Complete elimination of "[object Object]" display bugs
- *    * Rich Error object metadata (err.status, err.data, err.violations)
- * - URL Query Parameter helper integration (options.params support)
- * ==============================================================================
  */
 
-const rawRoot =
-  import.meta.env?.VITE_API_URL ||
-  import.meta.env?.VITE_API_BASE_URL ||
-  "http://localhost:8000";
+// Dynamically resolves API root: checks environment variables first,
+// then falls back to the current browser origin on Azure, and localhost only for local dev.
+const getBaseUrl = () => {
+  const envUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (envUrl && envUrl.trim() !== "") {
+    return envUrl.trim().endsWith("/") ? envUrl.trim().slice(0, -1) : envUrl.trim();
+  }
+  if (typeof window !== "undefined" && window.location?.origin) {
+    if (!window.location.origin.includes(":5173") && !window.location.origin.includes(":3000")) {
+      return window.location.origin;
+    }
+  }
+  return "http://localhost:8000";
+};
 
-export const API_BASE_URL = rawRoot.endsWith("/")
-  ? rawRoot.slice(0, -1)
-  : rawRoot;
+export const API_BASE_URL = getBaseUrl();
 
 /**
  * Retrieves the stored JWT access token from localStorage safely.
@@ -74,7 +70,6 @@ function handleSessionExpired() {
 
 /**
  * Formats machine field keys into clean, human-readable titles.
- * e.g., "yearly_quantities" -> "Yearly Quantities", "uacs_object_code" -> "UACS Object Code"
  *
  * @param {string} fieldKey
  * @returns {string}
@@ -123,8 +118,6 @@ function humanizeFieldName(fieldKey) {
 
 /**
  * Comprehensive HTTP response parser.
- * Unpacks Pydantic validation arrays, custom DAG violation envelopes,
- * and attaches structured metadata directly to the thrown Error object.
  *
  * @param {Response} res - Native Fetch Response object
  * @param {string} fallbackMessage - Default message if parsing fails
@@ -143,7 +136,6 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
     try {
       rawErrorData = await res.json();
       if (rawErrorData) {
-        // 1. Detect Singularity DAG Violations Envelope (Top-level or detail-nested)
         if (Array.isArray(rawErrorData.violations)) {
           violationList = rawErrorData.violations;
         } else if (rawErrorData.detail && Array.isArray(rawErrorData.detail.violations)) {
@@ -153,7 +145,6 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
         if (typeof rawErrorData.detail === "string") {
           detailMessage = rawErrorData.detail;
         } else if (Array.isArray(rawErrorData.detail)) {
-          // 2. Format Pydantic field-level validation errors
           detailMessage = rawErrorData.detail
             .map((err) => {
               if (typeof err === "string") return err;
@@ -167,11 +158,9 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
             })
             .join(" | ");
         } else if (violationList.length > 0) {
-          // 3. Format DAG Violations Checklist
           const header = rawErrorData.error || rawErrorData.detail?.error || "Compliance Integrity Failure";
           detailMessage = `${header} (${violationList.length} issue${violationList.length > 1 ? "s" : ""}):\n• ${violationList.join("\n• ")}`;
         } else if (rawErrorData.detail && typeof rawErrorData.detail === "object") {
-          // 4. Nested detail object handling (prevent [object Object])
           if (rawErrorData.detail.message) {
             detailMessage = rawErrorData.detail.message;
           } else if (rawErrorData.detail.error) {
@@ -188,11 +177,9 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
         }
       }
     } catch {
-      // Body is not JSON (raw text or HTML)
       detailMessage = await res.text().catch(() => "");
     }
 
-    // Safety fallback: Ensure [object Object] is never rendered to the user
     const finalErrorMessage =
       detailMessage && String(detailMessage).trim() !== "[object Object]"
         ? String(detailMessage).trim()
@@ -208,7 +195,6 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
     throw errorObj;
   }
 
-  // Handle 204 No Content
   if (res.status === 204) {
     return null;
   }
@@ -223,9 +209,9 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
 /**
  * Central fetch wrapper that injects headers, tokens, query params, and dispatches requests.
  *
- * @param {string} endpoint - API path (e.g. "/api/admin/proposals") or full URL
- * @param {RequestInit & { token?: string, params?: Record<string, any> }} options - Fetch options
- * @returns {Promise<Response>} Native fetch response
+ * @param {string} endpoint - API path or full URL
+ * @param {RequestInit & { token?: string, params?: Record<string, any> }} options
+ * @returns {Promise<Response>}
  */
 export async function customFetch(endpoint, options = {}) {
   let url =
@@ -233,7 +219,6 @@ export async function customFetch(endpoint, options = {}) {
       ? endpoint
       : `${API_BASE_URL}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
 
-  // Process optional query parameters dictionary (options.params)
   if (options.params && typeof options.params === "object") {
     const query = new URLSearchParams();
     Object.entries(options.params).forEach(([k, v]) => {
@@ -253,12 +238,10 @@ export async function customFetch(endpoint, options = {}) {
 
   const headers = { ...(options.headers || {}) };
 
-  // Inject Authorization header if not explicitly provided
   if (token && !headers["Authorization"] && !headers["authorization"]) {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  // Do not set Content-Type if FormData is used; browser must determine multi-part boundary
   if (!isFormData && !headers["Content-Type"] && !headers["content-type"]) {
     headers["Content-Type"] = "application/json";
   }
@@ -268,7 +251,6 @@ export async function customFetch(endpoint, options = {}) {
     headers,
   };
 
-  // Automatically serialize objects into JSON strings if not FormData or URLSearchParams
   if (
     fetchConfig.body &&
     typeof fetchConfig.body === "object" &&
@@ -292,21 +274,12 @@ export async function customFetch(endpoint, options = {}) {
   }
 }
 
-/**
- * Standardized API client with helper methods for REST operations.
- */
 export const apiClient = {
-  /**
-   * Performs a GET request and returns parsed JSON.
-   */
   async get(endpoint, options = {}) {
     const res = await customFetch(endpoint, { ...options, method: "GET" });
     return handleResponse(res, `GET ${endpoint} failed`);
   },
 
-  /**
-   * Performs a POST request and returns parsed JSON.
-   */
   async post(endpoint, body = {}, options = {}) {
     const res = await customFetch(endpoint, {
       ...options,
@@ -316,9 +289,6 @@ export const apiClient = {
     return handleResponse(res, `POST ${endpoint} failed`);
   },
 
-  /**
-   * Performs a PUT request and returns parsed JSON.
-   */
   async put(endpoint, body = {}, options = {}) {
     const res = await customFetch(endpoint, {
       ...options,
@@ -328,17 +298,11 @@ export const apiClient = {
     return handleResponse(res, `PUT ${endpoint} failed`);
   },
 
-  /**
-   * Performs a DELETE request and returns parsed JSON.
-   */
   async delete(endpoint, options = {}) {
     const res = await customFetch(endpoint, { ...options, method: "DELETE" });
     return handleResponse(res, `DELETE ${endpoint} failed`);
   },
 
-  /**
-   * Performs a multipart upload (FormData) and returns parsed JSON.
-   */
   async upload(endpoint, formData, options = {}) {
     const res = await customFetch(endpoint, {
       ...options,

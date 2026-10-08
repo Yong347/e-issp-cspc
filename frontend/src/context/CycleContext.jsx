@@ -3,8 +3,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 
 const CycleContext = createContext(null);
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-const API_ROOT = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+const rawRoot = import.meta.env?.VITE_API_URL || (typeof window !== "undefined" && window.location.hostname !== "localhost" ? window.location.origin : "http://localhost:8000");const API_ROOT = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
 
 export function CycleProvider({ children }) {
   const [activeCycle, setActiveCycleState] = useState("2026-2028");
