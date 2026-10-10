@@ -51,13 +51,66 @@ from app.utils.helpers import (
 logger = logging.getLogger(__name__)
 
 # =========================================================================
+# STATUTORY E-GOVERNMENT PROGRAMS SPECIFICATIONS (DICT v.2026)
+# =========================================================================
+CANONICAL_EGOV_SPECS = [
+    ("elgu", "1. ELECTRONIC LOCAL GOVERNMENT UNIT (ELGU) SYSTEM (Applicable only to LGUs)"),
+    ("egovpay", "2. GOVERNMENT DIGITAL PAYMENT SYSTEM FOR COLLECTION AND DISBURSEMENT"),
+    ("pnpki", "3. GOVERNMENT PUBLIC KEY INFRASTRUCTURE (PNPKI)"),
+    ("hcmis", "4. HUMAN CAPITAL MANAGEMENT INFORMATION SYSTEM (HCMIS)"),
+    ("ifmis", "5. INTEGRATED FINANCIAL MANAGEMENT INFORMATION SYSTEM (IFMIS)"),
+    ("portal", "6. ONLINE PUBLIC SERVICE PORTAL"),
+    ("philgeps", "7. PROCUREMENT SYSTEM (PHILGEPS)"),
+    ("records", "8. RECORDS AND KNOWLEDGE MANAGEMENT INFORMATION SYSTEM"),
+    ("continuity", "9. PUBLIC SERVICE CONTINUITY PLAN (PSCP)")
+]
+
+
+# =========================================================================
+# RUNTIME WEASYPRINT / PYDYF COMPATIBILITY PATCH
+# =========================================================================
+def patch_weasyprint_pydyf():
+    """
+    Hardens WeasyPrint 62.x against breaking changes in pydyf >= 0.11.0.
+    In pydyf 0.11+, Stream.transform was replaced by Stream.set_matrix,
+    causing `super().transform(...)` in weasyprint/pdf/stream.py:246 to fail with:
+    AttributeError: 'super' object has no attribute 'transform'.
+    """
+    try:
+        import pydyf
+        if hasattr(pydyf, "Stream") and not hasattr(pydyf.Stream, "transform"):
+            def _pydyf_stream_transform(self, a=1, b=0, c=0, d=1, e=0, f=0):
+                if hasattr(self, "set_matrix"):
+                    return self.set_matrix(a, b, c, d, e, f)
+                return self.push(f"{a:f} {b:f} {c:f} {d:f} {e:f} {f:f} cm")
+            pydyf.Stream.transform = _pydyf_stream_transform
+    except Exception as e:
+        logger.debug(f"pydyf patch note: {e}")
+
+    try:
+        from weasyprint.pdf import stream as wp_stream
+        if hasattr(wp_stream, "Stream"):
+            def _wp_stream_transform(self, a=1, b=0, c=0, d=1, e=0, f=0):
+                if hasattr(self, "set_matrix"):
+                    return self.set_matrix(a, b, c, d, e, f)
+                elif hasattr(super(wp_stream.Stream, self), "transform"):
+                    return super(wp_stream.Stream, self).transform(a, b, c, d, e, f)
+                else:
+                    return self.push(f"{a:f} {b:f} {c:f} {d:f} {e:f} {f:f} cm")
+            wp_stream.Stream.transform = _wp_stream_transform
+    except Exception as e:
+        logger.debug(f"weasyprint stream patch note: {e}")
+
+
+patch_weasyprint_pydyf()
+
+# =========================================================================
 # IN-MEMORY TASK STORE FOR STANDALONE & NON-REDIS RUNTIMES
 # =========================================================================
 TASK_PROGRESS_STORE: Dict[str, Dict[str, Any]] = {}
 
 
 def get_task_progress(task_id: str) -> Optional[Dict[str, Any]]:
-    """Retrieves in-memory task status for environments running without a Celery/Redis broker."""
     return TASK_PROGRESS_STORE.get(str(task_id))
 
 
@@ -69,7 +122,6 @@ def set_task_progress(
     result: Any = None, 
     error: Any = None
 ) -> None:
-    """Stores task status in memory for fast polling without broker roundtrips."""
     TASK_PROGRESS_STORE[str(task_id)] = {
         "task_id": str(task_id),
         "state": state,
@@ -89,10 +141,6 @@ def safe_update_progress(
     result: Any = None, 
     error: Any = None
 ) -> None:
-    """
-    Safely pushes task status to both in-memory store and Celery backend.
-    Never raises exceptions if Redis is down or unreachable.
-    """
     task_id = None
     if task and hasattr(task, "request") and getattr(task.request, "id", None):
         task_id = str(task.request.id)
@@ -118,7 +166,6 @@ def safe_update_progress(
 
 
 def clean_text(val: Optional[str], default: str = "") -> str:
-    """Sanitizes text, stripping dummy placeholder strings like 'testtt...'."""
     if not val:
         return default
     s = str(val).strip()
@@ -128,10 +175,6 @@ def clean_text(val: Optional[str], default: str = "") -> str:
 
 
 def clean_uacs_title(uacs_str: Optional[str]) -> str:
-    """
-    Strips numeric UACS accounting prefixes, displaying solely the clean account title.
-    Example: '50604050 03 - ICT Equipment (CO)' -> 'ICT Equipment (CO)'
-    """
     if not uacs_str:
         return ""
     val = str(uacs_str).strip()
@@ -142,7 +185,6 @@ def clean_uacs_title(uacs_str: Optional[str]) -> str:
 
 
 def format_text_blocks(val: Optional[str], default: str = "") -> str:
-    """Converts structured plain text into clean HTML paragraphs or bulleted lists."""
     raw = clean_text(val, default)
     if not raw:
         return ""
@@ -169,12 +211,6 @@ def format_text_blocks(val: Optional[str], default: str = "") -> str:
 
 
 def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
-    """
-    Resolves storage URLs into base64 data URIs.
-    Directly accesses local disk storage in local storage mode to avoid 
-    HTTP loopback timeouts and Celery worker deadlocks.
-    Blocks test and placeholder images strictly.
-    """
     if not url:
         return None
     normalized = url.strip().lower()
@@ -182,7 +218,6 @@ def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
         logger.warning(f"Security Block: Traversal or local file scheme prohibited: {url}")
         return None
 
-    # Blacklist placeholder and test images
     blacklist = ["syanart", "boruto", "naruto", "wallpaper", "anime", "test", "dummy", "placeholder", "sample"]
     if any(k in normalized for k in blacklist):
         logger.warning(f"Image Sanity Block: Rejected test asset: {url}")
@@ -209,7 +244,6 @@ def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
 
 
 def fmt_currency(val: Any) -> str:
-    """Safely formats decimal currency values with Philippine Peso symbol."""
     if val is None:
         return "₱0.00"
     try:
@@ -226,11 +260,6 @@ def render_schematic_page(
     narrative_text: Optional[str] = None,
     section_id: Optional[str] = None
 ) -> str:
-    """
-    Renders an official full-page landscape schematic if an authentic image is attached.
-    If no image is provided, renders a professional statutory placeholder container
-    with technical specifications, avoiding broken/empty layouts.
-    """
     resolved = resolve_local_img_path(img_url) if img_url else None
     id_attr = f' id="{section_id}"' if section_id else ""
     narrative_block = f'<div style="font-size: 8pt; line-height: 1.35; margin-bottom: 6px; text-align: justify;">{format_text_blocks(narrative_text)}</div>' if narrative_text else ""
@@ -267,13 +296,6 @@ def render_schematic_page(
 
 
 def resolve_proposal_category(itm: Proposal) -> str:
-    """
-    Resolves the canonical strategic category for an item to maintain parity and prevent leakage.
-    - If linked to an ICT Project, inherits the project's category.
-    - Subscriptions / cloud licenses belong to 'Continuing Costs/Expenses'.
-    - Unlinked contractors/services belong to 'Internal ICT Projects'.
-    - Otherwise defaults to 'Office Productivity'.
-    """
     proj = itm.project_rel
     if proj and getattr(proj, "project_category", None):
         return str(getattr(proj.project_category, "value", proj.project_category)).strip()
@@ -288,7 +310,6 @@ def resolve_proposal_category(itm: Proposal) -> str:
     if strat_lower in ["continuing costs/expenses", "continuing costs"]:
         return "Continuing Costs/Expenses"
 
-    # Services, consulting, migration contractors are project-level outlays
     if cat_lower in ["services"] or any(k in name_lower for k in ["contractor", "migration", "development", "consulting"]):
         return "Internal ICT Projects"
 
@@ -308,10 +329,11 @@ def resolve_proposal_category(itm: Proposal) -> str:
     soft_time_limit=1500
 )
 def compile_issp_document(self, metadata: dict):
+    patch_weasyprint_pydyf()
     db = SessionLocal()
     task_ref = self
     try:
-        issp_period = metadata.get("issp_period_years", "2028-2030")
+        issp_period = metadata.get("issp_period_years", "2026-2028")
         export_format = metadata.get("export_format", "pdf").lower().strip()
         
         safe_update_progress(task_ref, "PROGRESS", 15, "Certifying graph singularity and legal linkages...")
@@ -375,7 +397,6 @@ def compile_issp_document(self, metadata: dict):
 
         performance_metrics = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
         
-        # Pull approved proposals strictly assigned to projects or authorized standalone buckets
         policy = get_governance_policy(db)
         cap_threshold = policy.get("capitalization_threshold", Decimal("50000.00"))
 
@@ -390,12 +411,6 @@ def compile_issp_document(self, metadata: dict):
             or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).all()
 
-        # STRICT PROPOSAL QUARANTINE:
-        # A proposal line item appears in Part IV.A and Table B.1 IF AND ONLY IF:
-        # 1. It is approved AND explicitly bound to an ICT Project (project_id IS NOT NULL), OR
-        # 2. It is approved as a genuine standalone operational expense (Office Productivity or Continuing Costs)
-        #    AND its unit cost is strictly below the Capital Outlay threshold (< ₱50,000.00).
-        # Any capital outlay (>= ₱50,000) or project-related service must belong to an ICT Project to be compiled.
         items = []
         for itm in raw_approved_items:
             resolved_cat = resolve_proposal_category(itm)
@@ -405,7 +420,6 @@ def compile_issp_document(self, metadata: dict):
                 if itm.project_id is not None:
                     items.append(itm)
                 else:
-                    logger.info(f"Quarantining unlinked project proposal from compiled plan: {itm.item_name}")
                     continue
             else:
                 is_capital_outlay = (
@@ -414,7 +428,6 @@ def compile_issp_document(self, metadata: dict):
                     or "capital" in str(getattr(itm.expenditure_class, 'value', itm.expenditure_class or '')).lower()
                 )
                 if is_capital_outlay and itm.project_id is None:
-                    logger.info(f"Quarantining unlinked capital outlay from compiled plan: {itm.item_name}")
                     continue
                 else:
                     items.append(itm)
@@ -436,10 +449,8 @@ def compile_issp_document(self, metadata: dict):
         dr_bias = db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.issp_period == issp_period).all()
         dr_metrics = db.query(DRBCPMetric).filter(DRBCPMetric.issp_period == issp_period).all()
 
-        # Fallback Seed: Guarantee Definition of Terms is never empty
         glossary = db.query(GlossaryTerm).order_by(GlossaryTerm.order_index.asc()).all()
         if not glossary:
-            logger.info("Glossary is empty. Auto-seeding canonical DICT statutory definitions...")
             default_dict_terms = [
                 ("DICT", "Department of Information and Communications Technology – The executive department of the Philippine government responsible for the planning, development, and promotion of the national ICT agenda in support of national development."),
                 ("MITHI", "Medium-Term Information and Technology Harmonization Initiative – An inter-agency initiative (DBM, DICT, NEDA) aimed at harmonizing government ICT investments to optimize public resources and eliminate redundancies."),
@@ -505,7 +516,6 @@ def compile_issp_document(self, metadata: dict):
 
             download_url = storage_client.generate_download_url(docx_key)
             
-            # Persist vault status to database
             try:
                 narrative_record = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
                 if narrative_record:
@@ -536,6 +546,7 @@ def compile_issp_document(self, metadata: dict):
         )
 
         safe_update_progress(task_ref, "PROGRESS", 80, "Rendering PDF binary via layout engine...")
+        patch_weasyprint_pydyf()
         try:
             from weasyprint import HTML
         except (OSError, ImportError) as os_err:
@@ -568,7 +579,6 @@ def compile_issp_document(self, metadata: dict):
         storage_client.upload_compiled_pdf(pdf_bytes, issp_id)
         download_url = storage_client.generate_download_url(storage_client.get_generated_pdf_key(issp_id))
 
-        # Persist final_pdf_vault_url to database MasterNarrative
         try:
             narrative_record = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
             if narrative_record:
@@ -683,11 +693,6 @@ def render_information_system_full_spec(
     narrative: MasterNarrative = None,
     projects: List[IctProject] = None
 ) -> str:
-    """
-    Renders the exact DICT-compliant specification card matching DICT ISSP Guidelines & Templates.
-    Purged of non-standard architecture layout image rows.
-    Displays Estimated Proposed Cost and Linked Major ICT Project for proposed systems.
-    """
     classification_str = str(getattr(s.classification, "value", s.classification or "")).lower()
 
     is_support = bool(getattr(s, "is_support_to_operations", False)) or ("support" in classification_str)
@@ -853,16 +858,14 @@ def generate_complete_issp_html(
     dr_metrics: List[DRBCPMetric],
     parity_data: Dict[str, Any]
 ) -> str:
-    # 1. DYNAMIC PLANNING HORIZON
     years_range = get_cycle_year_range(narrative, narrative.issp_period)
     if not years_range:
-        years_range = [2028, 2029, 2030]
+        years_range = [2026, 2027, 2028]
 
     year_headers = [f"FY {y}" for y in years_range]
     start_year = years_range[0]
     end_year = years_range[-1]
 
-    # SINGLE OFFICIAL INSTITUTIONAL EMBLEM (Sole Emblem rendered in central cover header)
     agency_logo = resolve_local_img_path(narrative.agency_logo_url) or ""
     running_header_logo = agency_logo
 
@@ -873,42 +876,50 @@ def generate_complete_issp_html(
 
     standalone_metrics = [m for m in performance_metrics if not m.project_id]
 
-    # 2. OPTIMIZED CSS (Strict DICT Page Numbering: Cover Suppressed, Prelims Roman, Part I starts at 1)
+    if " POLYTECHNIC" in agency_name_clean.upper():
+        agency_header_name = agency_name_clean.upper().replace(" POLYTECHNIC", "\A ")
+    elif " STATE " in agency_name_clean.upper():
+        agency_header_name = agency_name_clean.upper().replace(" STATE ", "\A ")
+    elif " UNIVERSITY" in agency_name_clean.upper():
+        agency_header_name = agency_name_clean.upper().replace(" UNIVERSITY", "\A ")
+    else:
+        agency_header_name = agency_name_clean.upper()
+
     css = f"""
     <style>
         @page {{
             size: A4 landscape;
             margin: 1.25in 1.0in 1.0in 1.0in;
             @top-left {{
-                content: "REPUBLIC OF THE PHILIPPINES\\A {agency_name_clean.upper()}";
+                content: "{agency_header_name}";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8pt;
+                font-size: 8.5pt;
                 font-weight: bold;
                 color: #0f172a;
                 white-space: pre-wrap;
                 text-align: left;
                 vertical-align: middle;
                 background-image: url("{running_header_logo}");
-                background-size: 32px 32px;
+                background-size: 36px 36px;
                 background-repeat: no-repeat;
                 background-position: left center;
-                padding-left: 38px;
+                padding-left: 44px;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 34px;
+                height: 38px;
             }}
             @top-right {{
-                content: "INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\\A {narrative.issp_period}";
+                content: "INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8pt;
+                font-size: 9.5pt;
                 font-weight: bold;
-                color: #1e3a8a;
+                color: #0f172a;
                 text-align: right;
                 vertical-align: middle;
                 white-space: pre-wrap;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 34px;
+                height: 38px;
             }}
             @bottom-right {{
                 content: "Page " counter(page);
@@ -918,7 +929,6 @@ def generate_complete_issp_html(
             }}
         }}
 
-        /* SUPPRESS ALL HEADERS, FOOTERS & PAGE NUMBERS ON THE COVER PAGE */
         @page:first {{
             size: A4 landscape;
             margin: 0.85in 0.9in 0.85in 0.9in;
@@ -935,7 +945,6 @@ def generate_complete_issp_html(
             @bottom-right {{ content: none !important; }}
         }}
 
-        /* PRELIMINARY PAGES: TABLE OF CONTENTS & DEFINITIONS (LOWER ROMAN NUMERALS) */
         @page toc_layout {{
             size: A4 landscape;
             margin: 1.25in 1.0in 1.0in 1.0in;
@@ -966,41 +975,40 @@ def generate_complete_issp_html(
             break-after: page;
         }}
 
-        /* RESET ARABIC PAGE NUMBERS TO EXACTLY 1 AT PART I ON THE PAGE RULE DIRECTLY */
         @page part1_start {{
             size: A4 landscape;
             margin: 1.25in 1.0in 1.0in 1.0in;
             counter-reset: page 1;
             @top-left {{
-                content: "REPUBLIC OF THE PHILIPPINES\\A {agency_name_clean.upper()}";
+                content: "{agency_header_name}";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8pt;
+                font-size: 8.5pt;
                 font-weight: bold;
                 color: #0f172a;
                 white-space: pre-wrap;
                 text-align: left;
                 vertical-align: middle;
                 background-image: url("{running_header_logo}");
-                background-size: 32px 32px;
+                background-size: 36px 36px;
                 background-repeat: no-repeat;
                 background-position: left center;
-                padding-left: 38px;
+                padding-left: 44px;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 34px;
+                height: 38px;
             }}
             @top-right {{
-                content: "INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\\A {narrative.issp_period}";
+                content: "INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8pt;
+                font-size: 9.5pt;
                 font-weight: bold;
-                color: #1e3a8a;
+                color: #0f172a;
                 text-align: right;
                 vertical-align: middle;
                 white-space: pre-wrap;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 34px;
+                height: 38px;
             }}
             @bottom-right {{
                 content: "Page " counter(page);
@@ -1210,7 +1218,7 @@ def generate_complete_issp_html(
     </style>
     """
 
-    # --- 1. DYNAMIC COVER PAGE (SINGLE CENTRAL EMBLEM ENLARGED TO 135px) ---
+    # --- COVER PAGE ---
     raw_scope = str(getattr(narrative.scope_choice, "value", narrative.scope_choice or "")).strip().lower()
     scope_json = narrative.scope_json or {}
     has_reg = bool(scope_json.get("with_regional_offices"))
@@ -1218,7 +1226,6 @@ def generate_complete_issp_html(
     is_amend = bool(getattr(narrative, "is_amendment", False))
     amend_num = getattr(narrative, "amendment_number", "1st") or "1st"
 
-    # Extract actual signatories: human full names mounted directly on top of the signature lines
     raw_cio = clean_text(getattr(narrative, 'cio_name', None) or getattr(narrative, 'signatory_prepared_by', ''))
     if not raw_cio or raw_cio.lower() in ["chief information officer", "cio", "none", "null", "undefined"]:
         cio_display_name = "REY T. CORTEZ, MIT"
@@ -1231,7 +1238,6 @@ def generate_complete_issp_html(
     else:
         head_display_name = raw_head.upper()
 
-    # Robust scope checks
     is_dept_wide = "department" in raw_scope or not raw_scope
     is_dept_co = ("central office" in raw_scope or "head office" in raw_scope) and not is_dept_wide
     is_dept_co_only = is_dept_co and not has_reg and not has_bur
@@ -1242,7 +1248,6 @@ def generate_complete_issp_html(
 
     cover_html = f"""
     <div class="page-cover">
-        <!-- SINGLE CENTRAL OFFICIAL LOGO HEADER (Enlarged to 135px, Sole Official Emblem) -->
         <div style="text-align: center; margin-bottom: 20px;">
             {f'<img src="{running_header_logo}" style="height: 135px; width: 135px; object-fit: contain; margin: 0 auto 10px auto; display: block;" />' if running_header_logo else ''}
             <p style="font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1.2px; margin: 0; color: #475569; line-height: 1.4; font-family: sans-serif;">
@@ -1273,7 +1278,6 @@ def generate_complete_issp_html(
 
         <table style="width: 100%; border: none; margin-top: 24px; border-collapse: collapse;">
             <tr>
-                <!-- SIGNATORIES: HUMAN FULL NAMES MOUNTED DIRECTLY ON TOP OF SIGNING LINES -->
                 <td style="width: 52%; border: none; vertical-align: top; padding-right: 28px;">
                     <div style="margin-bottom: 32px;">
                         <strong style="text-transform: uppercase; font-size: 9pt; display: block; color: #0f172a; font-family: sans-serif;">
@@ -1304,7 +1308,6 @@ def generate_complete_issp_html(
                     </div>
                 </td>
 
-                <!-- SCOPE CHECKLIST -->
                 <td style="width: 48%; border: none; vertical-align: top;">
                     <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px 14px; font-size: 8pt; line-height: 1.6; font-family: sans-serif;">
                         <strong style="color: #1e3a8a; text-transform: uppercase; display: block; margin-bottom: 4px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px;">
@@ -1592,19 +1595,6 @@ def generate_complete_issp_html(
         render_information_system_full_spec(s, is_proposed=False, narrative=narrative, projects=projects)
         for s in existing_systems
     )
-
-    # EXACT 9 STATUTORY E-GOVERNMENT INITIATIVES (DICT ISSP v.2026 Aligned)
-    CANONICAL_EGOV_SPECS = [
-        ("elgu", "1. ELECTRONIC LOCAL GOVERNMENT UNIT (ELGU) SYSTEM (Applicable only to LGUs)"),
-        ("egovpay", "2. GOVERNMENT DIGITAL PAYMENT SYSTEM FOR COLLECTION AND DISBURSEMENT"),
-        ("pnpki", "3. GOVERNMENT PUBLIC KEY INFRASTRUCTURE (PNPKI)"),
-        ("hcmis", "4. HUMAN CAPITAL MANAGEMENT INFORMATION SYSTEM (HCMIS)"),
-        ("ifmis", "5. INTEGRATED FINANCIAL MANAGEMENT INFORMATION SYSTEM (IFMIS)"),
-        ("portal", "6. ONLINE PUBLIC SERVICE PORTAL"),
-        ("philgeps", "7. PROCUREMENT SYSTEM (PHILGEPS)"),
-        ("records", "8. RECORDS AND KNOWLEDGE MANAGEMENT INFORMATION SYSTEM"),
-        ("continuity", "9. PUBLIC SERVICE CONTINUITY PLAN (PSCP)")
-    ]
 
     total_census_employees = hc_total_it + hc_total_non_it
     egov_rows = []
@@ -2123,7 +2113,7 @@ def generate_complete_issp_html(
     </div>
     """
 
-    # --- 7. PART IV.A: DETAILED RESOURCE DEPLOYMENT (QUARANTINED STRICTLY) ---
+    # --- 7. PART IV.A: DETAILED RESOURCE DEPLOYMENT ---
     def render_part_iv_a_table(year_index: int, cal_year: int, target_sec_id: str):
         rows = ""
         year_total = Decimal("0.00")

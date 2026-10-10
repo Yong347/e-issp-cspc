@@ -6,7 +6,8 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — WORD (.DOCX) DOCUMENT GENERATOR
 Strictly adheres to official DICT ISSP v.2026 Guidelines and statutory order:
 - Single Central Institutional Emblem (No Secondary Side Logos)
 - First-Page Section Isolation (Strict 1-Page Cover Page, No Spillover)
-- Running Header & Dynamic Page Numbers on All Subsequent Pages (Page X of Y)
+- Running 3-Column Header Table with Dynamic Logo, Agency Title & Planning Horizon
+- Running Footer with Dynamic Page Numbering (Page X of Y)
 - Full Statutory Structure:
     * Cover Page (Page 1)
     * Table of Contents (2-Column Format with Statutorily Mapped Page Numbers)
@@ -24,7 +25,9 @@ import io
 import os
 import re
 import json
+import base64
 import logging
+import urllib.request
 from decimal import Decimal
 from typing import List, Dict, Any, Optional, Union
 
@@ -103,6 +106,124 @@ DEFAULT_CANONICAL_GLOSSARY = [
 
 
 # =========================================================================
+# UNIVERSAL IMAGE RETRIEVAL & BYTE STREAM RESOLUTION
+# =========================================================================
+
+def get_image_bytes(url: Optional[str]) -> Optional[bytes]:
+    """
+    Universally resolves an image URL or local file path into raw bytes.
+    Defensively checks:
+    1. Direct local disk path
+    2. Candidate uploads directories across environments (Docker, Azure, dev)
+    3. S3 storage client (via base64 URI)
+    4. Direct HTTP/HTTPS network streams
+    """
+    if not url or not isinstance(url, str):
+        return None
+    url_clean = url.strip()
+
+    if any(k in url_clean.lower() for k in DIAGRAM_BLACKLIST):
+        logger.warning(f"Sanity Guard: Blocked test artwork from Word generation: {url_clean}")
+        return None
+
+    # 1. Direct local path
+    if os.path.exists(url_clean) and os.path.isfile(url_clean):
+        try:
+            with open(url_clean, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+
+    # 2. Extract relative path and check multiple candidate directories
+    rel = None
+    if "/static/uploads/" in url_clean:
+        rel = url_clean.split("/static/uploads/")[-1].lstrip("/")
+    elif "uploads/" in url_clean:
+        rel = url_clean.split("uploads/")[-1].lstrip("/")
+    else:
+        rel = url_clean.lstrip("/")
+
+    candidate_dirs = [
+        getattr(settings, "LOCAL_UPLOAD_DIR", "uploads"),
+        os.path.join(getattr(settings, "BASE_DIR", "."), "uploads"),
+        os.path.join(getattr(settings, "BASE_DIR", "."), "uploads", "diagrams"),
+        "/home/site/wwwroot/uploads",
+        "/home/uploads",
+        "/code/uploads",
+        "./uploads",
+        "uploads"
+    ]
+
+    for cdir in candidate_dirs:
+        if cdir:
+            cand_path = os.path.join(cdir, rel)
+            if os.path.exists(cand_path) and os.path.isfile(cand_path):
+                if not any(k in cand_path.lower() for k in DIAGRAM_BLACKLIST):
+                    try:
+                        with open(cand_path, "rb") as f:
+                            return f.read()
+                    except Exception:
+                        pass
+
+    # 3. Use storage_client if initialized
+    try:
+        from app.storage.s3_client import storage_client
+        data_uri = storage_client.get_as_base64_uri(url_clean)
+        if data_uri and data_uri.startswith("data:") and "," in data_uri:
+            b64_str = data_uri.split(",", 1)[1]
+            return base64.b64decode(b64_str)
+    except Exception as e:
+        logger.debug(f"storage_client image extraction note: {e}")
+
+    # 4. Fetch via HTTP/HTTPS URL
+    if url_clean.startswith(("http://", "https://")):
+        try:
+            req = urllib.request.Request(
+                url_clean,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) docx-generator/5.0'}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.read()
+        except Exception as net_err:
+            logger.debug(f"HTTP image fetch note: {net_err}")
+
+    return None
+
+
+def get_agency_logo_bytes(narrative: Any) -> Optional[bytes]:
+    """
+    Resolves the official institutional agency logo bytes with fallback to disk.
+    """
+    raw_url = getattr(narrative, "agency_logo_url", None)
+    if raw_url:
+        data = get_image_bytes(raw_url)
+        if data:
+            return data
+
+    search_dirs = [
+        os.path.join(getattr(settings, "LOCAL_UPLOAD_DIR", "uploads"), "diagrams", "agency_logo"),
+        os.path.join(getattr(settings, "BASE_DIR", "."), "uploads", "diagrams", "agency_logo"),
+        "/home/site/wwwroot/uploads/diagrams/agency_logo",
+        "/home/uploads/diagrams/agency_logo",
+        "/code/uploads/diagrams/agency_logo",
+        "./uploads/diagrams/agency_logo",
+        "uploads/diagrams/agency_logo"
+    ]
+    for sdir in search_dirs:
+        if os.path.exists(sdir) and os.path.isdir(sdir):
+            for fname in os.listdir(sdir):
+                if fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    if not any(k in fname.lower() for k in DIAGRAM_BLACKLIST):
+                        fpath = os.path.join(sdir, fname)
+                        try:
+                            with open(fpath, "rb") as f:
+                                return f.read()
+                        except Exception:
+                            pass
+    return None
+
+
+# =========================================================================
 # XML FORMATTING HELPERS FOR WORD TABLES, CELLS & FIELDS
 # =========================================================================
 
@@ -152,6 +273,22 @@ def set_table_borders(table, color: str = "334155", sz: str = "4", val: str = "s
         f'  <w:insideV w:val="{val}" w:sz="{sz}" w:space="0" w:color="{color}"/>'
         f'  <w:left w:val="{val}" w:sz="{sz}" w:space="0" w:color="{color}"/>'
         f'  <w:right w:val="{val}" w:sz="{sz}" w:space="0" w:color="{color}"/>'
+        f'</w:tblBorders>'
+    )
+    tblPr.append(borders)
+
+
+def set_header_table_bottom_border(table, color: str = "CBD5E1", sz: str = "12", val: str = "single"):
+    """Applies solely a clean horizontal dividing border to the bottom of the running header table."""
+    tblPr = table._tbl.tblPr
+    borders = parse_xml(
+        f'<w:tblBorders {nsdecls("w")}>'
+        f'  <w:top w:val="none"/>'
+        f'  <w:bottom w:val="{val}" w:sz="{sz}" w:space="0" w:color="{color}"/>'
+        f'  <w:insideH w:val="none"/>'
+        f'  <w:insideV w:val="none"/>'
+        f'  <w:left w:val="none"/>'
+        f'  <w:right w:val="none"/>'
         f'</w:tblBorders>'
     )
     tblPr.append(borders)
@@ -210,55 +347,25 @@ def clean_uacs_title(uacs_str: str) -> str:
     return cleaned or val
 
 
-def resolve_diagram_path(url: Optional[str]) -> Optional[str]:
-    """
-    Resolves local file path on disk if available for direct insertion into Word .docx.
-    Defensively strips and blocks unverified test, anime, and wallpaper artworks.
-    """
-    if not url or not isinstance(url, str):
-        return None
-    url_clean = url.strip()
-
-    # Block unverified test images or wallpaper leaks
-    if any(k in url_clean.lower() for k in DIAGRAM_BLACKLIST):
-        logger.warning(f"Sanity Guard: Blocked test artwork from Word generation: {url_clean}")
-        return None
-
-    if os.path.exists(url_clean) and os.path.isfile(url_clean):
-        return url_clean
-    if "/static/uploads/" in url_clean:
-        try:
-            rel = url_clean.split("/static/uploads/")[-1]
-            candidate = os.path.join(getattr(settings, "LOCAL_UPLOAD_DIR", "uploads"), rel)
-            if os.path.exists(candidate) and os.path.isfile(candidate):
-                if any(k in candidate.lower() for k in DIAGRAM_BLACKLIST):
-                    return None
-                return candidate
-        except Exception:
-            pass
-    return None
-
-
 def render_schematic_box(doc, title: str, subtitle: str, section_label: str, img_url: Optional[str] = None):
     """
     Renders an official schematic exhibit in Word format.
     If an authentic image exists, inserts it cleanly.
     Otherwise, renders the official statutory DICT schematic container box.
     """
-    local_path = resolve_diagram_path(img_url)
-    if local_path:
+    img_data = get_image_bytes(img_url)
+    if img_data:
         try:
             p_img = doc.add_paragraph()
             p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p_img.paragraph_format.space_before = Pt(4)
             p_img.paragraph_format.space_after = Pt(6)
             r_img = p_img.add_run()
-            r_img.add_picture(local_path, width=Inches(9.2))
+            r_img.add_picture(io.BytesIO(img_data), width=Inches(9.2))
             return
         except Exception as e:
             logger.debug(f"Direct schematic image insertion note for {title}: {e}")
 
-    # Official DICT Statutory Schematic Box Container
     tbl = doc.add_table(rows=1, cols=1)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.autofit = False
@@ -690,8 +797,22 @@ def create_issp_docx(
 
     issp_period = clean_str(narrative.issp_period, "2026-2028")
     agency_name = clean_str(narrative.agency_name, "National Government Agency")
-    start_year = getattr(narrative, "issp_period_from", None) or 2026
-    end_year = getattr(narrative, "issp_period_to", None) or (start_year + 2)
+    
+    start_year = getattr(narrative, "issp_period_from", None)
+    end_year = getattr(narrative, "issp_period_to", None)
+    if start_year is None or end_year is None:
+        if "-" in issp_period:
+            try:
+                parts = issp_period.split("-")
+                start_year = int(parts[0].strip())
+                end_year = int(parts[1].strip())
+            except Exception:
+                start_year = 2026
+                end_year = 2028
+        else:
+            start_year = 2026
+            end_year = 2028
+            
     planning_years = list(range(start_year, end_year + 1))
 
     # Resolve Signatories cleanly (preserving actual human names)
@@ -740,14 +861,14 @@ def create_issp_docx(
     # -------------------------------------------------------------
     # BUILD COVER PAGE CONTENT (STRICT COMPACT 1-PAGE FIT)
     # -------------------------------------------------------------
-    agency_logo_path = resolve_diagram_path(getattr(narrative, "agency_logo_url", None))
-    if agency_logo_path:
+    agency_logo_data = get_agency_logo_bytes(narrative)
+    if agency_logo_data:
         try:
             p_logo = doc.add_paragraph()
             p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p_logo.paragraph_format.space_before = Pt(0)
             p_logo.paragraph_format.space_after = Pt(2)
-            p_logo.add_run().add_picture(agency_logo_path, width=Inches(1.2))
+            p_logo.add_run().add_picture(io.BytesIO(agency_logo_data), width=Inches(1.2))
         except Exception as e:
             logger.debug(f"Cover logo insertion note: {e}")
 
@@ -936,14 +1057,84 @@ def create_issp_docx(
     sec2.header.is_linked_to_previous = False
     sec2.footer.is_linked_to_previous = False
 
-    # Running Header
-    hp = sec2.header.paragraphs[0]
-    hp.text = ""
-    hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    hrun = hp.add_run(f"REPUBLIC OF THE PHILIPPINES | {clean_str(narrative.agency_name, 'AGENCY').upper()} — ISSP FY {narrative.issp_period}")
-    hrun.font.name = "Palatino Linotype"
-    hrun.font.size = Pt(7.5)
-    hrun.font.color.rgb = RGBColor(100, 116, 139)
+    # -------------------------------------------------------------
+    # 3-COLUMN VERTICALLY CENTERED RUNNING HEADER TABLE
+    # -------------------------------------------------------------
+    sec2_header = sec2.header
+    p_init_hdr = sec2_header.paragraphs[0]
+    p_init_hdr.text = ""
+
+    header_table = sec2_header.add_table(rows=1, cols=3, width=Inches(10.29))
+    header_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    header_table.autofit = False
+    set_header_table_bottom_border(header_table, color="CBD5E1", sz="12", val="single")
+
+    # Remove the empty paragraph before the table so header rests on the top margin
+    p_init_hdr._p.getparent().remove(p_init_hdr._p)
+
+    c_logo, c_inst, c_right = header_table.rows[0].cells[0], header_table.rows[0].cells[1], header_table.rows[0].cells[2]
+    c_logo.width = Inches(0.60)
+    c_inst.width = Inches(4.69)
+    c_right.width = Inches(5.00)
+
+    c_logo.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    c_inst.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    c_right.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    set_cell_margins(c_logo, top=20, bottom=40, left=0, right=20)
+    set_cell_margins(c_inst, top=20, bottom=40, left=20, right=40)
+    set_cell_margins(c_right, top=20, bottom=40, left=40, right=0)
+
+    # Column 0: Circular Institutional Logo
+    if agency_logo_data:
+        try:
+            p_logo_hdr = c_logo.paragraphs[0]
+            p_logo_hdr.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p_logo_hdr.paragraph_format.space_before = Pt(0)
+            p_logo_hdr.paragraph_format.space_after = Pt(0)
+            p_logo_hdr.paragraph_format.line_spacing = 1.0
+            r_lpic = p_logo_hdr.add_run()
+            r_lpic.add_picture(io.BytesIO(agency_logo_data), width=Inches(0.48))
+        except Exception as e:
+            logger.debug(f"Running header logo add note: {e}")
+
+    # Column 1: Institutional Name across two balanced lines
+    agency_clean_str = clean_str(
+        narrative.agency_name, 
+        getattr(settings, "DEFAULT_AGENCY_NAME", "CAMARINES SUR POLYTECHNIC COLLEGES")
+    ).upper()
+
+    if " POLYTECHNIC" in agency_clean_str:
+        agency_header_name = agency_clean_str.replace(" POLYTECHNIC", "\nPOLYTECHNIC")
+    elif " STATE " in agency_clean_str:
+        agency_header_name = agency_clean_str.replace(" STATE ", "\nSTATE ")
+    elif " UNIVERSITY" in agency_clean_str:
+        agency_header_name = agency_clean_str.replace(" UNIVERSITY", "\nUNIVERSITY")
+    else:
+        agency_header_name = agency_clean_str
+
+    p_inst = c_inst.paragraphs[0]
+    p_inst.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    p_inst.paragraph_format.space_before = Pt(0)
+    p_inst.paragraph_format.space_after = Pt(0)
+    p_inst.paragraph_format.line_spacing = 1.05
+    r_inst = p_inst.add_run(agency_header_name)
+    r_inst.font.name = "Palatino Linotype"
+    r_inst.font.size = Pt(8.0)
+    r_inst.font.bold = True
+    r_inst.font.color.rgb = RGBColor(15, 23, 42)
+
+    # Column 2: Active Planning Cycle Span
+    p_span = c_right.paragraphs[0]
+    p_span.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_span.paragraph_format.space_before = Pt(0)
+    p_span.paragraph_format.space_after = Pt(0)
+    p_span.paragraph_format.line_spacing = 1.05
+    r_span = p_span.add_run(f"INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}")
+    r_span.font.name = "Palatino Linotype"
+    r_span.font.size = Pt(9.0)
+    r_span.font.bold = True
+    r_span.font.color.rgb = RGBColor(15, 23, 42)
 
     # Running Footer: Left title + Right Page {PAGE} of {NUMPAGES}
     fp = sec2.footer.paragraphs[0]
