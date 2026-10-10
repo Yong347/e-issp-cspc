@@ -18,6 +18,7 @@ from app.database.models import (
     AuditTrail,
     ExistingInventory,
     DisasterRecoveryTeam,
+    BusinessImpactAnalysis,
     DRBCPMetric,
     NetworkInfrastructure,
     CybersecurityControl,
@@ -41,10 +42,10 @@ class ISSPLifecycleEngine:
           current_calendar_year > active_cycle.issp_period_to (or force=True).
           
         Lifecycle Actions Executed:
-          1. IMMUTABLE SNAPSHOT FREEZE:
-             - Synchronously compiles and certifies the final document snapshot for the concluded cycle.
+          1. IMMUTABLE SNAPSHOT FREEZE (Dual-Format: PDF & Word .docx):
+             - Synchronously compiles and certifies final document snapshots for the concluded cycle.
           2. OFFICIAL ARCHIVE TRANSITION:
-             - Automatically transitions the generated document binary to permanent long-term storage.
+             - Automatically transitions generated document binaries to permanent long-term storage.
           3. CYCLE RETIREMENT:
              - Formally transitions the concluded cycle to is_active = False, is_archived = True.
           4. SUCCESSOR HORIZON PROVISIONING (Dynamic N-Years):
@@ -61,7 +62,7 @@ class ISSPLifecycleEngine:
              - Clones operational InformationSystem records (Part II.C baseline).
              - Clones BudgetCeiling records with dynamically calculated annual allocations.
              - Clones EGovernmentChecklist, HumanCapital, and StakeholderAnalysis records.
-             - Clones Disaster Recovery Teams (DRT), DRBCP KPIs, Network Infrastructures,
+             - Clones Disaster Recovery Teams (DRT), BIA targets, DRBCP KPIs, Network Infrastructures,
                and Cybersecurity Controls into the successor cycle.
           7. INFLATION & SETTINGS SYNCHRONIZATION:
              - Synchronizes issp_active_cycle in system_settings.
@@ -90,7 +91,8 @@ class ISSPLifecycleEngine:
                 "expired_cycle": None,
                 "new_active_cycle": active_cycle.issp_period,
                 "message": f"Planning cycle '{active_cycle.issp_period}' is current and within active duration.",
-                "final_pdf_vault_url": getattr(active_cycle, "final_pdf_vault_url", None)
+                "final_pdf_vault_url": getattr(active_cycle, "final_pdf_vault_url", None),
+                "final_docx_vault_url": getattr(active_cycle, "final_docx_vault_url", None)
             }
 
         expired_period = active_cycle.issp_period
@@ -105,38 +107,55 @@ class ISSPLifecycleEngine:
         )
 
         # -------------------------------------------------------------
-        # 1. IMMUTABLE FINAL DOCUMENT COMPILATION SNAPSHOT
+        # 1. IMMUTABLE FINAL DOCUMENT COMPILATION SNAPSHOT (PDF & DOCX)
         # -------------------------------------------------------------
-        final_url = None
+        final_pdf_url = None
+        final_docx_url = None
         try:
             from app.tasks.pdf_tasks import compile_issp_document
             
-            # Execute compilation synchronously to certify the final snapshot
-            compile_task = compile_issp_document.apply(args=[{"issp_period_years": expired_period}])
-            compile_result = compile_task.result if compile_task.successful() else None
-            
-            if isinstance(compile_result, dict) and "file_url" in compile_result:
-                final_url = compile_result["file_url"]
-                active_cycle.final_pdf_vault_url = final_url
-                logger.info(f"Final compilation snapshot certified: {final_url}")
+            # 1.1 Compile and certify final PDF snapshot
+            try:
+                compile_task_pdf = compile_issp_document.apply(args=[{"issp_period_years": expired_period, "export_format": "pdf"}])
+                result_pdf = compile_task_pdf.result if compile_task_pdf.successful() else None
+                if isinstance(result_pdf, dict) and "file_url" in result_pdf:
+                    final_pdf_url = result_pdf["file_url"]
+                    active_cycle.final_pdf_vault_url = final_pdf_url
+                    logger.info(f"Final compilation PDF snapshot certified: {final_pdf_url}")
+            except Exception as pdf_err:
+                logger.warning(f"PDF snapshot compilation note during rollover: {pdf_err}")
+
+            # 1.2 Compile and certify final Word (.docx) snapshot
+            try:
+                compile_task_docx = compile_issp_document.apply(args=[{"issp_period_years": expired_period, "export_format": "docx"}])
+                result_docx = compile_task_docx.result if compile_task_docx.successful() else None
+                if isinstance(result_docx, dict) and "file_url" in result_docx:
+                    final_docx_url = result_docx["file_url"]
+                    active_cycle.final_docx_vault_url = final_docx_url
+                    logger.info(f"Final compilation DOCX snapshot certified: {final_docx_url}")
+            except Exception as docx_err:
+                logger.warning(f"DOCX snapshot compilation note during rollover: {docx_err}")
+
         except Exception as compile_err:
-            logger.error(f"Error compiling final snapshot for expired cycle '{expired_period}': {compile_err}")
+            logger.error(f"Error executing compilation snapshots for expired cycle '{expired_period}': {compile_err}")
 
         # -------------------------------------------------------------
-        # 2. TRANSITION COMPILED DOCUMENT TO PERMANENT OFFICIAL ARCHIVE
+        # 2. TRANSITION COMPILED DOCUMENTS TO PERMANENT OFFICIAL ARCHIVE
         # -------------------------------------------------------------
         if getattr(storage_client, "storage_type", "local") == "s3" and getattr(storage_client, "client", None):
-            doc_storage_key = storage_client.get_generated_pdf_key(f"ISSP-{expired_period}-FINAL")
-            try:
-                storage_client.client.copy_object(
-                    Bucket=storage_client.bucket_name,
-                    Key=doc_storage_key,
-                    CopySource={'Bucket': storage_client.bucket_name, 'Key': doc_storage_key},
-                    StorageClass='GLACIER'
-                )
-                logger.info(f"Official document '{doc_storage_key}' preserved in permanent long-term storage.")
-            except Exception as archive_err:
-                logger.warning(f"Unable to transition storage tier: {archive_err}")
+            for ext, doc_url in [("pdf", final_pdf_url), ("docx", final_docx_url)]:
+                if doc_url:
+                    doc_storage_key = storage_client.get_generated_document_key(f"ISSP-{expired_period}-FINAL", ext=ext)
+                    try:
+                        storage_client.client.copy_object(
+                            Bucket=storage_client.bucket_name,
+                            Key=doc_storage_key,
+                            CopySource={'Bucket': storage_client.bucket_name, 'Key': doc_storage_key},
+                            StorageClass='GLACIER'
+                        )
+                        logger.info(f"Official document '{doc_storage_key}' ({ext}) preserved in permanent long-term storage.")
+                    except Exception as archive_err:
+                        logger.warning(f"Unable to transition storage tier for {ext}: {archive_err}")
 
         # -------------------------------------------------------------
         # 3. RETIRE & ARCHIVE CONCLUDED CYCLE
@@ -185,7 +204,7 @@ class ISSPLifecycleEngine:
                 mission_text=active_cycle.mission_text or "",
                 present_situation_text=f"Strategic plan baseline for FY {new_period}. Focuses on continued digital transformation, PeGIF interoperability, and automated frontline public services.",
                 signatory_prepared_by=active_cycle.signatory_prepared_by or "Chief Information Officer",
-                preparer_position=active_cycle.preparer_position,
+                preparer_position=active_cycle.preparer_position or "Chief Information Officer",
                 cio_organizational_unit=active_cycle.cio_organizational_unit,
                 preparer_tel=active_cycle.preparer_tel,
                 preparer_fax=active_cycle.preparer_fax,
@@ -210,6 +229,7 @@ class ISSPLifecycleEngine:
                 system_architecture_url=active_cycle.system_architecture_url,
                 process_flow_diagram_url=active_cycle.process_flow_diagram_url,
                 network_diagram_url=active_cycle.network_diagram_url,
+                subsystem_network_layouts_json=list(getattr(active_cycle, "subsystem_network_layouts_json", []) or []),
                 planners_json=list(active_cycle.planners_json or []),
                 manpower_json=dict(active_cycle.manpower_json or {}),
                 enterprise_architecture_narrative=getattr(active_cycle, "enterprise_architecture_narrative", None),
@@ -217,7 +237,9 @@ class ISSPLifecycleEngine:
                 drbcp_recovery_strategy_text=getattr(active_cycle, "drbcp_recovery_strategy_text", None),
                 drbcp_sop_phases_text=getattr(active_cycle, "drbcp_sop_phases_text", None),
                 drbcp_compliance_narrative_text=getattr(active_cycle, "drbcp_compliance_narrative_text", None),
-                is_archived=False
+                is_archived=False,
+                final_pdf_vault_url=None,
+                final_docx_vault_url=None
             )
             db.add(new_cycle)
             db.flush()
@@ -317,6 +339,9 @@ class ISSPLifecycleEngine:
                 )
                 db.add(cloned_sys)
 
+        # Flush to register newly cloned systems so BIA references resolve safely
+        db.flush()
+
         # -------------------------------------------------------------
         # 7. CLONE DEPARTMENTAL BUDGET CEILINGS WITH ANNUAL ALLOCATIONS
         # -------------------------------------------------------------
@@ -399,7 +424,7 @@ class ISSPLifecycleEngine:
                 db.add(cloned_inv)
 
         # -------------------------------------------------------------
-        # 9. CLONE DISASTER RECOVERY TEAMS & KPIS (ANNEX 2 BASELINE)
+        # 9. CLONE DISASTER RECOVERY TEAMS, BIA & KPIS (ANNEX 2 BASELINE)
         # -------------------------------------------------------------
         existing_new_teams = db.query(DisasterRecoveryTeam).filter(
             DisasterRecoveryTeam.issp_period == new_period
@@ -417,6 +442,33 @@ class ISSPLifecycleEngine:
                     responsibility=ot.responsibility,
                     contact_person=ot.contact_person,
                     contact_details=ot.contact_details
+                ))
+
+        existing_new_bias = db.query(BusinessImpactAnalysis).filter(
+            BusinessImpactAnalysis.issp_period == new_period
+        ).count()
+
+        if existing_new_bias == 0:
+            # Map newly cloned systems by name to associate valid system IDs
+            new_sys_lookup = {
+                s.name.lower().strip(): s.id 
+                for s in db.query(InformationSystem).filter(InformationSystem.issp_period == new_period).all()
+            }
+
+            old_bias = db.query(BusinessImpactAnalysis).filter(
+                BusinessImpactAnalysis.issp_period == expired_period
+            ).all()
+
+            for ob in old_bias:
+                resolved_sys_id = new_sys_lookup.get((ob.system_name or "").lower().strip())
+                db.add(BusinessImpactAnalysis(
+                    issp_period=new_period,
+                    system_id=resolved_sys_id,
+                    system_name=ob.system_name,
+                    classification=ob.classification,
+                    mtpd_hours=ob.mtpd_hours,
+                    rto_hours=ob.rto_hours,
+                    rpo_hours=ob.rpo_hours
                 ))
 
         existing_new_kpis = db.query(DRBCPMetric).filter(
@@ -603,7 +655,8 @@ class ISSPLifecycleEngine:
             ip_address="INTERNAL_LIFECYCLE_CRON",
             old_value={
                 "expired_cycle": expired_period,
-                "final_pdf_url": final_url,
+                "final_pdf_url": final_pdf_url,
+                "final_docx_url": final_docx_url,
                 "start_year": start_year,
                 "end_year": end_year,
                 "status": "Archived"
@@ -635,5 +688,6 @@ class ISSPLifecycleEngine:
             "expired_cycle": expired_period,
             "new_active_cycle": new_period,
             "message": f"Planning cycle '{expired_period}' successfully archived to the Official Document Vault. Successor cycle '{new_period}' is now active.",
-            "final_pdf_vault_url": final_url
+            "final_pdf_vault_url": final_pdf_url,
+            "final_docx_vault_url": final_docx_url
         }

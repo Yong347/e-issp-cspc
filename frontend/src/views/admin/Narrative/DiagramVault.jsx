@@ -2,10 +2,14 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
+import { 
+  getNarrative, 
+  updateNarrative, 
+  uploadDiagram 
+} from "../../../api/admin";
 import CompilerSyncButton from "../../../components/common/CompilerSyncButton";
 import { 
   ImageIcon, 
-  Upload, 
   CheckCircle, 
   AlertCircle, 
   RefreshCw, 
@@ -46,49 +50,6 @@ const isTestArtwork = (urlOrName) => {
   return TEST_ARTWORK_BLACKLIST.some(keyword => lower.includes(keyword));
 };
 
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-};
-
-/**
- * Normalizes error messages from FastAPI / Pydantic validation envelopes
- * without rendering unhelpful "[object Object]" text.
- */
-const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
-  if (!errData) return fallbackMsg;
-  if (typeof errData.detail === "string") return errData.detail;
-  if (Array.isArray(errData.detail)) {
-    return errData.detail
-      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
-      .join(" | ");
-  }
-  if (typeof errData.detail === "object" && errData.detail !== null) {
-    if (Array.isArray(errData.detail.violations)) {
-      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
-    }
-    return JSON.stringify(errData.detail);
-  }
-  if (Array.isArray(errData.violations)) {
-    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
-  }
-  if (errData.message) return errData.message;
-  return fallbackMsg;
-};
-
 export default function DiagramVault() {
   const { user } = useAuth();
   const { activeCycle, fetchActiveCycle } = useCycle();
@@ -118,8 +79,12 @@ export default function DiagramVault() {
     system_architecture: null
   });
 
-  const apiUrl = getApiUrl();
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") || "" 
+      : "");
 
   // Auto-dismiss transient alerts
   useEffect(() => {
@@ -188,40 +153,29 @@ export default function DiagramVault() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        
-        // Extract database-persisted custom diagram titles from scope_json
-        const sJson = data.scope_json || {};
-        setScopeJson(sJson);
-        if (sJson.custom_diagram_titles && typeof sJson.custom_diagram_titles === "object") {
-          setCustomTitles(sJson.custom_diagram_titles);
-        } else {
-          setCustomTitles({});
-        }
-
-        setDiagrams({
-          agency_logo: data.agency_logo_url || null,
-          network_diagram: data.network_diagram_url || null,
-          fiber_backbone: data.fiber_backbone_url || null,
-          system_architecture: data.system_architecture_url || null
-        });
+      const data = await getNarrative(token, activeCycle);
+      
+      // Extract database-persisted custom diagram titles from scope_json
+      const sJson = data.scope_json || {};
+      setScopeJson(sJson);
+      if (sJson.custom_diagram_titles && typeof sJson.custom_diagram_titles === "object") {
+        setCustomTitles(sJson.custom_diagram_titles);
       } else {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to retrieve registered diagram filepaths."));
+        setCustomTitles({});
       }
+
+      setDiagrams({
+        agency_logo: data.agency_logo_url || null,
+        network_diagram: data.network_diagram_url || null,
+        fiber_backbone: data.fiber_backbone_url || null,
+        system_architecture: data.system_architecture_url || null
+      });
     } catch (e) {
-      setError(e.message);
+      setError(e.message || "Failed to retrieve registered diagram filepaths.");
     } finally {
       setLoading(false);
     }
-  }, [apiUrl, activeCycle, token]);
+  }, [activeCycle, token]);
 
   useEffect(() => {
     fetchVaultData();
@@ -245,20 +199,7 @@ export default function DiagramVault() {
     };
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ scope_json: updatedScopeJson })
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to update schematic title in database."));
-      }
-
+      await updateNarrative(token, activeCycle, { scope_json: updatedScopeJson });
       setCustomTitles(updatedCustomTitles);
       setScopeJson(updatedScopeJson);
       setEditingTitleKey(null);
@@ -285,20 +226,7 @@ export default function DiagramVault() {
     };
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ scope_json: updatedScopeJson })
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to reset schematic title."));
-      }
-
+      await updateNarrative(token, activeCycle, { scope_json: updatedScopeJson });
       setCustomTitles(updatedCustomTitles);
       setScopeJson(updatedScopeJson);
       setEditingTitleKey(null);
@@ -337,25 +265,8 @@ export default function DiagramVault() {
     setSuccess(null);
     setUploading(prev => ({ ...prev, [category]: true }));
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      const res = await fetch(
-        `${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/upload-diagram?category=${encodeURIComponent(category)}`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData
-        }
-      );
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to upload diagram asset."));
-      }
-
-      const resData = await res.json();
+      const resData = await uploadDiagram(token, activeCycle, category, file);
       const catObj = allCategories.find(c => c.key === category);
       const displayTitle = customTitles[category] || catObj?.defaultTitle || category;
       setSuccess(`Graphic asset registered for '${displayTitle}'.`);
@@ -390,20 +301,7 @@ export default function DiagramVault() {
     const colName = colMapping[category] || `${category}_url`;
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ [colName]: "" })
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to clear diagram asset."));
-      }
-
+      await updateNarrative(token, activeCycle, { [colName]: "" });
       setSuccess(`Graphic asset for '${displayTitle}' removed.`);
       setDiagrams(prev => ({ ...prev, [category]: null }));
 
@@ -435,20 +333,7 @@ export default function DiagramVault() {
         }
       });
 
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(updates)
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to purge unverified test artworks."));
-      }
-
+      await updateNarrative(token, activeCycle, updates);
       setSuccess("All unverified test artworks purged from database.");
       await fetchVaultData();
       if (fetchActiveCycle) fetchActiveCycle();
@@ -710,7 +595,7 @@ export default function DiagramVault() {
                 isBlocked
                   ? "border-rose-300 dark:border-rose-900/60 bg-rose-50/20"
                   : isDraggingOver 
-                  ? "border-blue-500 ring-2 ring-blue-500/20 bg-blue-50/20 dark:bg-blue-950/20" 
+                  ? "border-blue-500 ring-2 ring-blue-500/20 bg-blue-50/20 dark:bg-blue-955/20" 
                   : "border-slate-200/90 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700"
               }`}
             >
@@ -977,7 +862,7 @@ export default function DiagramVault() {
                   className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-white rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                   title="Close (Esc)"
                 >
-                  <X className="w-5 h-5" />
+                  <X className="w-4 h-4" />
                 </button>
               </div>
             </div>

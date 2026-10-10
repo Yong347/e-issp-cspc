@@ -4,6 +4,19 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
+  getDepartments,
+  getProposalsQueue,
+  getDashboardMetrics,
+  getAuditLogs,
+  getNarrative,
+  verifyCompilerSync,
+  approveProposal,
+  returnProposal,
+  triggerDocumentGeneration,
+  getTaskStatus
+} from "../../../api/admin";
+import { postComment } from "../../../api/dept";
+import { 
   Inbox, 
   CheckCheck, 
   Landmark, 
@@ -26,56 +39,12 @@ import {
 } from "lucide-react";
 import Modal from "../../../components/common/Modal";
 
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-};
-
-/**
- * Normalizes error messages from FastAPI / Pydantic validation envelopes
- * without rendering unhelpful "[object Object]" text.
- */
-const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
-  if (!errData) return fallbackMsg;
-  if (typeof errData.detail === "string") return errData.detail;
-  if (Array.isArray(errData.detail)) {
-    return errData.detail
-      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
-      .join(" | ");
-  }
-  if (typeof errData.detail === "object" && errData.detail !== null) {
-    if (Array.isArray(errData.detail.violations)) {
-      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
-    }
-    return JSON.stringify(errData.detail);
-  }
-  if (Array.isArray(errData.violations)) {
-    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
-  }
-  if (errData.message) return errData.message;
-  return fallbackMsg;
-};
-
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { activeCycle } = useCycle();
   
   const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
-  const apiUrl = getApiUrl();
   const isMountedRef = useRef(true);
 
   useEffect(() => {
@@ -145,61 +114,44 @@ export default function AdminDashboard() {
     if (!token) return;
     setLoading(true);
     try {
-      const headers = { 
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      };
+      // Parallelized execution through centralized API client helpers
+      const [deptData, queuePayload, metricsData, auditData, narrData] = await Promise.all([
+        getDepartments(token).catch(() => []),
+        getProposalsQueue(token, { issp_period: activeCycle, limit: 1000 }).catch(() => []),
+        getDashboardMetrics(token).catch(() => null),
+        getAuditLogs(token, { limit: 15 }).catch(() => []),
+        getNarrative(token, activeCycle).catch(() => null)
+      ]);
 
-      // 1. Fetch Department Roster
-      const deptRes = await fetch(`${apiUrl}/api/admin/departments`, { headers }).catch(() => null);
-      if (deptRes && deptRes.ok) {
-        const deptData = await deptRes.json();
-        if (isMountedRef.current) {
-          setDepartments(Array.isArray(deptData) ? deptData : []);
-        }
-      }
+      if (!isMountedRef.current) return;
 
-      // 2. Fetch Proposals Queue for active cycle
-      const response = await fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle)}`, { headers });
-      if (!response.ok) {
-        const errPayload = await response.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errPayload, "Failed to fetch database queue."));
-      }
-      
-      const payload = await response.json();
-      const itemsList = Array.isArray(payload) ? payload : (payload.data || []);
-      if (isMountedRef.current) {
-        setProposals(itemsList);
-      }
+      // 1. Hydrate Department Roster
+      setDepartments(Array.isArray(deptData) ? deptData : []);
 
-      // 3. Fetch Master Dashboard Metrics
-      const metricsResponse = await fetch(`${apiUrl}/api/admin/dashboard-metrics`, { headers });
-      if (metricsResponse.ok && isMountedRef.current) {
-        const metricsData = await metricsResponse.json();
+      // 2. Hydrate Proposals Queue
+      const itemsList = Array.isArray(queuePayload) ? queuePayload : (queuePayload?.data || []);
+      setProposals(itemsList);
+
+      // 3. Hydrate Dashboard Metrics
+      if (metricsData) {
         setBudgetMetrics({
           global_ceiling: metricsData.global_ceiling || 200000000.00,
           total_spent: metricsData.total_spent || 0.00
         });
         setPendingCount(metricsData.pending_count ?? itemsList.filter(p => p.status === "Submitted").length);
         setApprovedCount(metricsData.approved_count ?? itemsList.filter(p => p.status === "Approved").length);
-      } else if (isMountedRef.current) {
+      } else {
         setPendingCount(itemsList.filter(p => p.status === "Submitted").length);
         setApprovedCount(itemsList.filter(p => p.status === "Approved").length);
       }
 
-      // 4. Fetch Live COA Audit Logs
-      const auditRes = await fetch(`${apiUrl}/api/admin/audit-logs?limit=15`, { headers }).catch(() => null);
-      if (auditRes && auditRes.ok && isMountedRef.current) {
-        const auditData = await auditRes.json();
-        if (Array.isArray(auditData)) {
-          setAuditLogs(auditData);
-        }
+      // 4. Hydrate Audit Logs
+      if (Array.isArray(auditData)) {
+        setAuditLogs(auditData);
       }
 
-      // 5. Fetch Active Master Narrative to hydrate pre-compiled vault URLs independently
-      const narrRes = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, { headers }).catch(() => null);
-      if (narrRes && narrRes.ok && isMountedRef.current) {
-        const narrData = await narrRes.json();
+      // 5. Hydrate Pre-compiled Document Vault URLs
+      if (narrData) {
         if (narrData.final_pdf_vault_url) {
           setPdfDownloadUrl(narrData.final_pdf_vault_url);
         }
@@ -216,7 +168,7 @@ export default function AdminDashboard() {
         setLoading(false);
       }
     }
-  }, [apiUrl, token, activeCycle, addSystemLog]);
+  }, [token, activeCycle, addSystemLog]);
 
   useEffect(() => {
     if (token) {
@@ -231,20 +183,7 @@ export default function AdminDashboard() {
     addSystemLog(`VERIFY: Auditing Singularity Graph and 4-way parity for cycle FY ${activeCycle}...`, "text-blue-400");
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/governance/verify-compiler-sync?module=parity&issp_period=${encodeURIComponent(activeCycle)}`, {
-        method: "POST",
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(err, "Compiler sync verification failed."));
-      }
-
-      const data = await res.json();
+      const data = await verifyCompilerSync(token, "parity", activeCycle);
       if (isMountedRef.current) {
         setCompilerAudit(data);
       }
@@ -270,17 +209,7 @@ export default function AdminDashboard() {
   // 1-Click Proposal Approval Action
   const handleApprove = async (id, itemName) => {
     try {
-      const res = await fetch(`${apiUrl}/api/admin/proposals/${id}/approve`, {
-        method: "PUT",
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Approval transaction failed."));
-      }
+      await approveProposal(token, id);
       
       if (isMountedRef.current) {
         setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Approved" } : p));
@@ -307,30 +236,13 @@ export default function AdminDashboard() {
     const { id, item_name: itemName } = returnModalItem;
 
     try {
-      const returnRes = await fetch(`${apiUrl}/api/admin/proposals/${id}/return`, {
-        method: "PUT",
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (!returnRes.ok) {
-        const errData = await returnRes.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Return state transition failed."));
-      }
+      await returnProposal(token, id);
 
-      await fetch(`${apiUrl}/api/dept/proposals/${id}/comments`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          text: returnRemark.trim(),
-          proposal_id: id,
-          requires_department_action: true
-        })
-      });
+      await postComment(id, {
+        text: returnRemark.trim(),
+        proposal_id: id,
+        requires_department_action: true
+      }, token);
 
       if (isMountedRef.current) {
         setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Returned" } : p));
@@ -362,20 +274,9 @@ export default function AdminDashboard() {
     addSystemLog(`INIT: Dispatching document trigger payload (${formatLabel}) to background compilation workers...`, "text-blue-400");
 
     try {
-      const response = await fetch(`${apiUrl}/api/admin/governance/generate-issp?issp_period=${encodeURIComponent(activeCycle)}&export_format=${encodeURIComponent(exportFormat)}`, {
-        method: "POST",
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Compilation queue registration failed."));
-      }
-      const data = await response.json();
+      const data = await triggerDocumentGeneration(token, activeCycle, exportFormat);
       
-      if (data.task_id) {
+      if (data?.task_id) {
         addSystemLog(`SUCCESS: Worker task registered (Task ID: ${data.task_id}, Format: ${exportFormat.toUpperCase()})`, "text-emerald-400");
         pollTaskStatus(data.task_id, exportFormat);
       }
@@ -392,13 +293,7 @@ export default function AdminDashboard() {
     if (!isMountedRef.current) return;
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/governance/task-status/${encodeURIComponent(taskId)}`, {
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      const data = await res.json();
+      const data = await getTaskStatus(token, taskId);
 
       if (!isMountedRef.current) return;
 
@@ -627,7 +522,7 @@ export default function AdminDashboard() {
               disabled={loading}
               className="p-1.5 px-3 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 font-bold shadow-xs cursor-pointer"
             >
-              <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
               <span>Refresh</span>
             </button>
           </div>
@@ -655,7 +550,7 @@ export default function AdminDashboard() {
               className="text-[11px] underline font-bold hover:opacity-80 flex items-center gap-1 shrink-0 cursor-pointer"
             >
               <span>View Parity Matrices</span>
-              <ChevronRight className="w-3 h-3" />
+              <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
         )}

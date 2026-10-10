@@ -75,9 +75,13 @@ export default function PerformanceMetricsManager() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") 
+      : "") || 
+    "";
 
   // Dynamic Planning Horizon Sequence (Extracts cycle range dynamically; zero hardcoding)
   const activeYears = useMemo(() => {
@@ -129,7 +133,7 @@ export default function PerformanceMetricsManager() {
     return "F.3"; // Standalone / Institutional ICT Governance KPI
   }, [projects]);
 
-  // Load Metrics and Projects
+  // Load Metrics and Projects via Centralized API Client
   const loadAllData = useCallback(async () => {
     if (!token || !activeCycle) return;
     setLoading(true);
@@ -140,26 +144,15 @@ export default function PerformanceMetricsManager() {
       setMetrics(Array.isArray(data) ? data : []);
 
       // 2. Fetch Strategic ICT Projects to populate Project Provenance dropdown
-      let projList = [];
-      try {
-        const projData = await getIctProjects(token, activeCycle);
-        projList = Array.isArray(projData) ? projData : (projData?.data || []);
-      } catch {
-        const projRes = await fetch(`${apiUrl}/api/admin/ict-projects?issp_period=${encodeURIComponent(activeCycle)}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (projRes.ok) {
-          const raw = await projRes.json();
-          projList = Array.isArray(raw) ? raw : (raw?.data || []);
-        }
-      }
+      const projData = await getIctProjects(token, activeCycle).catch(() => []);
+      const projList = Array.isArray(projData) ? projData : (projData?.data || []);
       setProjects(projList);
     } catch (err) {
       setError(err.message || "Failed to load Performance Measurement Framework metrics.");
     } finally {
       setLoading(false);
     }
-  }, [token, activeCycle, apiUrl]);
+  }, [token, activeCycle]);
 
   useEffect(() => {
     if (token && activeCycle) {
@@ -950,7 +943,7 @@ export default function PerformanceMetricsManager() {
                   <button
                     type="button"
                     onClick={() => setSearchQuery("")}
-                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                    className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -1211,7 +1204,7 @@ function MetricCard({ metric, projects = [], activeYears, onEdit, onDelete }) {
           <button
             type="button"
             onClick={() => onDelete(metric.id, metric.project_title)}
-            className="p-1 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 rounded text-slate-400 cursor-pointer transition-colors"
+            className="p-1 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-955/40 dark:hover:text-rose-400 rounded text-slate-400 cursor-pointer transition-colors"
             title="Delete Indicator"
           >
             <Trash2 className="w-3.5 h-3.5" />

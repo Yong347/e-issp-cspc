@@ -36,54 +36,28 @@ export default function ComplianceAnalytics() {
   const [filterStatus, setFilterStatus] = useState("all"); // 'all' | 'flagged' | 'compliant'
   const [sortBy, setSortBy] = useState("ratio-desc"); // 'ratio-desc' | 'canvas-desc' | 'proposals-desc' | 'name-asc'
 
-  // Dynamic self-resolving API URL for production Azure & local development
-  const getApiUrl = () => {
-    if (typeof window !== "undefined" && window.location?.origin) {
-      const { hostname, origin, port } = window.location;
-      if (
-        port !== "5173" &&
-        port !== "3000" &&
-        hostname !== "localhost" &&
-        hostname !== "127.0.0.1"
-      ) {
-        return origin;
-      }
-    }
-    const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-    return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  };
-  const apiUrl = getApiUrl();
-
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") 
+      : "") || 
+    "";
 
   const fetchAnalytics = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
     try {
-      let data;
-      try {
-        data = await getDepartmentAnalytics(token);
-      } catch (clientErr) {
-        // Fallback direct fetch if client-side API helper encounters an environment issue
-        const res = await fetch(`${apiUrl}/api/admin/department-analytics`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.detail || clientErr.message || "Failed to fetch analytics data.");
-        }
-        data = await res.json();
-      }
-
+      const data = await getDepartmentAnalytics(token);
       setAnalytics(Array.isArray(data) ? data : []);
-      setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      setLastSyncTime(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     } catch (err) {
       setError(err.message || "Network error fetching compliance metrics.");
     } finally {
       setLoading(false);
     }
-  }, [token, apiUrl]);
+  }, [token]);
 
   useEffect(() => {
     if (token) {
@@ -174,7 +148,7 @@ export default function ComplianceAnalytics() {
 
       {/* Dismissible Error Alert */}
       {error && (
-        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 rounded-xl flex items-start justify-between gap-2.5 shadow-xs animate-fadeIn">
+        <div className="p-4 bg-rose-50 dark:bg-rose-955/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 rounded-xl flex items-start justify-between gap-2.5 shadow-xs animate-fadeIn">
           <div className="flex items-start gap-2">
             <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-rose-600 dark:text-rose-400" />
             <div className="space-y-0.5">

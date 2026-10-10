@@ -1,6 +1,7 @@
 // frontend/src/context/NotificationContext.jsx
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from './AuthContext';
+import { API_BASE_URL } from '../api/apiClient';
 
 const NotificationContext = createContext(null);
 
@@ -28,25 +29,6 @@ export function NotificationProvider({ children }) {
   // Transient Toast State
   const [toasts, setToasts] = useState([]);
   const [loading, setLoading] = useState(false);
-
-  // Dynamically resolves API root: uses window.location.origin in production
-  // to prevent Vite from hardcoding localhost:8000, while preserving local development.
-  const getApiUrl = () => {
-    if (typeof window !== "undefined" && window.location?.origin) {
-      const { hostname, origin, port } = window.location;
-      if (
-        port !== "5173" &&
-        port !== "3000" &&
-        hostname !== "localhost" &&
-        hostname !== "127.0.0.1"
-      ) {
-        return origin;
-      }
-    }
-    const raw = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-    return raw.endsWith("/") ? raw.slice(0, -1) : raw;
-  };
-  const apiUrl = getApiUrl();
 
   // Resolve Active Authentication Token & Role strictly from active authenticated session
   const authToken = user?.token || token || null;
@@ -166,7 +148,7 @@ export function NotificationProvider({ children }) {
 
         // 1. Department Action Items Summary
         try {
-          const summaryRes = await fetch(`${apiUrl}/api/dept/action-items/summary`, { credentials: 'include', headers });
+          const summaryRes = await fetch(`${API_BASE_URL}/api/dept/action-items/summary`, { credentials: 'include', headers });
           if (summaryRes.ok) {
             const sData = await summaryRes.json();
             setActionCount(Number(sData.unread_actions || sData.pending_actions || 0));
@@ -178,7 +160,7 @@ export function NotificationProvider({ children }) {
 
         // 2. Department Activity & Remarks Feed
         try {
-          const notifRes = await fetch(`${apiUrl}/api/dept/notifications?days=14`, { credentials: 'include', headers });
+          const notifRes = await fetch(`${API_BASE_URL}/api/dept/notifications?days=14`, { credentials: 'include', headers });
           if (notifRes.ok) {
             const nData = await notifRes.json();
             const items = Array.isArray(nData) ? nData : [];
@@ -192,7 +174,7 @@ export function NotificationProvider({ children }) {
       } else if (userRole === 'ROLE_MIS_ADMIN') {
         // 1. Real-time COA Audit Trail Events
         try {
-          const auditRes = await fetch(`${apiUrl}/api/admin/audit-logs?limit=15`, { credentials: 'include', headers });
+          const auditRes = await fetch(`${API_BASE_URL}/api/admin/audit-logs?limit=15`, { credentials: 'include', headers });
           if (auditRes.ok) {
             const aData = await auditRes.json();
             const logs = Array.isArray(aData) ? aData : [];
@@ -252,7 +234,7 @@ export function NotificationProvider({ children }) {
         // 2. Pending Proposals Count (Part IV.A Queue)
         let pendingProps = 0;
         try {
-          const propRes = await fetch(`${apiUrl}/api/admin/proposals?status_filter=Submitted&limit=1`, { credentials: 'include', headers });
+          const propRes = await fetch(`${API_BASE_URL}/api/admin/proposals?status_filter=Submitted&limit=1`, { credentials: 'include', headers });
           if (propRes.ok) {
             const pData = await propRes.json();
             pendingProps = pData.total !== undefined ? Number(pData.total) : (Array.isArray(pData?.data) ? pData.data.length : (Array.isArray(pData) ? pData.length : 0));
@@ -265,7 +247,7 @@ export function NotificationProvider({ children }) {
         // 3. Pending Information Systems Intake (Part II.C / III.D)
         let pendingSys = 0;
         try {
-          const sysRes = await fetch(`${apiUrl}/api/admin/information-systems?submission_status=Submitted`, { credentials: 'include', headers });
+          const sysRes = await fetch(`${API_BASE_URL}/api/admin/information-systems?submission_status=Submitted`, { credentials: 'include', headers });
           if (sysRes.ok) {
             const sData = await sysRes.json();
             pendingSys = Array.isArray(sData) ? sData.length : 0;
@@ -281,7 +263,7 @@ export function NotificationProvider({ children }) {
       } else if (userRole === 'ROLE_SUPPLY_USER') {
         // Supply User Flow: Monitor approved items requiring canvas verification
         try {
-          const canvasRes = await fetch(`${apiUrl}/api/admin/proposals/approved-canvas`, { credentials: 'include', headers });
+          const canvasRes = await fetch(`${API_BASE_URL}/api/admin/proposals/approved-canvas`, { credentials: 'include', headers });
           if (canvasRes.ok) {
             const cData = await canvasRes.json();
             const items = Array.isArray(cData) ? cData : [];
@@ -298,7 +280,7 @@ export function NotificationProvider({ children }) {
     } finally {
       setLoading(false);
     }
-  }, [apiUrl, authToken, userRole, user, departmentId, readNotificationIds]);
+  }, [authToken, userRole, user, departmentId, readNotificationIds]);
 
   // Periodic Polling (Every 30 Seconds)
   useEffect(() => {

@@ -14,14 +14,26 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-issp_core}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # 2. Redis Message Broker
+  # 2. Redis Message Broker & Result Backend
   redis:
     image: redis:7-alpine
     container_name: issp_redis
     restart: always
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   # 3. FastAPI Backend Server
   web:
@@ -38,11 +50,15 @@ services:
       - .env
     environment:
       - ENV=production
+      - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-issp_core}
       - REDIS_URL=redis://redis:6379/0
+      - LOCAL_UPLOAD_DIR=/code/uploads
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # 4. Celery Background Worker (Dual-Pass PDF & Word Compilation)
   worker:
@@ -57,11 +73,15 @@ services:
       - .env
     environment:
       - ENV=production
+      - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-issp_core}
       - REDIS_URL=redis://redis:6379/0
+      - LOCAL_UPLOAD_DIR=/code/uploads
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # 5. Celery Beat Scheduler (Automated Annual Rollover & Expiration Checks)
   beat:
@@ -73,10 +93,15 @@ services:
       - .env
     environment:
       - ENV=production
+      - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-issp_core}
       - REDIS_URL=redis://redis:6379/0
+      - LOCAL_UPLOAD_DIR=/code/uploads
     depends_on:
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # 6. Production Nginx & React Frontend
   frontend:

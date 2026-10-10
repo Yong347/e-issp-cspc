@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 class ISSPStorageClient:
     def __init__(self):
-        self.storage_type = settings.STORAGE_TYPE.lower()
-        self.bucket_name = settings.AWS_STORAGE_BUCKET_NAME
+        self.storage_type = getattr(settings, "STORAGE_TYPE", "local").lower().strip()
+        self.bucket_name = getattr(settings, "AWS_STORAGE_BUCKET_NAME", "issp-vault")
         
         if self.storage_type == "s3":
             try:
@@ -40,6 +40,8 @@ class ISSPStorageClient:
         else:
             self.client = None
             os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
+            for sub in ["canvases", "diagrams", "generated_issps", "unserviceable_reports"]:
+                os.makedirs(os.path.join(settings.LOCAL_UPLOAD_DIR, sub), exist_ok=True)
 
     def verify_bucket_connection(self) -> bool:
         """
@@ -104,15 +106,15 @@ class ISSPStorageClient:
 
     def extract_key_from_url(self, url: str) -> Optional[str]:
         """
-        Extracts S3 or local keys from URLs.
-        Handles custom CNAMEs, pre-signed signatures, and local static prefixes.
+        Extracts S3 or local storage keys from URLs or file paths.
+        Handles relative paths, custom CNAMEs, pre-signed signatures, and local static prefixes.
         """
         if not url:
             return None
             
-        clean_url = url.split("?")[0]
+        clean_url = str(url).split("?")[0].replace("\\", "/").strip()
         
-        # Extract from local emulator
+        # Extract from local emulator prefix
         if "static/uploads/" in clean_url:
             return clean_url.split("static/uploads/")[-1].strip("/")
             
@@ -124,7 +126,7 @@ class ISSPStorageClient:
 
         # Check if any configured bucket name is in the path
         for b in allowed_buckets:
-            if b in clean_url:
+            if b and f"{b}/" in clean_url:
                 parts = clean_url.split(f"{b}/")
                 if len(parts) > 1:
                     return parts[-1].strip("/")
@@ -148,7 +150,9 @@ class ISSPStorageClient:
         path_parts = [p for p in key.replace("\\", "/").split("/") if p and p not in [".", ".."]]
         local_path = Path(resolved_base, *path_parts).resolve()
         
-        if not local_path.is_relative_to(resolved_base):
+        try:
+            local_path.relative_to(resolved_base)
+        except ValueError:
             logger.warning(f"Security Alert: Blocked path traversal attempt targeting key: {key}")
             return None
         return local_path
@@ -161,7 +165,22 @@ class ISSPStorageClient:
         if not object_url:
             return None
 
-        clean_url = object_url.split("?")[0]
+        clean_url = str(object_url).split("?")[0].strip()
+
+        # If already a base64 Data URI, return directly
+        if clean_url.startswith("data:"):
+            return object_url
+
+        # If a direct valid file path on local disk
+        if os.path.exists(clean_url) and os.path.isfile(clean_url):
+            try:
+                with open(clean_url, "rb") as f:
+                    binary_data = f.read()
+                encoded = base64.b64encode(binary_data).decode('utf-8')
+                mime_type, _ = mimetypes.guess_type(clean_url)
+                return f"data:{mime_type or 'image/png'};base64,{encoded}"
+            except Exception as e:
+                logger.error(f"Direct local disk read failed for {clean_url}: {e}")
 
         # External HTTP/HTTPS asset fetch
         if clean_url.startswith(("http://", "https://")) and self.bucket_name not in clean_url:
@@ -210,20 +229,27 @@ class ISSPStorageClient:
                 logger.error(f"Local direct binary read failed for key {key}: {str(e)}")
                 return object_url
 
-    def delete_object(self, key: str) -> bool:
+    def delete_object(self, key_or_url: str) -> bool:
         """
         Deletes an object from S3 or local storage.
+        Accepts either an object key or a full URL.
         Includes protections against shared catalog file erasure.
         """
-        if not key:
+        if not key_or_url:
             return False
             
-        normalized_key = key.replace("\\", "/").strip("/")
+        key_clean = str(key_or_url).strip()
+        if key_clean.startswith(("http://", "https://")) or "static/uploads" in key_clean:
+            extracted = self.extract_key_from_url(key_clean)
+            if extracted:
+                key_clean = extracted
+
+        normalized_key = key_clean.replace("\\", "/").strip("/")
         first_segment = normalized_key.split("/")[0] if normalized_key else ""
         protected_directories = {"catalog", "shared"}
         
         if first_segment in protected_directories:
-            logger.info(f"Deletion bypassed: Key '{key}' belongs to protected shared directories.")
+            logger.info(f"Deletion bypassed: Key '{key_clean}' belongs to protected shared directories.")
             return True
 
         if self.storage_type == "s3" and self.client:
@@ -257,11 +283,12 @@ class ISSPStorageClient:
         max_content_length: int,
         expiration_seconds: int = 3600
     ) -> Optional[Dict[str, Any]]:
+        clean_key = object_key.replace("\\", "/").lstrip("/")
         if self.storage_type == "s3" and self.client:
             try:
                 response = self.client.generate_presigned_post(
                     Bucket=self.bucket_name,
-                    Key=object_key,
+                    Key=clean_key,
                     Fields={"Content-Type": content_type},
                     Conditions=[
                         {"Content-Type": content_type},
@@ -271,13 +298,13 @@ class ISSPStorageClient:
                 )
                 return response
             except ClientError as e:
-                logger.error(f"Failed generating presigned POST for key {object_key}: {e}")
+                logger.error(f"Failed generating presigned POST for key {clean_key}: {e}")
                 return None
         else:
-            path_parts = [p for p in object_key.split("/") if p and p not in [".", ".."]]
+            path_parts = [p for p in clean_key.split("/") if p and p not in [".", ".."]]
             local_target_path = os.path.join(settings.LOCAL_UPLOAD_DIR, *path_parts)
             return {
-                "url": f"/api/local-upload-mock/{object_key}",
+                "url": f"/api/local-upload-mock/{clean_key}",
                 "fields": {
                     "Content-Type": content_type,
                     "local_destination": local_target_path
@@ -289,20 +316,73 @@ class ISSPStorageClient:
         object_key: str,
         expiration_seconds: int = 1800
     ) -> Optional[str]:
+        """
+        Dynamically generates the download URL.
+        On Azure App Service, automatically binds the active public host
+        to prevent localhost:8000 URL leakage in production environments.
+        """
+        if not object_key:
+            return None
+
+        clean_key = object_key.replace("\\", "/").lstrip("/")
+
         if self.storage_type == "s3" and self.client:
             try:
                 url = self.client.generate_presigned_url(
                     ClientMethod="get_object",
-                    Params={"Bucket": self.bucket_name, "Key": object_key},
+                    Params={"Bucket": self.bucket_name, "Key": clean_key},
                     ExpiresIn=expiration_seconds
                 )
                 return url
             except ClientError as e:
-                logger.error(f"Failed generating download link for key {object_key}: {e}")
+                logger.error(f"Failed generating download link for key {clean_key}: {e}")
                 return None
         else:
-            base_url = settings.API_BASE_URL.rstrip('/')
-            return f"{base_url}/static/uploads/{object_key}"
+            base_url = getattr(settings, "API_BASE_URL", "").rstrip('/')
+            website_hostname = os.getenv("WEBSITE_HOSTNAME")
+            
+            # If running on Azure App Service and API_BASE_URL has localhost or is empty
+            if website_hostname and ("localhost" in base_url or not base_url):
+                base_url = f"https://{website_hostname}"
+
+            if base_url:
+                return f"{base_url}/static/uploads/{clean_key}"
+            return f"/static/uploads/{clean_key}"
+
+    def upload_binary(self, file_data: bytes, key: str, content_type: Optional[str] = None) -> bool:
+        """
+        Direct binary upload handler required by upload_narrative_diagram and other endpoints.
+        Works seamlessly across S3 and local storage tiers.
+        """
+        clean_key = key.replace("\\", "/").lstrip("/")
+        if not content_type:
+            mime_type, _ = mimetypes.guess_type(clean_key)
+            content_type = mime_type or "application/octet-stream"
+
+        if self.storage_type == "s3" and self.client:
+            try:
+                self.client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=clean_key,
+                    Body=file_data,
+                    ContentType=content_type
+                )
+                return True
+            except ClientError as e:
+                logger.error(f"Failed direct upload of binary {clean_key}: {e}")
+                return False
+        else:
+            try:
+                local_path = self.safe_local_path_resolve(clean_key)
+                if local_path is None:
+                    path_parts = [p for p in clean_key.split("/") if p and p not in [".", ".."]]
+                    local_path = Path(settings.LOCAL_UPLOAD_DIR, *path_parts)
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(file_data)
+                return True
+            except (IOError, OSError) as e:
+                logger.error(f"Failed writing binary {clean_key} to local disk: {e}")
+                return False
 
     def upload_compiled_document(self, file_data: bytes, issp_id: str, ext: str = "pdf") -> bool:
         """
@@ -315,29 +395,7 @@ class ISSPStorageClient:
             if ext == "docx"
             else "application/pdf"
         )
-        if self.storage_type == "s3" and self.client:
-            try:
-                self.client.put_object(
-                    Bucket=self.bucket_name,
-                    Key=key,
-                    Body=file_data,
-                    ContentType=content_type
-                )
-                return True
-            except ClientError as e:
-                logger.error(f"Failed direct upload of compiled document {issp_id} ({ext}): {e}")
-                return False
-        else:
-            try:
-                path_parts = [p for p in key.split("/") if p and p not in [".", ".."]]
-                local_path = os.path.join(settings.LOCAL_UPLOAD_DIR, *path_parts)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(local_path, "wb") as f:
-                    f.write(file_data)
-                return True
-            except IOError as e:
-                logger.error(f"Failed writing compiled document {issp_id} ({ext}) to local disk: {e}")
-                return False
+        return self.upload_binary(file_data, key, content_type=content_type)
 
     def upload_compiled_pdf(self, file_data: bytes, issp_id: str) -> bool:
         """
@@ -349,60 +407,20 @@ class ISSPStorageClient:
 
     def upload_unserviceable_report(self, file_data: bytes, department_id: str, filename: str) -> Optional[str]:
         key = self.get_unserviceable_report_key(department_id, filename)
-        if self.storage_type == "s3" and self.client:
-            try:
-                self.client.put_object(
-                    Bucket=self.bucket_name,
-                    Key=key,
-                    Body=file_data
-                )
-                return self.generate_download_url(key)
-            except ClientError as e:
-                logger.error(f"Failed uploading unserviceable report {filename}: {e}")
-                return None
-        else:
-            try:
-                path_parts = [p for p in key.split("/") if p and p not in [".", ".."]]
-                local_path = os.path.join(settings.LOCAL_UPLOAD_DIR, *path_parts)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(local_path, "wb") as f:
-                    f.write(file_data)
-                    
-                base_url = settings.API_BASE_URL.rstrip('/')
-                return f"{base_url}/static/uploads/{key}"
-            except IOError as e:
-                logger.error(f"Failed writing unserviceable report {filename} to disk: {e}")
-                return None
+        success = self.upload_binary(file_data, key, content_type="application/pdf")
+        if success:
+            return self.generate_download_url(key)
+        return None
 
     def upload_canvas_evidence(self, file_data: bytes, key: str) -> bool:
-        if self.storage_type == "s3" and self.client:
-            try:
-                self.client.put_object(
-                    Bucket=self.bucket_name,
-                    Key=key,
-                    Body=file_data
-                )
-                return True
-            except ClientError as e:
-                logger.error(f"Failed direct upload of canvas evidence {key}: {e}")
-                return False
-        else:
-            try:
-                path_parts = [p for p in key.split("/") if p and p not in [".", ".."]]
-                local_path = os.path.join(settings.LOCAL_UPLOAD_DIR, *path_parts)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(local_path, "wb") as f:
-                    f.write(file_data)
-                return True
-            except IOError as e:
-                logger.error(f"Failed writing canvas evidence {key} to local disk: {e}")
-                return False
+        return self.upload_binary(file_data, key, content_type="application/pdf")
 
     def check_glacier_metadata(self, object_key: str) -> Dict[str, Any]:
         """
         Retrieves object storage metadata and parses Glacier restoration status.
         Returns a time-based estimated progress value if active.
         """
+        clean_key = object_key.replace("\\", "/").lstrip("/")
         if self.storage_type != "s3" or not self.client:
             return {
                 "storage_class": "STANDARD",
@@ -414,7 +432,7 @@ class ISSPStorageClient:
         try:
             response = self.client.head_object(
                 Bucket=self.bucket_name,
-                Key=object_key
+                Key=clean_key
             )
             storage_class = response.get("StorageClass", "STANDARD")
             restore_header = response.get("Restore", "")
@@ -437,7 +455,7 @@ class ISSPStorageClient:
                 "restore_progress": progress_val
             }
         except ClientError as e:
-            logger.error(f"Failed to query S3 metadata for key {object_key}: {e}")
+            logger.error(f"Failed to query S3 metadata for key {clean_key}: {e}")
             return {
                 "storage_class": "STANDARD",
                 "is_restoring": False,
@@ -452,14 +470,15 @@ class ISSPStorageClient:
         days: int = 7, 
         tier: str = "Standard"
     ) -> bool:
+        clean_key = object_key.replace("\\", "/").lstrip("/")
         if self.storage_type != "s3" or not self.client:
-            logger.warning(f"Restoration skipped: Local storage or uninitialized client. Key: {object_key}")
+            logger.info(f"Restoration skipped: Local storage or uninitialized client. Key: {clean_key}")
             return True
 
         try:
             self.client.restore_object(
                 Bucket=self.bucket_name,
-                Key=object_key,
+                Key=clean_key,
                 RestoreRequest={
                     "Days": days,
                     "GlacierJobParameters": {
@@ -467,14 +486,18 @@ class ISSPStorageClient:
                     }
                 }
             )
-            logger.info(f"Glacier restore initiated successfully for key: {object_key}")
+            logger.info(f"Glacier restore initiated successfully for key: {clean_key}")
             return True
         except ClientError as e:
-            logger.error(f"Failed to trigger S3 Glacier restoration for key {object_key}: {e}")
+            logger.error(f"Failed to trigger S3 Glacier restoration for key {clean_key}: {e}")
             return False
 
     def restore_object(self, key: str, days: int = 7) -> bool:
         return self.initiate_glacier_restore(key, days=days)
+
+    # Aliases matching helper routines
+    check_archive_metadata = check_glacier_metadata
+    initiate_archive_restore = initiate_glacier_restore
 
 
 storage_client = ISSPStorageClient()

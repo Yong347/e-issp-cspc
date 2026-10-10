@@ -58,49 +58,6 @@ import {
   Tag
 } from "lucide-react";
 
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-};
-
-/**
- * Normalizes error messages from FastAPI / Pydantic validation envelopes
- * without rendering unhelpful "[object Object]" text.
- */
-const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
-  if (!errData) return fallbackMsg;
-  if (typeof errData.detail === "string") return errData.detail;
-  if (Array.isArray(errData.detail)) {
-    return errData.detail
-      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
-      .join(" | ");
-  }
-  if (typeof errData.detail === "object" && errData.detail !== null) {
-    if (Array.isArray(errData.detail.violations)) {
-      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
-    }
-    return JSON.stringify(errData.detail);
-  }
-  if (Array.isArray(errData.violations)) {
-    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
-  }
-  if (errData.message) return errData.message;
-  return fallbackMsg;
-};
-
 // Default Canonical Harmonization Framework Criteria (DICT ISSP Guidelines v.2026)
 const CANONICAL_HARMONIZATION_CRITERIA = [
   { id: 1, name: "National Prioritization (PDP 2023-2028)", is_mandatory: false, description: "Alignment with National Development Goals" },
@@ -205,8 +162,13 @@ export default function InternalProjectsManager() {
   };
   const [form, setForm] = useState(initialFormState);
 
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
-  const apiUrl = getApiUrl();
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") || "" 
+      : "") || 
+    "";
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
@@ -263,19 +225,7 @@ export default function InternalProjectsManager() {
     setError(null);
     try {
       const [projectsData, systemsData, policyData, metricsData, harmData, categoriesData] = await Promise.all([
-        getIctProjects(token, activeCycle).catch(async () => {
-          const res = await fetch(`${apiUrl}/api/admin/ict-projects?issp_period=${encodeURIComponent(activeCycle)}`, {
-            headers: { 
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json"
-            }
-          });
-          if (res.ok) {
-            const raw = await res.json();
-            return Array.isArray(raw) ? raw : (raw?.data || []);
-          }
-          return [];
-        }),
+        getIctProjects(token, activeCycle).catch(() => []),
         getInformationSystems(token, activeCycle).catch(() => []),
         getPolicySettings(token).catch(() => null),
         getPerformanceMetrics(token, activeCycle).catch(() => []),
@@ -306,7 +256,7 @@ export default function InternalProjectsManager() {
         setLoading(false);
       }
     }
-  }, [activeCycle, token, apiUrl]);
+  }, [activeCycle, token]);
 
   useEffect(() => {
     fetchAllData();
@@ -1440,7 +1390,7 @@ export default function InternalProjectsManager() {
                       <button
                         type="button"
                         onClick={() => handleOpenLinkModal(proj)}
-                        className="px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 hover:border-blue-500 rounded-lg text-blue-600 dark:text-blue-400 font-bold text-[9.5px] cursor-pointer flex items-center gap-1 shadow-2xs"
+                        className="px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-750 hover:border-blue-500 rounded-lg text-blue-600 dark:text-blue-400 font-bold text-[9.5px] cursor-pointer flex items-center gap-1 shadow-2xs"
                       >
                         <Plus className="w-3 h-3" />
                         <span>Manage Items</span>

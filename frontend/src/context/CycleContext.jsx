@@ -1,31 +1,8 @@
 // frontend/src/context/CycleContext.jsx
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { API_BASE_URL } from '../api/apiClient';
 
 const CycleContext = createContext(null);
-
-// Dynamically resolves API root: prioritizes current browser origin in production
-// (Azure App Service / live domains) to prevent hardcoded localhost:8000 failures,
-// while preserving local development server behavior on port 5173 or 3000.
-const getApiRoot = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const envUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
-  if (envUrl && envUrl.trim() !== "") {
-    return envUrl.trim().endsWith("/") ? envUrl.trim().slice(0, -1) : envUrl.trim();
-  }
-  return "http://localhost:8000";
-};
-
-const API_ROOT = getApiRoot();
 
 export function CycleProvider({ children }) {
   const [activeCycle, setActiveCycleState] = useState("2026-2028");
@@ -109,7 +86,7 @@ export function CycleProvider({ children }) {
   const fetchActiveCycle = useCallback(async () => {
     setCycleLoading(true);
     try {
-      const res = await fetch(`${API_ROOT}/api/auth/active-cycle`);
+      const res = await fetch(`${API_BASE_URL}/api/auth/active-cycle`);
       if (res.ok) {
         const data = await res.json();
         if (data.issp_period) {

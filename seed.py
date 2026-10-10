@@ -8,6 +8,35 @@ import uuid
 import enum
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from dotenv import load_dotenv
+
+# =========================================================================
+# 0. DEFENSIVE ENVIRONMENT RECOVERY (AZURE APP SERVICE / WEBSSH CONTAINER)
+# =========================================================================
+# Load .env file from the project root if available
+load_dotenv()
+
+# In Azure App Service Linux, interactive SSH shells spawned via Kudu/WebSSH
+# do not automatically inherit App Settings from PID 1 into the shell's environment.
+# Recover Azure App Settings directly from /proc/1/environ if missing.
+if os.path.exists("/proc/1/environ"):
+    try:
+        with open("/proc/1/environ", "rb") as f:
+            raw_env = f.read().decode("utf-8", errors="ignore")
+            for item in raw_env.split("\0"):
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+    except Exception:
+        pass
+
+# Ensure project root is in sys.path
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 import bcrypt
 from sqlalchemy import create_engine, event, inspect, text, String, or_
 from sqlalchemy.types import TypeDecorator
@@ -80,7 +109,7 @@ logger = logging.getLogger(__name__)
 def patch_resilient_encrypted_json():
     """
     Hardens EncryptedJSON against key rotation, salt mismatches, or legacy cipher strings.
-    1. Expands active_ciphers in models_module using historical candidate salts and keys.
+    1. Expands active_ciphers in models_module using candidate salts and keys.
     2. Dynamically wraps EncryptedJSON.process_result_value to gracefully fall back to {}
        if decryption fails, avoiding DecryptionError crashes and enabling database auto-healing.
     """
@@ -609,7 +638,7 @@ def align_database_schemas(engine):
                OR subsystem_network_layouts_json::text ILIKE '%wallpaper%';
         """))
 
-        # Strip all residual HTML from master narratives and reset to clean plain text
+        # Strip residual HTML from master narratives and reset to clean plain text
         clean_recov = (
             "1. Off-site Backup Management: Daily encrypted database snapshots are transferred to a secure secondary facility located >30km away.\n"
             "2. Cloud Failover (GovCloud): Mission-critical public service, registry, and e-payment microservices are replicated in real time to DICT GovCloud.\n"
@@ -647,7 +676,7 @@ def align_database_schemas(engine):
         inspector = inspect(conn)
         table_names = inspector.get_table_names()
 
-        # 1. Patch 'master_narratives' table (Includes final_docx_vault_url)
+        # 1. Patch 'master_narratives' table
         if "master_narratives" in table_names:
             narrative_cols = [c['name'] for c in inspector.get_columns('master_narratives')]
             columns_to_sync_narrative = {
@@ -832,7 +861,7 @@ def align_database_schemas(engine):
                 if col_name not in inv_cols:
                     safe_exec(conn, text(f"ALTER TABLE existing_inventory ADD COLUMN {col_name} {col_def}"))
 
-        # 7. Patch 'information_systems' table (DICT v.2026 specifications + multi-classification boolean flags + department review status)
+        # 7. Patch 'information_systems' table
         if "information_systems" in table_names:
             sys_cols = [c['name'] for c in inspector.get_columns('information_systems')]
             columns_to_sync_sys = {
@@ -924,30 +953,31 @@ def align_database_schemas(engine):
                 """))
 
             # Harmonize classification boolean flags based on existing text
-            safe_exec(conn, text("""
+            # Use dialect-specific boolean literals ({bool_true} / {bool_false}) to avoid PostgreSQL integer-to-boolean errors
+            safe_exec(conn, text(f"""
                 UPDATE information_systems
                 SET
                     is_support_to_operations = CASE
-                        WHEN LOWER(classification) LIKE '%support%' THEN 1
-                        ELSE 0
+                        WHEN LOWER(classification) LIKE '%support%' THEN {bool_true}
+                        ELSE {bool_false}
                     END,
                     is_general_administrative = CASE
                         WHEN LOWER(classification) LIKE '%general administrative%'
-                          OR LOWER(classification) LIKE '%administrative%' THEN 1
-                        ELSE 0
+                          OR LOWER(classification) LIKE '%administrative%' THEN {bool_true}
+                        ELSE {bool_false}
                     END,
                     is_operations = CASE
                         WHEN LOWER(classification) LIKE '%operations%'
-                          OR is_frontline_service = 1
-                          OR is_non_frontline_service = 1 THEN 1
-                        ELSE 0
+                          OR is_frontline_service = {bool_true}
+                          OR is_non_frontline_service = {bool_true} THEN {bool_true}
+                        ELSE {bool_false}
                     END;
 
                 UPDATE information_systems
-                SET is_operations = 1
-                WHERE is_support_to_operations = 0
-                  AND is_general_administrative = 0
-                  AND is_operations = 0;
+                SET is_operations = {bool_true}
+                WHERE (is_support_to_operations = {bool_false} OR is_support_to_operations IS NULL)
+                  AND (is_general_administrative = {bool_false} OR is_general_administrative IS NULL)
+                  AND (is_operations = {bool_false} OR is_operations IS NULL);
             """))
 
         # 8. Patch 'needs_assessments' table
@@ -1275,7 +1305,6 @@ def bootstrap_metadata(db):
             drbcp_recovery_strategy_text=drbcp_recovery_strategy_default,
             drbcp_sop_phases_text=drbcp_sop_phases_default,
             drbcp_compliance_narrative_text=drbcp_compliance_narrative_default,
-            # subsystem_network_layouts_json=[],
             is_archived=False,
             final_pdf_vault_url=None,
             final_docx_vault_url=None,
@@ -2728,8 +2757,31 @@ def main():
 
     args = parser.parse_args()
 
-    engine = create_engine(settings.DATABASE_URL)
-    if "sqlite" in settings.DATABASE_URL.lower():
+    db_url = settings.DATABASE_URL
+    connect_args = {}
+
+    # SQLite multi-threaded support
+    if "sqlite" in db_url.lower():
+        connect_args["check_same_thread"] = False
+    # Azure PostgreSQL Flexible Server SSL requirement
+    elif "postgres.database.azure.com" in db_url and "sslmode" not in db_url:
+        connect_args["sslmode"] = "require"
+
+    # Pre-flight check on remote/production environments
+    is_azure = os.getenv("WEBSITE_HOSTNAME") or os.getenv("WEBSITE_INSTANCE_ID")
+    if (settings.ENV == "production" or is_azure) and ("localhost" in db_url or "127.0.0.1" in db_url):
+        logger.warning(
+            "ENVIRONMENT WARNING: The seeder is connecting to a localhost database in a production/Azure environment. "
+            "Ensure DATABASE_URL is configured in your Azure App Settings."
+        )
+
+    engine = create_engine(
+        db_url,
+        connect_args=connect_args,
+        pool_pre_ping=True
+    )
+
+    if "sqlite" in db_url.lower():
         @event.listens_for(engine, "connect")
         def set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()

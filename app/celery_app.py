@@ -5,7 +5,8 @@ from celery import Celery
 from app.config import settings
 
 # Safely retrieve the Redis URL from settings, providing a robust default fallback
-redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
+redis_url = getattr(settings, "REDIS_URL", None) or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+redis_url = redis_url.strip() if isinstance(redis_url, str) else "redis://localhost:6379/0"
 
 # Initialize the Celery application using Redis broker and backend configurations
 celery_app = Celery(
@@ -27,9 +28,30 @@ celery_app.conf.update(
     timezone="Asia/Manila",
     enable_utc=True,
     
-    # Connection settings: Ensure resilience during worker startup if Redis boots slowly
+    # -------------------------------------------------------------
+    # FAST-FAIL BROKER GUARDS (PREVENTS 502 BAD GATEWAY HANGS)
+    # -------------------------------------------------------------
+    # Limit connection retries so worker/dispatching fails fast if Redis is down
     broker_connection_retry_on_startup=True,
+    broker_connection_max_retries=getattr(settings, "CELERY_BROKER_MAX_RETRIES", 2),
+    broker_transport_options={
+        "max_retries": 2,
+        "interval_start": 0.1,
+        "interval_step": 0.2,
+        "interval_max": 0.5,
+        "socket_timeout": 3.0,
+        "socket_connect_timeout": 3.0,
+    },
     
+    # Redis Result Backend socket timeouts (prevents hanging during status polling)
+    redis_socket_connect_timeout=3.0,
+    redis_socket_timeout=3.0,
+    redis_max_connections=20,
+    
+    # Allow explicit synchronous execution if configured via environment
+    task_always_eager=getattr(settings, "CELERY_ALWAYS_EAGER", False),
+    task_eager_propagates=True,
+
     # Restart child processes after a low threshold on prefork pool to prevent memory leaks
     worker_max_tasks_per_child=getattr(settings, "CELERY_WORKER_MAX_TASKS_PER_CHILD", 5) if not is_windows else None,
     

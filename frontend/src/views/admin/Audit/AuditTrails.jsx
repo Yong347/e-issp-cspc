@@ -4,7 +4,6 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { getAuditLogs, getDepartments } from "../../../api/admin";
-import { API_BASE_URL } from "../../../api/apiClient";
 import { 
   History, 
   RefreshCw, 
@@ -25,37 +24,8 @@ import {
   Coins, 
   ChevronLeft, 
   ChevronRight, 
-  Download,
-  FileSpreadsheet,
-  CheckCircle2,
-  Database,
-  Tag,
-  Building,
-  Key
+  Download
 } from "lucide-react";
-
-// Dynamic API URL resolver: prioritizes production origin on live hosts (e.g. Azure)
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  if (API_BASE_URL && API_BASE_URL.trim() !== "") {
-    return API_BASE_URL;
-  }
-  const raw = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
-  if (raw && raw.trim() !== "") {
-    return raw.trim().endsWith("/") ? raw.trim().slice(0, -1) : raw.trim();
-  }
-  return "http://localhost:8000";
-};
 
 export default function AuditTrails() {
   const { user } = useAuth();
@@ -83,8 +53,13 @@ export default function AuditTrails() {
   // Detailed Modal Inspection State
   const [selectedLog, setSelectedLog] = useState(null);
 
-  const apiUrl = getApiUrl();
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : "") || "";
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") 
+      : "") || 
+    "";
 
   // Auto-dismiss transient notifications
   useEffect(() => {
@@ -115,48 +90,26 @@ export default function AuditTrails() {
   const fetchDepartmentsList = useCallback(async () => {
     if (!token) return;
     try {
-      let data = null;
-      try {
-        data = await getDepartments(token);
-      } catch {
-        const res = await fetch(`${apiUrl}/api/admin/departments`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (res.ok) {
-          data = await res.json();
-        }
-      }
+      const data = await getDepartments(token);
       setDepartments(Array.isArray(data) ? data : []);
     } catch (e) {
       console.warn("Could not load departments dictionary for audit view:", e);
     }
-  }, [apiUrl, token]);
+  }, [token]);
 
   const fetchLogs = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
     try {
-      let data = null;
-      if (typeof getAuditLogs === "function") {
-        data = await getAuditLogs(token, { limit: 1000 });
-      } else {
-        const res = await fetch(`${apiUrl}/api/admin/audit-logs?limit=1000`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.detail || "Failed to load audit logs from the security ledger.");
-        }
-        data = await res.json();
-      }
+      const data = await getAuditLogs(token, { limit: 1000 });
       setLogs(Array.isArray(data) ? data : []);
     } catch (err) {
       setError(err.message || "Network error loading audit logs.");
     } finally {
       setLoading(false);
     }
-  }, [apiUrl, token]);
+  }, [token]);
 
   useEffect(() => {
     if (token) {

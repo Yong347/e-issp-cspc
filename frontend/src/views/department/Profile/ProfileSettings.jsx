@@ -15,43 +15,7 @@ import {
   Lock,
   X
 } from "lucide-react";
-
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-};
-
-/**
- * Normalizes error messages from FastAPI / Pydantic validation envelopes
- * without rendering unhelpful "[object Object]" text.
- */
-const parseErrorMessage = (errData, fallbackMsg = "Password rotation rejected by the authorization system.") => {
-  if (!errData) return fallbackMsg;
-  if (typeof errData.detail === "string") return errData.detail;
-  if (Array.isArray(errData.detail)) {
-    return errData.detail
-      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
-      .join(" | ");
-  }
-  if (typeof errData.detail === "object" && errData.detail !== null) {
-    return errData.detail.message || errData.detail.error || JSON.stringify(errData.detail);
-  }
-  if (errData.message) return errData.message;
-  return fallbackMsg;
-};
+import { API_BASE_URL, handleResponse, getHeaders } from "../../../api/apiClient";
 
 export default function ProfileSettings() {
   const { user } = useAuth();
@@ -67,8 +31,12 @@ export default function ProfileSettings() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  const apiUrl = getApiUrl();
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") || "" 
+      : "");
 
   const handleUpdatePassword = async (e) => {
     e.preventDefault();
@@ -87,22 +55,16 @@ export default function ProfileSettings() {
 
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiUrl}/api/auth/change-password`, {
+      const res = await fetch(`${API_BASE_URL}/api/auth/change-password`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
+        headers: getHeaders(token),
         body: JSON.stringify({
           current_password: currentPassword,
           new_password: newPassword
         })
       });
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Password rotation rejected by the authorization system."));
-      }
+      await handleResponse(res, "Password rotation rejected by the authorization system.");
 
       setSuccess("Account password rotated successfully.");
       setCurrentPassword("");

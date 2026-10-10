@@ -3,6 +3,16 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { useLocation, Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { useCycle } from "../../context/CycleContext";
+import { API_BASE_URL } from "../../api/apiClient";
+import { 
+  getMasterInventory, 
+  createInventoryItem, 
+  updateInventoryItem, 
+  deleteInventoryItem, 
+  getDepartments, 
+  getProposalsQueue 
+} from "../../api/admin";
+import { uploadUnserviceableReport } from "../../api/dept";
 import { 
   Database, 
   Plus, 
@@ -16,72 +26,28 @@ import {
   AlertTriangle, 
   CheckCircle, 
   Coins, 
-  FileText,
-  Boxes,
-  Activity,
-  ShieldAlert,
-  Building,
-  UploadCloud,
-  ExternalLink,
-  Table,
-  ChevronLeft,
-  ChevronRight,
-  HardDrive,
-  Tag,
-  Clock,
-  Info,
-  Layers,
-  Sparkles,
-  CheckCircle2,
-  FolderKanban,
-  CheckSquare,
-  Printer,
-  Download,
-  FileSpreadsheet
+  Boxes, 
+  Activity, 
+  ShieldAlert, 
+  Building, 
+  UploadCloud, 
+  ExternalLink, 
+  Table, 
+  ChevronLeft, 
+  ChevronRight, 
+  HardDrive, 
+  Tag, 
+  Clock, 
+  Info, 
+  Layers, 
+  Sparkles, 
+  CheckCircle2, 
+  FolderKanban, 
+  CheckSquare, 
+  Printer, 
+  Download, 
+  FileSpreadsheet 
 } from "lucide-react";
-
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-};
-
-/**
- * Normalizes error messages from FastAPI / Pydantic validation envelopes
- * without rendering unhelpful "[object Object]" text.
- */
-const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
-  if (!errData) return fallbackMsg;
-  if (typeof errData.detail === "string") return errData.detail;
-  if (Array.isArray(errData.detail)) {
-    return errData.detail
-      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
-      .join(" | ");
-  }
-  if (typeof errData.detail === "object" && errData.detail !== null) {
-    if (Array.isArray(errData.detail.violations)) {
-      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
-    }
-    return JSON.stringify(errData.detail);
-  }
-  if (Array.isArray(errData.violations)) {
-    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
-  }
-  if (errData.message) return errData.message;
-  return fallbackMsg;
-};
 
 // Canonical DICT Annex 1 Standard Categories (Template Pages 1–3) [4]
 const DEFAULT_EQUIPMENT_CATEGORIES = [
@@ -179,7 +145,6 @@ export default function SupplyInventory() {
   const { activeCycle } = useCycle();
   const location = useLocation();
 
-  // Dynamic Agency Identifier
   const defaultAgencyName = import.meta.env.VITE_DEFAULT_AGENCY_NAME || "National Government Agency";
   const agencyName = import.meta.env.VITE_AGENCY_NAME || user?.agency_name || defaultAgencyName;
 
@@ -199,8 +164,8 @@ export default function SupplyInventory() {
   const [searchTerm, setSearchTerm] = useState("");
   const [deptFilter, setDeptFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
-  const [typeFilter, setFilterType] = useState("all"); // all, hardware, software, eol, unconsumed, backup, condemned
-  const [locationFilter, setLocationFilter] = useState("all"); // all, central, regional
+  const [typeFilter, setFilterType] = useState("all");
+  const [locationFilter, setLocationFilter] = useState("all");
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -210,7 +175,7 @@ export default function SupplyInventory() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Form State (DICT Annex 1 Standard Aligned)
+  // Form State
   const initialFormState = {
     department_id: "",
     dict_category: "Desktop",
@@ -241,8 +206,13 @@ export default function SupplyInventory() {
   const [reportUrlInput, setReportUrlInput] = useState("");
   const [uploadingReport, setUploadingReport] = useState(false);
 
-  const apiUrl = getApiUrl();
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") 
+      : "") || 
+    "";
   const isMountedRef = useRef(true);
 
   useEffect(() => {
@@ -302,7 +272,7 @@ export default function SupplyInventory() {
   const fetchCategories = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/supply/categories`, {
+      const res = await fetch(`${API_BASE_URL}/api/supply/categories`, {
         headers: { 
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json"
@@ -320,20 +290,14 @@ export default function SupplyInventory() {
     } catch (e) {
       console.warn("Using default static DICT categories:", e);
     }
-  }, [apiUrl, token]);
+  }, [token]);
 
   const fetchDepartments = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/supply/departments`, {
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (res.ok && isMountedRef.current) {
-        const data = await res.json();
-        const list = Array.isArray(data) ? data : [];
+      const data = await getDepartments(token);
+      const list = Array.isArray(data) ? data : [];
+      if (isMountedRef.current) {
         setDepartments(list);
         setForm(f => {
           if (list.length > 0 && !f.department_id) {
@@ -345,40 +309,28 @@ export default function SupplyInventory() {
     } catch (err) {
       console.error("Failed to fetch departments directory:", err);
     }
-  }, [apiUrl, token]);
+  }, [token]);
 
   const fetchInventory = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
     try {
-      const headers = { 
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      };
+      const params = { limit: 10000 };
+      if (activeCycle) params.issp_period = activeCycle;
+      if (deptFilter) params.dept_id = deptFilter;
 
-      const params = ["limit=10000"];
-      if (activeCycle) params.push(`issp_period=${encodeURIComponent(activeCycle)}`);
-      if (deptFilter) params.push(`dept_id=${encodeURIComponent(deptFilter)}`);
-      const queryParams = `?${params.join("&")}`;
-
-      const [invRes, propRes] = await Promise.all([
-        fetch(`${apiUrl}/api/supply/inventory${queryParams}`, { headers }),
-        fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle || "2026-2028")}&limit=1000`, { headers }).catch(() => null)
+      const [invData, propPayload] = await Promise.all([
+        getMasterInventory(token, params).catch(() => []),
+        getProposalsQueue(token, { issp_period: activeCycle || "2026-2028", limit: 1000 }).catch(() => null)
       ]);
 
-      if (!invRes.ok) {
-        const errData = await invRes.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to load baseline inventory records."));
-      }
-      
-      const invData = await invRes.json();
       if (isMountedRef.current) {
         setInventory(Array.isArray(invData) ? invData : []);
 
-        if (propRes && propRes.ok) {
-          const pJson = await propRes.json();
-          setProposals(Array.isArray(pJson) ? pJson : (pJson?.data || []));
+        if (propPayload) {
+          const pList = Array.isArray(propPayload) ? propPayload : (propPayload?.data || []);
+          setProposals(pList);
         }
       }
     } catch (err) {
@@ -390,7 +342,7 @@ export default function SupplyInventory() {
         setLoading(false);
       }
     }
-  }, [apiUrl, token, activeCycle, deptFilter]);
+  }, [token, activeCycle, deptFilter]);
 
   useEffect(() => {
     if (token) {
@@ -470,19 +422,7 @@ export default function SupplyInventory() {
         unserviceable_report_url: form.unserviceable_report_url?.trim() || null
       };
 
-      const res = await fetch(`${apiUrl}/api/supply/inventory?issp_period=${encodeURIComponent(activeCycle || "2026-2028")}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to register baseline inventory item."));
-      }
+      await createInventoryItem(token, payload);
 
       if (isMountedRef.current) {
         setSuccess(`Asset '${form.item_name}' successfully logged into Annex 1 for cycle FY ${activeCycle}.`);
@@ -570,19 +510,7 @@ export default function SupplyInventory() {
         replacement_proposal_id: editingItem.replacement_proposal_id || null
       };
 
-      const res = await fetch(`${apiUrl}/api/supply/inventory/${editingItem.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to update inventory record."));
-      }
+      await updateInventoryItem(token, editingItem.id, payload);
 
       if (isMountedRef.current) {
         setSuccess(`Inventory record for '${editForm.item_name}' updated.`);
@@ -605,18 +533,7 @@ export default function SupplyInventory() {
     setError(null);
     setSuccess(null);
     try {
-      const res = await fetch(`${apiUrl}/api/supply/inventory/${id}`, {
-        method: "DELETE",
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to delete inventory record."));
-      }
-      
+      await deleteInventoryItem(token, id);
       if (isMountedRef.current) {
         setSuccess(`Asset record for '${name}' removed.`);
       }
@@ -637,21 +554,11 @@ export default function SupplyInventory() {
     try {
       // 1. If explicit URL is provided directly
       if (reportUrlInput.trim()) {
-        const res = await fetch(`${apiUrl}/api/supply/inventory/${activeReportAsset.id}`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            ...activeReportAsset,
-            unserviceable_report_url: reportUrlInput.trim()
-          })
+        await updateInventoryItem(token, activeReportAsset.id, {
+          ...activeReportAsset,
+          unserviceable_report_url: reportUrlInput.trim()
         });
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(parseErrorMessage(errData, "Failed to attach IIRUP report URL."));
-        }
+
         if (isMountedRef.current) {
           setSuccess(`IIRUP Inspection Report linked to '${activeReportAsset.item_name}'.`);
           setActiveReportAsset(null);
@@ -667,20 +574,7 @@ export default function SupplyInventory() {
         throw new Error("Please select a PDF file or provide a report URL.");
       }
 
-      const formData = new FormData();
-      formData.append("inventory_id", activeReportAsset.id);
-      formData.append("file", reportFile);
-
-      const res = await fetch(`${apiUrl}/api/dept/upload/unserviceable-report`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errData, "Failed to upload inspection report."));
-      }
+      await uploadUnserviceableReport(activeReportAsset.id, reportFile, token);
 
       if (isMountedRef.current) {
         setSuccess(`IIRUP Inspection Report uploaded and linked to '${activeReportAsset.item_name}'.`);
@@ -1497,7 +1391,7 @@ export default function SupplyInventory() {
               ) : paginatedInventory.length > 0 ? (
                 <table className="w-full text-left border-collapse text-[11px]">
                   <thead>
-                    <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[9px] bg-slate-50 dark:bg-slate-950 font-mono">
+                    <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[9px] bg-slate-50 dark:bg-slate-955 font-mono">
                       <th className="py-2.5 px-3 w-[28%]">Asset, Category &amp; Model</th>
                       <th className="py-2.5 px-3">Location &amp; Dept</th>
                       <th className="py-2.5 px-3">Acquisition</th>
@@ -1643,7 +1537,7 @@ export default function SupplyInventory() {
                               <button
                                 type="button"
                                 onClick={() => handleDelete(item.id, item.item_name)}
-                                className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 border border-slate-300 dark:border-slate-700 text-slate-500 rounded-lg transition-colors cursor-pointer"
+                                className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 border border-slate-300 dark:border-slate-700 text-slate-500 rounded-lg transition-colors cursor-pointer"
                                 title="Purge Record"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />

@@ -4,10 +4,28 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
+  getNarrative,
   updateNarrative,
   activateCycle,
   resetCycle,
-  evaluateLifecycleRollover 
+  evaluateLifecycleRollover,
+  getHumanCapitals,
+  createHumanCapital,
+  updateHumanCapital,
+  deleteHumanCapital,
+  getStakeholders,
+  createStakeholder,
+  updateStakeholder,
+  deleteStakeholder,
+  getNetworkInfrastructures,
+  createNetworkInfrastructure,
+  updateNetworkInfrastructure,
+  deleteNetworkInfrastructure,
+  getCybersecurityControls,
+  getEgovChecklists,
+  getDrTeams,
+  getDrBias,
+  getDrMetrics
 } from "../../../api/admin";
 import CompilerSyncButton from "../../../components/common/CompilerSyncButton";
 import { 
@@ -50,49 +68,6 @@ import {
   ArrowRight,
   CheckSquare
 } from "lucide-react";
-
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-};
-
-/**
- * Normalizes error messages from FastAPI / Pydantic validation envelopes
- * without rendering unhelpful "[object Object]" text.
- */
-const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
-  if (!errData) return fallbackMsg;
-  if (typeof errData.detail === "string") return errData.detail;
-  if (Array.isArray(errData.detail)) {
-    return errData.detail
-      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
-      .join(" | ");
-  }
-  if (typeof errData.detail === "object" && errData.detail !== null) {
-    if (Array.isArray(errData.detail.violations)) {
-      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
-    }
-    return JSON.stringify(errData.detail);
-  }
-  if (Array.isArray(errData.violations)) {
-    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
-  }
-  if (errData.message) return errData.message;
-  return fallbackMsg;
-};
 
 // Presets for Standard Public-Sector Stakeholder Groups
 const STAKEHOLDER_PRESETS = [
@@ -281,8 +256,13 @@ export default function NarrativeManager() {
   const [drBia, setDrBia] = useState([]);
   const [drMetrics, setDrMetrics] = useState([]);
 
-  const apiUrl = getApiUrl();
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") 
+      : "") || 
+    "";
 
   // Auto-dismiss transient notifications
   useEffect(() => {
@@ -410,172 +390,129 @@ export default function NarrativeManager() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (!isMountedRef.current) return;
+      const data = await getNarrative(token, activeCycle);
+      if (!isMountedRef.current) return;
 
-        setAgencyName(data.agency_name || defaultAgencyName);
-        setWebsiteUrl(data.agency_website_url || defaultWebsiteUrl);
-        setIsAmendment(Boolean(data.is_amendment));
-        setAmendmentNumber(data.amendment_number || "1st");
-        
-        hydrateScopeFromData(data.scope_choice, data.scope_json);
+      setAgencyName(data.agency_name || defaultAgencyName);
+      setWebsiteUrl(data.agency_website_url || defaultWebsiteUrl);
+      setIsAmendment(Boolean(data.is_amendment));
+      setAmendmentNumber(data.amendment_number || "1st");
+      
+      hydrateScopeFromData(data.scope_choice, data.scope_json);
 
-        setLegalBasis(data.mandate_text || stripHtml(data.mandate_html) || "");
-        setFunctions(data.functions || "");
-        setVision(data.vision_text || stripHtml(data.vision_html) || "");
-        setMission(data.mission_text || stripHtml(data.mission_html) || "");
-        setPresentSituation(data.present_situation_text || stripHtml(data.present_situation_html) || "");
+      setLegalBasis(data.mandate_text || stripHtml(data.mandate_html) || "");
+      setFunctions(data.functions || "");
+      setVision(data.vision_text || stripHtml(data.vision_html) || "");
+      setMission(data.mission_text || stripHtml(data.mission_html) || "");
+      setPresentSituation(data.present_situation_text || stripHtml(data.present_situation_html) || "");
 
-        setEaNarrative(data.enterprise_architecture_narrative || "");
+      setEaNarrative(data.enterprise_architecture_narrative || "");
 
-        setDrbcpApprovalDate(data.drbcp_approval_date || "");
-        setDrAffectedAssets(Array.isArray(data.drbcp_affected_assets_json) ? data.drbcp_affected_assets_json : []);
-        setDrRecoveryStrategy(data.drbcp_recovery_strategy_text || stripHtml(data.drbcp_recovery_strategy_html) || "");
-        setDrSopPhases(data.drbcp_sop_phases_text || stripHtml(data.drbcp_sop_phases_html) || "");
+      setDrbcpApprovalDate(data.drbcp_approval_date || "");
+      setDrAffectedAssets(Array.isArray(data.drbcp_affected_assets_json) ? data.drbcp_affected_assets_json : []);
+      setDrRecoveryStrategy(data.drbcp_recovery_strategy_text || stripHtml(data.drbcp_recovery_strategy_html) || "");
+      setDrSopPhases(data.drbcp_sop_phases_text || stripHtml(data.drbcp_sop_phases_html) || "");
 
-        const sec6Val = data.drbcp_compliance_narrative_text || data.drbcp_compliance_narrative_html;
-        if (sec6Val) {
-          parseSection6Text(sec6Val);
-        }
-
-        // Hydrate Signatories: Ensure clean human full names without generic title fallbacks
-        const rawCio = (data.cio_name || data.signatory_prepared_by || "").trim();
-        if (!rawCio || ["chief information officer", "cio", "none", "null"].includes(rawCio.toLowerCase())) {
-          setCioName("REY T. CORTEZ, MIT");
-        } else {
-          setCioName(rawCio);
-        }
-
-        setCioPosition(data.cio_plantilla_position || data.preparer_position || "Chief Information Officer");
-        setCioUnit(data.cio_organizational_unit || "ICT Management Service");
-        setCioEmail(data.cio_email || data.preparer_email || "");
-        setCioContact(data.cio_contact_no || data.preparer_tel || "");
-
-        setFocalName(data.focal_name || "");
-        setFocalPosition(data.focal_position || "");
-        setFocalUnit(data.focal_organizational_unit || "");
-        setFocalEmail(data.focal_email || "");
-        setFocalContact(data.focal_contact_no || "");
-
-        const rawHead = (data.head_of_agency_name || data.signatory_approved_by || "").trim();
-        if (!rawHead || ["head of agency", "agency head", "college president", "president", "none", "null"].includes(rawHead.toLowerCase())) {
-          setHeadOfAgencyName("AMADO A. OLIVA JR, PhD.");
-        } else {
-          setHeadOfAgencyName(rawHead);
-        }
-
-        setAgencyHeadPosition(data.agency_head_position || defaultAgencyHeadTitle);
+      const sec6Val = data.drbcp_compliance_narrative_text || data.drbcp_compliance_narrative_html;
+      if (sec6Val) {
+        parseSection6Text(sec6Val);
       }
+
+      // Hydrate Signatories: Ensure clean human full names without generic title fallbacks
+      const rawCio = (data.cio_name || data.signatory_prepared_by || "").trim();
+      if (!rawCio || ["chief information officer", "cio", "none", "null"].includes(rawCio.toLowerCase())) {
+        setCioName("REY T. CORTEZ, MIT");
+      } else {
+        setCioName(rawCio);
+      }
+
+      setCioPosition(data.cio_plantilla_position || data.preparer_position || "Chief Information Officer");
+      setCioUnit(data.cio_organizational_unit || "ICT Management Service");
+      setCioEmail(data.cio_email || data.preparer_email || "");
+      setCioContact(data.cio_contact_no || data.preparer_tel || "");
+
+      setFocalName(data.focal_name || "");
+      setFocalPosition(data.focal_position || "");
+      setFocalUnit(data.focal_organizational_unit || "");
+      setFocalEmail(data.focal_email || "");
+      setFocalContact(data.focal_contact_no || "");
+
+      const rawHead = (data.head_of_agency_name || data.signatory_approved_by || "").trim();
+      if (!rawHead || ["head of agency", "agency head", "college president", "president", "none", "null"].includes(rawHead.toLowerCase())) {
+        setHeadOfAgencyName("AMADO A. OLIVA JR, PhD.");
+      } else {
+        setHeadOfAgencyName(rawHead);
+      }
+
+      setAgencyHeadPosition(data.agency_head_position || defaultAgencyHeadTitle);
     } catch (e) {
       console.warn("Initializing cycle metadata:", e);
     } finally {
       if (isMountedRef.current) setLoading(false);
     }
-  }, [activeCycle, apiUrl, token, defaultAgencyName, defaultWebsiteUrl, defaultAgencyHeadTitle]);
+  }, [activeCycle, token, defaultAgencyName, defaultWebsiteUrl, defaultAgencyHeadTitle]);
 
   const fetchHumanCapitals = useCallback(async () => {
     if (!activeCycle || !token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (isMountedRef.current) setHumanCapitals(Array.isArray(data) ? data : []);
-      }
+      const data = await getHumanCapitals(token, activeCycle);
+      if (isMountedRef.current) setHumanCapitals(Array.isArray(data) ? data : []);
     } catch (e) { console.error(e); }
-  }, [activeCycle, apiUrl, token]);
+  }, [activeCycle, token]);
 
   const fetchStakeholders = useCallback(async () => {
     if (!activeCycle || !token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (isMountedRef.current) setStakeholders(Array.isArray(data) ? data : []);
-      }
+      const data = await getStakeholders(token, activeCycle);
+      if (isMountedRef.current) setStakeholders(Array.isArray(data) ? data : []);
     } catch (e) { console.error(e); }
-  }, [activeCycle, apiUrl, token]);
+  }, [activeCycle, token]);
 
   const fetchNetworkAndCyber = useCallback(async () => {
     if (!activeCycle || !token) return;
     try {
-      const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-      const [netRes, cyberRes] = await Promise.all([
-        fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, { headers }),
-        fetch(`${apiUrl}/api/admin/cybersecurity-controls?issp_period=${encodeURIComponent(activeCycle)}`, { headers })
+      const [netData, cyberData] = await Promise.all([
+        getNetworkInfrastructures(token, activeCycle),
+        getCybersecurityControls(token, activeCycle)
       ]);
-      if (netRes.ok) {
-        const netData = await netRes.json();
-        if (isMountedRef.current) setNetworkInfraList(Array.isArray(netData) ? netData : []);
-      }
-      if (cyberRes.ok) {
-        const cyberData = await cyberRes.json();
-        if (isMountedRef.current) setCyberControlsList(Array.isArray(cyberData) ? cyberData : []);
+      if (isMountedRef.current) {
+        setNetworkInfraList(Array.isArray(netData) ? netData : []);
+        setCyberControlsList(Array.isArray(cyberData) ? cyberData : []);
       }
     } catch (e) { console.error(e); }
-  }, [activeCycle, apiUrl, token]);
+  }, [activeCycle, token]);
 
   const fetchEgovChecklists = useCallback(async () => {
     if (!activeCycle || !token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/egov-checklists`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (isMountedRef.current) setEgovChecklists(Array.isArray(data) ? data : []);
-      }
+      const data = await getEgovChecklists(token, activeCycle);
+      if (isMountedRef.current) setEgovChecklists(Array.isArray(data) ? data : []);
     } catch (e) { console.error(e); }
-  }, [activeCycle, apiUrl, token]);
+  }, [activeCycle, token]);
 
   const fetchDrTeams = useCallback(async () => {
     if (!activeCycle || !token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-teams`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (isMountedRef.current) setDrTeam(Array.isArray(data) ? data : []);
-      }
+      const data = await getDrTeams(token, activeCycle);
+      if (isMountedRef.current) setDrTeam(Array.isArray(data) ? data : []);
     } catch (e) { console.error(e); }
-  }, [activeCycle, apiUrl, token]);
+  }, [activeCycle, token]);
 
   const fetchDrBias = useCallback(async () => {
     if (!activeCycle || !token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-bias`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (isMountedRef.current) setDrBia(Array.isArray(data) ? data : []);
-      }
+      const data = await getDrBias(token, activeCycle);
+      if (isMountedRef.current) setDrBia(Array.isArray(data) ? data : []);
     } catch (e) { console.error(e); }
-  }, [activeCycle, apiUrl, token]);
+  }, [activeCycle, token]);
 
   const fetchDrMetrics = useCallback(async () => {
     if (!activeCycle || !token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-metrics`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (isMountedRef.current) setDrMetrics(Array.isArray(data) ? data : []);
-      }
+      const data = await getDrMetrics(token, activeCycle);
+      if (isMountedRef.current) setDrMetrics(Array.isArray(data) ? data : []);
     } catch (e) { console.error(e); }
-  }, [activeCycle, apiUrl, token]);
+  }, [activeCycle, token]);
 
   const loadAllData = useCallback(() => {
     if (!token || !activeCycle) return;
@@ -695,7 +632,7 @@ export default function NarrativeManager() {
       }
       await fetchActiveCycle();
     } catch (err) {
-      if (isMountedRef.current) setError(err.message);
+      if (isMountedRef.current) setError(err.message || "Failed to activate planning cycle.");
     } finally {
       if (isMountedRef.current) setSubmitting(false);
     }
@@ -717,7 +654,7 @@ export default function NarrativeManager() {
       }
       await fetchActiveCycle();
     } catch (err) {
-      if (isMountedRef.current) setError(err.message);
+      if (isMountedRef.current) setError(err.message || "Failed to reset planning cycle.");
     } finally {
       if (isMountedRef.current) setSubmitting(false);
     }
@@ -797,29 +734,13 @@ export default function NarrativeManager() {
     setSubmitting(true);
     try {
       if (editingHcId) {
-        const res = await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(editingHcId)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(hcForm)
-        });
-        if (!res.ok) {
-          const errPayload = await res.json().catch(() => ({}));
-          throw new Error(parseErrorMessage(errPayload, "Failed to update human capital matrix entry."));
-        }
+        await updateHumanCapital(token, editingHcId, hcForm);
         if (isMountedRef.current) {
           setSuccess("Staffing matrix row updated.");
           handleCancelEditHc();
         }
       } else {
-        const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(hcForm)
-        });
-        if (!res.ok) {
-          const errPayload = await res.json().catch(() => ({}));
-          throw new Error(parseErrorMessage(errPayload, "Failed to record human capital matrix entry."));
-        }
+        await createHumanCapital(token, activeCycle, hcForm);
         if (isMountedRef.current) {
           setSuccess("Staffing matrix row added.");
           setHcForm({ employment_status: "Plantilla (Filled)", is_proposed: false, it_positions_count: 0, non_it_positions_count: 0, male_count: 0, female_count: 0 });
@@ -827,7 +748,7 @@ export default function NarrativeManager() {
       }
       fetchHumanCapitals();
     } catch (err) { 
-      if (isMountedRef.current) setError(err.message); 
+      if (isMountedRef.current) setError(err.message || "Failed to save staffing entry."); 
     } finally { 
       if (isMountedRef.current) setSubmitting(false); 
     }
@@ -836,17 +757,10 @@ export default function NarrativeManager() {
   const handleDeleteHumanCapital = async (id) => {
     if (!window.confirm("Permanently delete this staffing matrix entry?")) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) {
-        const errPayload = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errPayload, "Failed to delete staffing entry."));
-      }
+      await deleteHumanCapital(token, id);
       fetchHumanCapitals();
     } catch (err) { 
-      if (isMountedRef.current) setError(err.message); 
+      if (isMountedRef.current) setError(err.message || "Failed to delete staffing entry."); 
     }
   };
 
@@ -894,29 +808,13 @@ export default function NarrativeManager() {
     setSubmitting(true);
     try {
       if (editingShId) {
-        const res = await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(editingShId)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(shForm)
-        });
-        if (!res.ok) {
-          const errPayload = await res.json().catch(() => ({}));
-          throw new Error(parseErrorMessage(errPayload, "Failed to update stakeholder analysis."));
-        }
+        await updateStakeholder(token, editingShId, shForm);
         if (isMountedRef.current) {
           setSuccess("Stakeholder analysis updated successfully.");
           handleCancelEditStakeholder();
         }
       } else {
-        const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(shForm)
-        });
-        if (!res.ok) {
-          const errPayload = await res.json().catch(() => ({}));
-          throw new Error(parseErrorMessage(errPayload, "Failed to record stakeholder analysis."));
-        }
+        await createStakeholder(token, activeCycle, shForm);
         if (isMountedRef.current) {
           setSuccess("Stakeholder analysis recorded successfully.");
           setShForm({ stakeholder_group: "", transaction_processed_incoming: "", transaction_processed_outgoing: "", complexity_incoming: "Simple", complexity_outgoing: "Simple" });
@@ -924,7 +822,7 @@ export default function NarrativeManager() {
       }
       fetchStakeholders();
     } catch (err) { 
-      if (isMountedRef.current) setError(err.message); 
+      if (isMountedRef.current) setError(err.message || "Failed to save stakeholder analysis."); 
     } finally { 
       if (isMountedRef.current) setSubmitting(false); 
     }
@@ -933,17 +831,10 @@ export default function NarrativeManager() {
   const handleDeleteStakeholder = async (id, groupName) => {
     if (!window.confirm(`Permanently delete stakeholder group '${groupName}'?`)) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) {
-        const errPayload = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errPayload, "Failed to delete stakeholder record."));
-      }
+      await deleteStakeholder(token, id);
       fetchStakeholders();
     } catch (err) { 
-      if (isMountedRef.current) setError(err.message); 
+      if (isMountedRef.current) setError(err.message || "Failed to delete stakeholder record."); 
     }
   };
 
@@ -983,29 +874,13 @@ export default function NarrativeManager() {
     setSubmitting(true);
     try {
       if (editingNetId) {
-        const res = await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(editingNetId)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(netForm)
-        });
-        if (!res.ok) {
-          const errPayload = await res.json().catch(() => ({}));
-          throw new Error(parseErrorMessage(errPayload, "Failed to update network infrastructure."));
-        }
+        await updateNetworkInfrastructure(token, editingNetId, netForm);
         if (isMountedRef.current) {
           setSuccess("Network profile updated.");
           handleCancelEditNet();
         }
       } else {
-        const res = await fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(netForm)
-        });
-        if (!res.ok) {
-          const errPayload = await res.json().catch(() => ({}));
-          throw new Error(parseErrorMessage(errPayload, "Failed to register network infrastructure."));
-        }
+        await createNetworkInfrastructure(token, netForm, activeCycle);
         if (isMountedRef.current) {
           setSuccess("Network infrastructure profile saved.");
           handleCancelEditNet();
@@ -1013,7 +888,7 @@ export default function NarrativeManager() {
       }
       fetchNetworkAndCyber();
     } catch (err) { 
-      if (isMountedRef.current) setError(err.message); 
+      if (isMountedRef.current) setError(err.message || "Failed to save network profile."); 
     } finally { 
       if (isMountedRef.current) setSubmitting(false); 
     }
@@ -1022,17 +897,10 @@ export default function NarrativeManager() {
   const handleDeleteNetworkInfra = async (id) => {
     if (!window.confirm("Delete this network infrastructure profile?")) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) {
-        const errPayload = await res.json().catch(() => ({}));
-        throw new Error(parseErrorMessage(errPayload, "Failed to delete network profile."));
-      }
+      await deleteNetworkInfrastructure(token, id);
       fetchNetworkAndCyber();
     } catch (err) { 
-      if (isMountedRef.current) setError(err.message); 
+      if (isMountedRef.current) setError(err.message || "Failed to delete network profile."); 
     }
   };
 

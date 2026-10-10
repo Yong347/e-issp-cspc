@@ -24,24 +24,16 @@ import {
   ShieldCheck,
   PackageCheck
 } from "lucide-react";
-
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
-const getApiUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-};
+import {
+  getDepartments,
+  createDepartment,
+  updateDepartment,
+  deleteDepartment,
+  getWhitelistedUsers,
+  addWhitelistedUser,
+  updateWhitelistedUser,
+  deleteWhitelistedUser
+} from "../../../api/admin";
 
 export default function UserWhitelisting() {
   const { user } = useAuth();
@@ -80,8 +72,13 @@ export default function UserWhitelisting() {
   const [editingDept, setEditingDept] = useState(null);
   const [editDeptName, setEditDeptName] = useState("");
 
-  const apiUrl = getApiUrl();
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const token = 
+    user?.token || 
+    user?.accessToken || 
+    (typeof window !== "undefined" 
+      ? localStorage.getItem("access_token") || localStorage.getItem("token") 
+      : "") || 
+    "";
 
   // Auto-dismiss transient notifications
   useEffect(() => {
@@ -110,94 +107,44 @@ export default function UserWhitelisting() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editingUser, editingDept]);
 
-  const parseErrorMessage = async (res, defaultContext) => {
-    let detail = "";
-    try {
-      const errorData = await res.json();
-      if (errorData?.detail) {
-        if (typeof errorData.detail === "string") {
-          detail = errorData.detail;
-        } else if (Array.isArray(errorData.detail)) {
-          detail = errorData.detail
-            .map(err => `${err.loc ? err.loc.filter(p => p !== "body").join(" -> ") + ": " : ""}${err.msg || JSON.stringify(err)}`)
-            .join(" | ");
-        } else if (typeof errorData.detail === "object" && errorData.detail !== null) {
-          if (Array.isArray(errorData.detail.violations)) {
-            detail = `${errorData.detail.error || "Validation Failure"}:\n• ${errorData.detail.violations.join("\n• ")}`;
-          } else {
-            detail = JSON.stringify(errorData.detail);
-          }
-        }
-      } else if (errorData?.message) {
-        detail = errorData.message;
-      }
-    } catch {
-      detail = await res.text().catch(() => `HTTP error ${res.status}`);
-    }
-    return detail || `${defaultContext} (HTTP ${res.status})`;
-  };
-
-  const fetchDepartments = useCallback(async () => {
+  const fetchDepartmentsList = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch(`${apiUrl}/api/admin/departments`, {
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const list = Array.isArray(data) ? data : [];
-        setDepartments(list);
-        if (list.length > 0) {
-          setDeptId(prev => {
-            const hasExisting = list.some(d => String(d.department_id || d.id) === String(prev));
-            return hasExisting ? prev : String(list[0].department_id || list[0].id);
-          });
-        }
-      } else {
-        const msg = await parseErrorMessage(res, "Failed to load departments registry");
-        setError(msg);
+      const data = await getDepartments(token);
+      const list = Array.isArray(data) ? data : [];
+      setDepartments(list);
+      if (list.length > 0) {
+        setDeptId(prev => {
+          const hasExisting = list.some(d => String(d.department_id || d.id) === String(prev));
+          return hasExisting ? prev : String(list[0].department_id || list[0].id);
+        });
       }
     } catch (e) {
-      setError(e.message || "Failed to query the departments endpoint.");
+      setError(e.message || "Failed to load departments registry.");
     }
-  }, [apiUrl, token]);
+  }, [token]);
 
   const fetchWhitelist = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/users/whitelist`, {
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setWhitelist(Array.isArray(data) ? data : []);
-      } else {
-        const msg = await parseErrorMessage(res, "Failed to query user registry");
-        setError(msg);
-        setWhitelist([]);
-      }
+      const data = await getWhitelistedUsers(token);
+      setWhitelist(Array.isArray(data) ? data : []);
     } catch (e) {
       setError(e.message || "Network error querying user registry.");
       setWhitelist([]);
     } finally {
       setLoading(false);
     }
-  }, [apiUrl, token]);
+  }, [token]);
 
   useEffect(() => {
     if (token) {
-      fetchDepartments();
+      fetchDepartmentsList();
       fetchWhitelist();
     }
-  }, [token, fetchDepartments, fetchWhitelist]);
+  }, [token, fetchDepartmentsList, fetchWhitelist]);
 
   // Compute Metrics for Executive Header Bar
   const stats = useMemo(() => {
@@ -236,32 +183,20 @@ export default function UserWhitelisting() {
 
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/users/whitelist`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          email: emailClean,
-          password: password.trim(),
-          assigned_department_id: effectiveDeptId,
-          role_tag: role
-        })
+      await addWhitelistedUser(token, {
+        email: emailClean,
+        password: password.trim(),
+        assigned_department_id: effectiveDeptId,
+        role_tag: role
       });
 
-      if (!res.ok) {
-        const msg = await parseErrorMessage(res, "Failed to onboard user account");
-        setError(msg);
-      } else {
-        setSuccess(`User account '${emailClean}' successfully onboarded and authorized.`);
-        setEmail("");
-        setPassword("");
-        setShowPassword(false);
-        fetchWhitelist();
-      }
+      setSuccess(`User account '${emailClean}' successfully onboarded and authorized.`);
+      setEmail("");
+      setPassword("");
+      setShowPassword(false);
+      fetchWhitelist();
     } catch (err) {
-      setError(err.message || "Failed to connect to user onboarding service.");
+      setError(err.message || "Failed to onboard user account.");
     } finally {
       setSubmitting(false);
     }
@@ -319,25 +254,12 @@ export default function UserWhitelisting() {
     }
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/users/whitelist/${editingUser.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const msg = await parseErrorMessage(res, "Failed to update user profile");
-        setError(msg);
-      } else {
-        setSuccess(`Account profile for '${emailClean}' updated successfully.`);
-        setEditingUser(null);
-        fetchWhitelist();
-      }
+      await updateWhitelistedUser(token, editingUser.id, payload);
+      setSuccess(`Account profile for '${emailClean}' updated successfully.`);
+      setEditingUser(null);
+      fetchWhitelist();
     } catch (err) {
-      setError(err.message || "Failed to submit user updates.");
+      setError(err.message || "Failed to update user profile.");
     } finally {
       setSubmitting(false);
     }
@@ -355,20 +277,11 @@ export default function UserWhitelisting() {
     setError(null);
     setSuccess(null);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/users/whitelist/${userId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!res.ok) {
-        const msg = await parseErrorMessage(res, "Failed to delete user account");
-        setError(msg);
-      } else {
-        setSuccess(`Account '${userEmail}' successfully removed from registry.`);
-        fetchWhitelist();
-      }
+      await deleteWhitelistedUser(token, userId);
+      setSuccess(`Account '${userEmail}' successfully removed from registry.`);
+      fetchWhitelist();
     } catch (err) {
-      setError(err.message || "Network error deleting user.");
+      setError(err.message || "Failed to delete user account.");
     }
   };
 
@@ -382,25 +295,12 @@ export default function UserWhitelisting() {
     setCreatingDept(true);
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/departments`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ name: newDeptName.trim() })
-      });
-
-      if (!res.ok) {
-        const msg = await parseErrorMessage(res, "Failed to create department");
-        setError(msg);
-      } else {
-        setSuccess(`Department '${newDeptName.trim()}' added successfully to active registry.`);
-        setNewDeptName("");
-        await fetchDepartments();
-      }
+      await createDepartment(token, { name: newDeptName.trim() });
+      setSuccess(`Department '${newDeptName.trim()}' added successfully to active registry.`);
+      setNewDeptName("");
+      await fetchDepartmentsList();
     } catch (err) {
-      setError(err.message || "Network error creating department.");
+      setError(err.message || "Failed to create department.");
     } finally {
       setCreatingDept(false);
     }
@@ -421,27 +321,14 @@ export default function UserWhitelisting() {
     const targetId = editingDept.department_id || editingDept.id;
 
     try {
-      const res = await fetch(`${apiUrl}/api/admin/departments/${targetId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ name: editDeptName.trim() })
-      });
-
-      if (!res.ok) {
-        const msg = await parseErrorMessage(res, "Failed to update department details");
-        setError(msg);
-      } else {
-        setSuccess("Department designation updated successfully.");
-        setEditingDept(null);
-        setEditDeptName("");
-        await fetchDepartments();
-        fetchWhitelist();
-      }
+      await updateDepartment(token, targetId, { name: editDeptName.trim() });
+      setSuccess("Department designation updated successfully.");
+      setEditingDept(null);
+      setEditDeptName("");
+      await fetchDepartmentsList();
+      fetchWhitelist();
     } catch (err) {
-      setError(err.message || "Network error updating department.");
+      setError(err.message || "Failed to update department details.");
     } finally {
       setCreatingDept(false);
     }
@@ -454,21 +341,12 @@ export default function UserWhitelisting() {
     setError(null);
     setSuccess(null);
     try {
-      const res = await fetch(`${apiUrl}/api/admin/departments/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!res.ok) {
-        const msg = await parseErrorMessage(res, "Failed to delete department");
-        setError(msg);
-      } else {
-        setSuccess(`Department '${name}' removed successfully from active registry.`);
-        await fetchDepartments();
-        fetchWhitelist();
-      }
+      await deleteDepartment(token, id);
+      setSuccess(`Department '${name}' removed successfully from active registry.`);
+      await fetchDepartmentsList();
+      fetchWhitelist();
     } catch (err) {
-      setError(err.message || "Network error deleting department.");
+      setError(err.message || "Failed to delete department.");
     }
   };
 
@@ -500,7 +378,7 @@ export default function UserWhitelisting() {
           </p>
         </div>
         <button
-          onClick={() => { fetchDepartments(); fetchWhitelist(); }}
+          onClick={() => { fetchDepartmentsList(); fetchWhitelist(); }}
           disabled={loading}
           className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 text-xs font-bold disabled:opacity-50 cursor-pointer self-start shadow-xs"
         >
@@ -512,7 +390,7 @@ export default function UserWhitelisting() {
       {/* Summary KPI Counters */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
-          <div className="p-2 bg-blue-50 dark:bg-blue-950/50 rounded-lg text-blue-600 dark:text-blue-400">
+          <div className="p-2 bg-blue-50 dark:bg-blue-955/50 rounded-lg text-blue-600 dark:text-blue-400">
             <Users className="w-4 h-4" />
           </div>
           <div>
@@ -522,7 +400,7 @@ export default function UserWhitelisting() {
         </div>
 
         <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
-          <div className="p-2 bg-purple-50 dark:bg-purple-950/50 rounded-lg text-purple-600 dark:text-purple-400">
+          <div className="p-2 bg-purple-50 dark:bg-purple-955/50 rounded-lg text-purple-600 dark:text-purple-400">
             <ShieldCheck className="w-4 h-4" />
           </div>
           <div>
@@ -532,7 +410,7 @@ export default function UserWhitelisting() {
         </div>
 
         <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
-          <div className="p-2 bg-blue-50 dark:bg-blue-950/50 rounded-lg text-blue-600 dark:text-blue-400">
+          <div className="p-2 bg-blue-50 dark:bg-blue-955/50 rounded-lg text-blue-600 dark:text-blue-400">
             <UserCheck className="w-4 h-4" />
           </div>
           <div>
@@ -542,7 +420,7 @@ export default function UserWhitelisting() {
         </div>
 
         <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
-          <div className="p-2 bg-amber-50 dark:bg-amber-950/50 rounded-lg text-amber-600 dark:text-amber-400">
+          <div className="p-2 bg-amber-50 dark:bg-amber-955/50 rounded-lg text-amber-600 dark:text-amber-400">
             <PackageCheck className="w-4 h-4" />
           </div>
           <div>
@@ -825,7 +703,7 @@ export default function UserWhitelisting() {
                             u.role_tag === "ROLE_MIS_ADMIN"
                               ? "bg-purple-50 dark:bg-purple-950/60 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300"
                               : u.role_tag === "ROLE_SUPPLY_USER"
-                              ? "bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300"
+                              ? "bg-amber-50 dark:bg-amber-955/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300"
                               : "bg-blue-50 dark:bg-blue-950/60 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300"
                           }`}>
                             {u.role_tag === "ROLE_MIS_ADMIN" ? (

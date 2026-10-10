@@ -6,6 +6,9 @@ import html
 import uuid
 import json
 import logging
+import threading
+import time
+import inspect
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Union
@@ -28,7 +31,7 @@ from pydantic import BaseModel, Field
 import bcrypt
 
 from app.config import settings
-from app.database.session import get_db
+from app.database.session import get_db, SessionLocal
 from app.services.issp_engine import ISSPSingularityEngine
 from app.services.lifecycle_service import ISSPLifecycleEngine
 from app.database.models import (
@@ -175,6 +178,67 @@ from app.utils.helpers import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["Admin & Governance Subsystem"])
+
+
+# ==========================================================
+# THREAD-SAFE IN-PROCESS COMPILATION TASK RUNNER & FALLBACK
+# ==========================================================
+STANDALONE_TASK_STORE: Dict[str, Dict[str, Any]] = {}
+TASK_STORE_LOCK = threading.Lock()
+
+
+def prune_old_tasks():
+    """Prunes finished standalone tasks older than 2 hours to prevent memory leaks."""
+    now = time.time()
+    with TASK_STORE_LOCK:
+        expired_keys = [
+            k for k, v in STANDALONE_TASK_STORE.items()
+            if now - v.get("created_at", now) > 7200
+        ]
+        for k in expired_keys:
+            del STANDALONE_TASK_STORE[k]
+
+
+class StandaloneTaskRunner:
+    """Mock Celery task context that captures state in STANDALONE_TASK_STORE."""
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+
+    def update_state(self, state: str = "PROGRESS", meta: Optional[Dict[str, Any]] = None):
+        with TASK_STORE_LOCK:
+            if self.task_id in STANDALONE_TASK_STORE:
+                STANDALONE_TASK_STORE[self.task_id]["state"] = state
+                if meta and isinstance(meta, dict):
+                    if "progress" in meta:
+                        STANDALONE_TASK_STORE[self.task_id]["progress"] = meta["progress"]
+                    if "status" in meta:
+                        STANDALONE_TASK_STORE[self.task_id]["status"] = meta["status"]
+
+
+def execute_in_process_compilation(task_id: str, compiled_meta: dict):
+    """Executes document compilation inside a background thread when Redis is offline."""
+    runner = StandaloneTaskRunner(task_id)
+    try:
+        target_func = getattr(compile_issp_document, "__wrapped__", compile_issp_document)
+        sig = inspect.signature(target_func)
+        
+        if len(sig.parameters) >= 2:
+            result = target_func(runner, compiled_meta)
+        else:
+            result = target_func(compiled_meta)
+
+        with TASK_STORE_LOCK:
+            STANDALONE_TASK_STORE[task_id]["state"] = "SUCCESS"
+            STANDALONE_TASK_STORE[task_id]["progress"] = 100
+            STANDALONE_TASK_STORE[task_id]["status"] = "Compilation Complete"
+            STANDALONE_TASK_STORE[task_id]["result"] = result
+    except Exception as exc:
+        logger.error(f"In-process compilation failed for task {task_id}: {exc}", exc_info=True)
+        with TASK_STORE_LOCK:
+            STANDALONE_TASK_STORE[task_id]["state"] = "FAILURE"
+            STANDALONE_TASK_STORE[task_id]["progress"] = 100
+            STANDALONE_TASK_STORE[task_id]["status"] = "Compilation Failed"
+            STANDALONE_TASK_STORE[task_id]["error"] = str(exc)
 
 
 # ==========================================================
@@ -4045,7 +4109,7 @@ def reset_planning_cycle(
 
 
 # ==========================================================
-# ASYNC COMPILATION & BACKGROUND TASKS
+# ASYNC COMPILATION & RESILIENT BACKGROUND TASKS
 # ==========================================================
 
 @router.post("/governance/generate-issp")
@@ -4055,6 +4119,14 @@ def trigger_document_generation(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
+    """
+    Triggers document compilation (PDF or DOCX).
+    Resilience Guarantee:
+    Attempts to dispatch via Celery background worker if Redis is reachable.
+    If Redis or Celery is absent (e.g. single-container Azure App Service),
+    falls back cleanly to an in-process thread runner using STANDALONE_TASK_STORE,
+    preventing 500 Connection Refused and 502 Bad Gateway timeouts.
+    """
     target_period = issp_period or get_active_issp_period(db)
     clean_format = (export_format or "pdf").lower().strip()
     if clean_format not in ("pdf", "docx"):
@@ -4104,11 +4176,42 @@ def trigger_document_generation(
         "export_format": clean_format
     }
 
-    task = compile_issp_document.delay(compiled_meta)
+    task_id = str(uuid.uuid4())
+    dispatched_via_celery = False
+
+    # Attempt Celery task queuing if Redis broker is operational
+    try:
+        celery_task = compile_issp_document.delay(compiled_meta)
+        task_id = celery_task.id
+        dispatched_via_celery = True
+    except Exception as celery_err:
+        logger.warning(
+            f"Celery/Redis broker dispatch bypassed ({celery_err}). "
+            "Switching to in-process thread compilation."
+        )
+
+    # In-process standalone background thread fallback
+    if not dispatched_via_celery:
+        prune_old_tasks()
+        with TASK_STORE_LOCK:
+            STANDALONE_TASK_STORE[task_id] = {
+                "state": "PROGRESS",
+                "progress": 10,
+                "status": "Starting in-process compilation...",
+                "created_at": time.time(),
+                "result": None,
+                "error": None
+            }
+        thread = threading.Thread(
+            target=execute_in_process_compilation,
+            args=(task_id, compiled_meta),
+            daemon=True
+        )
+        thread.start()
 
     return {
         "status": "queued",
-        "task_id": task.id,
+        "task_id": task_id,
         "format": clean_format,
         "active_cycle": target_period,
         "combined_plan_cost_php": str(certified_total),
@@ -4118,6 +4221,39 @@ def trigger_document_generation(
 
 @router.get("/governance/task-status/{task_id}")
 def get_task_status(task_id: str, admin: dict = Depends(require_admin)):
+    """
+    Checks the status of a document compilation task.
+    Transparently supports both in-process standalone tasks and Celery AsyncResults.
+    """
+    # 1. Inspect in-memory task store first
+    with TASK_STORE_LOCK:
+        if task_id in STANDALONE_TASK_STORE:
+            info = STANDALONE_TASK_STORE[task_id]
+            state = info.get("state", "PROGRESS")
+            progress = info.get("progress", 50)
+            status_msg = info.get("status", "Rendering...")
+            
+            if state == "SUCCESS":
+                return {
+                    "state": "SUCCESS",
+                    "progress_percent": 100,
+                    "current_step_message": "Compilation Complete",
+                    "result": info.get("result")
+                }
+            elif state == "FAILURE":
+                return {
+                    "state": "FAILURE",
+                    "progress_percent": 100,
+                    "current_step_message": "Compilation Failed",
+                    "error": info.get("error", "Unknown compilation error.")
+                }
+            return {
+                "state": state,
+                "progress_percent": progress,
+                "current_step_message": status_msg
+            }
+
+    # 2. Fallback to Celery AsyncResult if available
     try:
         from celery.result import AsyncResult
         from app.celery_app import celery_app
@@ -4125,13 +4261,36 @@ def get_task_status(task_id: str, admin: dict = Depends(require_admin)):
 
         if res.state == "PROGRESS":
             meta = res.info or {}
-            return {"state": "PROGRESS", "progress_percent": meta.get("progress", 50), "current_step_message": meta.get("status", "Rendering...")}
+            return {
+                "state": "PROGRESS", 
+                "progress_percent": meta.get("progress", 50), 
+                "current_step_message": meta.get("status", "Rendering...")
+            }
         elif res.state == "SUCCESS":
-            return {"state": "SUCCESS", "progress_percent": 100, "current_step_message": "Compilation Complete", "result": res.result}
+            return {
+                "state": "SUCCESS", 
+                "progress_percent": 100, 
+                "current_step_message": "Compilation Complete", 
+                "result": res.result
+            }
         elif res.state == "FAILURE":
-            return {"state": "FAILURE", "progress_percent": 100, "current_step_message": "Compilation Failed", "error": str(res.info)}
+            return {
+                "state": "FAILURE", 
+                "progress_percent": 100, 
+                "current_step_message": "Compilation Failed", 
+                "error": str(res.info)
+            }
 
-        return {"state": res.state, "progress_percent": 10, "current_step_message": f"Task state: {res.state}"}
+        return {
+            "state": res.state, 
+            "progress_percent": 10, 
+            "current_step_message": f"Task state: {res.state}"
+        }
     except Exception as e:
         logger.error(f"Task status poll error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to query worker status.")
+        return {
+            "state": "FAILURE",
+            "progress_percent": 100,
+            "current_step_message": "Compilation worker unreachable.",
+            "error": f"Task status poll error: {str(e)}"
+        }

@@ -1,100 +1,19 @@
 // frontend/src/api/admin.js
+import { API_BASE_URL, handleResponse, getStoredToken } from "./apiClient.js";
 
-const getApiBaseUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
-      return origin;
-    }
-  }
-  const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  return rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
-};
-
-export const API_BASE_URL = getApiBaseUrl();
-
-/**
- * Enhanced error parsing handler that formats Pydantic validation arrays,
- * unpacks DICT Singularity DAG violation envelopes, handles session expiration,
- * and attaches structured violation details to the thrown Error object.
- */
-async function handleResponse(res, errorMessage) {
-  if (!res.ok) {
-    // Session expiration handler: redirect cleanly to login if unauthorized
-    if (res.status === 401 && typeof window !== "undefined") {
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("token");
-      localStorage.removeItem("user_role");
-      localStorage.removeItem("department_id");
-      localStorage.removeItem("user_email");
-      const currentPath = window.location.pathname + window.location.search;
-      if (!currentPath.includes("/login")) {
-        window.location.href = `/login?expired=true&redirect=${encodeURIComponent(currentPath)}`;
-      }
-    }
-
-    let detailMessage = "";
-    let rawErrorData = null;
-    try {
-      rawErrorData = await res.json();
-      if (rawErrorData) {
-        if (typeof rawErrorData.detail === "string") {
-          detailMessage = rawErrorData.detail;
-        } else if (Array.isArray(rawErrorData.detail)) {
-          // Format Pydantic field-level validation errors
-          detailMessage = rawErrorData.detail
-            .map((err) => {
-              const field = err.loc ? err.loc.filter((p) => p !== "body").join(" -> ") : "";
-              return field ? `[${field}]: ${err.msg || JSON.stringify(err)}` : (err.msg || JSON.stringify(err));
-            })
-            .join(" | ");
-        } else if (typeof rawErrorData.detail === "object" && rawErrorData.detail !== null) {
-          // Format DICT Singularity Engine violations list
-          if (Array.isArray(rawErrorData.detail.violations)) {
-            detailMessage = `${rawErrorData.detail.error || "Integrity Violation"}:\n• ${rawErrorData.detail.violations.join("\n• ")}`;
-          } else {
-            detailMessage = JSON.stringify(rawErrorData.detail);
-          }
-        } else if (Array.isArray(rawErrorData.violations)) {
-          detailMessage = `${rawErrorData.error || "Integrity Violation"}:\n• ${rawErrorData.violations.join("\n• ")}`;
-        } else if (rawErrorData.message) {
-          detailMessage = rawErrorData.message;
-        }
-      }
-    } catch {
-      detailMessage = await res.text().catch(() => "");
-    }
-
-    if (!detailMessage || detailMessage === "{}" || detailMessage === "[object Object]") {
-      detailMessage = rawErrorData?.message || `${errorMessage} (HTTP ${res.status})`;
-    }
-
-    const err = new Error(detailMessage);
-    err.status = res.status;
-    err.data = rawErrorData;
-    const violationList = rawErrorData?.detail?.violations || rawErrorData?.violations;
-    if (Array.isArray(violationList)) {
-      err.violations = violationList;
-    }
-    throw err;
-  }
-  if (res.status === 204) {
-    return null;
-  }
-  return res.json();
-}
+// Re-export API_BASE_URL so existing modules importing it from admin.js remain fully compatible
+export { API_BASE_URL };
 
 /**
  * Resolves standard authorization and content-type headers.
- * Safely falls back to localStorage if the token argument is omitted.
+ * Safely falls back to stored tokens if the explicit token parameter is omitted.
+ *
+ * @param {string|null} token - Optional explicit Bearer JWT
+ * @param {boolean} isMultipart - If true, omits Content-Type so browser sets boundary
+ * @returns {Record<string, string>}
  */
 const getHeaders = (token, isMultipart = false) => {
-  const resolvedToken = token || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : null);
+  const resolvedToken = token || getStoredToken() || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : null);
   const headers = {};
 
   if (resolvedToken) {
@@ -510,7 +429,7 @@ export const createStakeholder = async (token, cycleOrPayload, maybePayload = nu
   let body = cycleOrPayload;
 
   if (typeof cycleOrPayload === "string" && maybePayload) {
-    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cyclePayload)}/stakeholders`;
+    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload)}/stakeholders`;
     body = maybePayload;
   } else if (typeof cycleOrPayload === "object" && cycleOrPayload?.issp_period) {
     url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload.issp_period)}/stakeholders`;
@@ -1208,13 +1127,11 @@ export const getNarrative = async (token, cycle) => {
 };
 
 export const updateNarrative = async (token, cycle, payload) => {
-  // Normalize plain-text fields and ensure exact cover sheet signatory names are preserved
   const cioResolvedName = (payload.signatory_prepared_by || payload.cio_name || "").trim();
   const headResolvedName = (payload.signatory_approved_by || payload.head_of_agency_name || "").trim();
 
   const formattedPayload = {
     ...payload,
-    // Explicitly preserve Cover Page Signatory names (prevent defaulting or empty rendering)
     cio_name: cioResolvedName || undefined,
     head_of_agency_name: headResolvedName || undefined,
     signatory_prepared_by: cioResolvedName || undefined,
@@ -1222,7 +1139,6 @@ export const updateNarrative = async (token, cycle, payload) => {
     preparer_position: payload.preparer_position || payload.cio_position || "Chief Information Officer",
     agency_head_position: payload.agency_head_position || payload.agency_head_title || payload.head_of_agency_position || undefined,
     
-    // Core Institutional Narrative Text
     mandate_text: payload.mandate_text || payload.mandate_html || payload.legal_basis || "",
     functions: payload.functions || undefined,
     vision_text: payload.vision_text || payload.vision_html || payload.vision_statement || "",
@@ -1234,12 +1150,10 @@ export const updateNarrative = async (token, cycle, payload) => {
     drbcp_compliance_narrative_text: payload.drbcp_compliance_narrative_text || payload.drbcp_compliance_narrative_html || undefined,
     drbcp_approval_date: payload.drbcp_approval_date || payload.approval_date || undefined,
     
-    // Single Institutional Logo (Primary agency seal)
     agency_logo_url: payload.agency_logo_url !== undefined ? payload.agency_logo_url : undefined,
     dict_logo_url: payload.dict_logo_url !== undefined ? payload.dict_logo_url : undefined,
     bagong_pilipinas_logo_url: payload.bagong_pilipinas_logo_url !== undefined ? payload.bagong_pilipinas_logo_url : undefined,
     
-    // Technical Architecture & Topology Exhibits
     existing_ict_org_url: payload.existing_ict_org_url !== undefined ? payload.existing_ict_org_url : undefined,
     proposed_ict_org_url: payload.proposed_ict_org_url !== undefined ? payload.proposed_ict_org_url : undefined,
     site_development_plan_url: payload.site_development_plan_url !== undefined ? payload.site_development_plan_url : undefined,
@@ -1249,7 +1163,6 @@ export const updateNarrative = async (token, cycle, payload) => {
     system_architecture_url: payload.system_architecture_url !== undefined ? payload.system_architecture_url : undefined
   };
 
-  // Defensively remove legacy keys from payload
   delete formattedPayload.mandate_html;
   delete formattedPayload.vision_html;
   delete formattedPayload.mission_html;
@@ -1378,11 +1291,6 @@ export const deleteProposal = async (token, id) => {
   return handleResponse(res, "Failed to delete proposal");
 };
 
-/**
- * Approves a proposal in the review queue.
- * Transacts governance fields (project_id, outcome_id, uacs_object_code) simultaneously
- * to ensure that unlinked capital outlays are quarantined and accounted for accurately.
- */
 export const approveProposal = async (token, id, payload = null) => {
   const options = {
     method: "PUT",
@@ -1427,9 +1335,6 @@ export const overrideProposal = async (token, id, payload) => {
   return handleResponse(res, "Failed to override proposal");
 };
 
-/**
- * Executes multi-select batch approval of proposals in a single transaction.
- */
 export const batchApproveProposals = async (token, proposalIds) => {
   const payload = Array.isArray(proposalIds) ? { proposal_ids: proposalIds } : proposalIds;
   const res = await fetch(`${API_BASE_URL}/api/admin/proposals/batch-approve`, {
@@ -1478,10 +1383,6 @@ export const getTaskStatus = async (token, taskId) => {
   return handleResponse(res, "Failed to query compilation task status");
 };
 
-/**
- * Transparent statutory procurement archive retrieval handler.
- * Provides immediate access to official document canvases without manual restore delays.
- */
 export const retrieveArchivedDocument = async (token, payload) => {
   const res = await fetch(`${API_BASE_URL}/api/admin/governance/restore-document`, {
     method: "POST",

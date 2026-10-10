@@ -6,43 +6,46 @@
  * ==============================================================================
  */
 
-// Dynamically resolves API root: prioritizes current browser origin in production
-// (Azure App Service / live domains) to prevent Vite from hardcoding localhost:8000,
-// while preserving local development server behavior on port 5173 or 3000.
-const getBaseUrl = () => {
+/**
+ * Dynamically resolves API root: prioritizes current browser origin in production
+ * (Azure App Service / live custom domains) to prevent Vite from hardcoding localhost:8000,
+ * while preserving local development server behavior on port 5173 or 3000.
+ */
+export const getBaseUrl = () => {
   // 1. If running in browser and deployed (not on local Vite dev server ports):
   if (typeof window !== "undefined" && window.location?.origin) {
     const { hostname, origin, port } = window.location;
-    if (
-      port !== "5173" &&
-      port !== "3000" &&
-      hostname !== "localhost" &&
-      hostname !== "127.0.0.1"
-    ) {
+    const isLocalHost = hostname === "localhost" || hostname === "127.0.0.1";
+    const isDevPort = port === "5173" || port === "3000";
+
+    if (!isDevPort && !isLocalHost) {
       return origin;
     }
   }
 
-  // 2. Local development fallback:
+  // 2. Environment variable configuration fallback:
   const envUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
-  if (envUrl && envUrl.trim() !== "") {
+  if (envUrl && typeof envUrl === "string" && envUrl.trim() !== "") {
     return envUrl.trim().endsWith("/") ? envUrl.trim().slice(0, -1) : envUrl.trim();
   }
 
+  // 3. Standard local development backend default:
   return "http://localhost:8000";
 };
 
 export const API_BASE_URL = getBaseUrl();
+export const API_ROOT = API_BASE_URL;
 
 /**
  * Retrieves the stored JWT access token from localStorage safely.
+ * Checks both 'access_token' and 'token' keys for maximum resilience.
  *
  * @returns {string|null}
  */
 export function getStoredToken() {
   if (typeof window === "undefined") return null;
   try {
-    return localStorage.getItem("access_token");
+    return localStorage.getItem("access_token") || localStorage.getItem("token") || null;
   } catch {
     return null;
   }
@@ -55,6 +58,7 @@ export function clearAuthSession() {
   if (typeof window === "undefined") return;
   try {
     localStorage.removeItem("access_token");
+    localStorage.removeItem("token");
     localStorage.removeItem("user_role");
     localStorage.removeItem("department_id");
     localStorage.removeItem("user_email");
@@ -67,16 +71,37 @@ export function clearAuthSession() {
  * Handles expired authentication sessions by preserving the user's current route
  * and safely redirecting to the login screen.
  */
-function handleSessionExpired() {
+export function handleSessionExpired() {
   clearAuthSession();
   if (typeof window !== "undefined") {
     const currentPath = window.location.pathname + window.location.search;
     if (!currentPath.includes("/login")) {
-      window.location.href = `/login?expired=true&redirect=${encodeURIComponent(
-        currentPath
-      )}`;
+      window.location.href = `/login?expired=true&redirect=${encodeURIComponent(currentPath)}`;
     }
   }
+}
+
+/**
+ * Standardized header resolver shared across all API modules (admin.js, dept.js, auth.js).
+ * Omit Content-Type when isMultipart is true so the browser configures boundary headers automatically.
+ *
+ * @param {string|null} token - Optional explicit token override
+ * @param {boolean} isMultipart - True when sending FormData
+ * @returns {HeadersInit}
+ */
+export function getHeaders(token = null, isMultipart = false) {
+  const resolvedToken = token || getStoredToken();
+  const headers = {};
+
+  if (resolvedToken) {
+    headers["Authorization"] = `Bearer ${resolvedToken}`;
+  }
+
+  if (!isMultipart) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  return headers;
 }
 
 /**
@@ -85,7 +110,7 @@ function handleSessionExpired() {
  * @param {string} fieldKey
  * @returns {string}
  */
-function humanizeFieldName(fieldKey) {
+export function humanizeFieldName(fieldKey) {
   if (!fieldKey) return "";
   const specialMap = {
     uacs_object_code: "UACS Object Code",
@@ -129,6 +154,8 @@ function humanizeFieldName(fieldKey) {
 
 /**
  * Comprehensive HTTP response parser.
+ * Unpacks Pydantic field validation arrays, extracts DICT Singularity Graph violations,
+ * and intercepts 401 expirations cleanly.
  *
  * @param {Response} res - Native Fetch Response object
  * @param {string} fallbackMessage - Default message if parsing fails
@@ -165,7 +192,7 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
               const fieldName = humanizeFieldName(fieldParts.join(" "));
               const rawMsg = err.msg || "Invalid parameter";
               const cleanMsg = rawMsg.charAt(0).toUpperCase() + rawMsg.slice(1);
-              return fieldName ? `${fieldName}: ${cleanMsg}` : cleanMsg;
+              return fieldName ? `[${fieldName}]: ${cleanMsg}` : cleanMsg;
             })
             .join(" | ");
         } else if (violationList.length > 0) {
@@ -321,6 +348,17 @@ export const apiClient = {
       body: formData,
     });
     return handleResponse(res, `Upload to ${endpoint} failed`);
+  },
+
+  async blob(endpoint, options = {}) {
+    const res = await customFetch(endpoint, {
+      ...options,
+      method: options.method || "GET",
+    });
+    if (!res.ok) {
+      return handleResponse(res, `Download from ${endpoint} failed`);
+    }
+    return res.blob();
   },
 };
 

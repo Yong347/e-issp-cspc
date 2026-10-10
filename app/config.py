@@ -46,13 +46,24 @@ class Settings:
         _raw_db_url = _raw_db_url.replace("postgres://", "postgresql+psycopg2://", 1)
     elif _raw_db_url.startswith("postgresql://") and not _raw_db_url.startswith("postgresql+"):
         _raw_db_url = _raw_db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+    # Azure PostgreSQL Flexible Server strictly requires SSL
+    if "postgres.database.azure.com" in _raw_db_url and "sslmode=" not in _raw_db_url:
+        _sep = "&" if "?" in _raw_db_url else "?"
+        _raw_db_url = f"{_raw_db_url}{_sep}sslmode=require"
+
     DATABASE_URL: str = _raw_db_url
 
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # Celery Broker / Result Backend URL
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0").strip()
     STORAGE_TYPE: str = os.getenv("STORAGE_TYPE", "local").lower().strip()
     
+    # Cloud / Azure Environment Detection
+    _website_host = os.getenv("WEBSITE_HOSTNAME")
+    _default_api_base = f"https://{_website_host}" if _website_host else "http://localhost:8000"
+
     # Absolute Backend API Path used to solve cross-origin asset links
-    API_BASE_URL: str = os.getenv("API_BASE_URL", "http://localhost:8000")
+    API_BASE_URL: str = os.getenv("API_BASE_URL", _default_api_base).rstrip("/")
     
     # S3 Storage Credentials & Settings
     AWS_ACCESS_KEY_ID: Optional[str] = os.getenv("AWS_ACCESS_KEY_ID")
@@ -68,7 +79,6 @@ class Settings:
     ]
 
     # Cryptographic keys and default passwords
-    # SECRET_KEY uses a secure dev fallback when not configured in local/test environments
     SECRET_KEY: str = os.getenv("SECRET_KEY", "temporary_insecure_development_secret_key_change_in_production")
     
     # Legacy EncryptedJSON keys are optional (prevents hard boot crashes when using plain JSON)
@@ -77,24 +87,46 @@ class Settings:
     
     DEFAULT_SEED_PASSWORD: str = os.getenv("DEFAULT_SEED_PASSWORD", "admin123")
     
-    # CORS Configurations - Enforced statically to prevent port expansion vulnerabilities.
+    # Dynamic CORS Configurations (Automatically whitelists current Azure App Service domain)
+    _default_cors = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000"
+    ]
+    if _website_host:
+        _default_cors.extend([
+            f"https://{_website_host}",
+            f"http://{_website_host}"
+        ])
+
+    _raw_cors = os.getenv("CORS_ORIGINS", ",".join(_default_cors))
     CORS_ORIGINS: List[str] = [
         origin.strip()
-        for origin in os.getenv(
-            "CORS_ORIGINS", 
-            "http://localhost:3000,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:8000"
-        ).split(",")
+        for origin in _raw_cors.split(",")
         if origin.strip()
     ]
+    if _website_host:
+        for proto in ["https://", "http://"]:
+            h = f"{proto}{_website_host}"
+            if h not in CORS_ORIGINS:
+                CORS_ORIGINS.append(h)
 
     # Global ceiling limit for financial planning validation checks
     GLOBAL_BUDGET_CEILING: Decimal = Decimal(os.getenv("GLOBAL_BUDGET_CEILING", "200000000.00"))
 
     # Local Directory Configurations
+    # On Azure App Service Linux, /home is persistent storage mounted across restarts
     BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    LOCAL_UPLOAD_DIR: str = os.getenv("LOCAL_UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
+    _is_azure = bool(_website_host or os.getenv("WEBSITE_SITE_NAME") or os.getenv("HOME") == "/home")
+    _default_upload_dir = "/home/uploads" if (_is_azure and os.path.exists("/home")) else os.path.join(BASE_DIR, "uploads")
+    LOCAL_UPLOAD_DIR: str = os.getenv("LOCAL_UPLOAD_DIR", _default_upload_dir)
 
-    # Celery worker reliability and resource limit parameters
+    # Celery Worker Reliability, Fail-Fast & Resource Parameters
+    CELERY_ALWAYS_EAGER: bool = os.getenv("CELERY_ALWAYS_EAGER", "false").lower() in ("true", "1", "yes")
+    CELERY_BROKER_MAX_RETRIES: int = int(os.getenv("CELERY_BROKER_MAX_RETRIES", "2"))
     CELERY_TASK_REJECT_ON_WORKER_LOST: bool = os.getenv("CELERY_TASK_REJECT_ON_WORKER_LOST", "true").lower() in ("true", "1", "yes")
     CELERY_WORKER_MAX_TASKS_PER_CHILD: int = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", "100"))
     CELERY_TASK_SOFT_TIME_LIMIT: int = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "1500"))  # 25 minutes

@@ -50,6 +50,72 @@ from app.utils.helpers import (
 
 logger = logging.getLogger(__name__)
 
+# =========================================================================
+# IN-MEMORY TASK STORE FOR STANDALONE & NON-REDIS RUNTIMES
+# =========================================================================
+TASK_PROGRESS_STORE: Dict[str, Dict[str, Any]] = {}
+
+
+def get_task_progress(task_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves in-memory task status for environments running without a Celery/Redis broker."""
+    return TASK_PROGRESS_STORE.get(str(task_id))
+
+
+def set_task_progress(
+    task_id: str, 
+    state: str, 
+    percent: int, 
+    message: str, 
+    result: Any = None, 
+    error: Any = None
+) -> None:
+    """Stores task status in memory for fast polling without broker roundtrips."""
+    TASK_PROGRESS_STORE[str(task_id)] = {
+        "task_id": str(task_id),
+        "state": state,
+        "progress_percent": percent,
+        "current_step_message": message,
+        "result": result,
+        "error": error,
+        "timestamp": time.time()
+    }
+
+
+def safe_update_progress(
+    task: Any, 
+    state: str, 
+    percent: int, 
+    message: str, 
+    result: Any = None, 
+    error: Any = None
+) -> None:
+    """
+    Safely pushes task status to both in-memory store and Celery backend.
+    Never raises exceptions if Redis is down or unreachable.
+    """
+    task_id = None
+    if task and hasattr(task, "request") and getattr(task.request, "id", None):
+        task_id = str(task.request.id)
+    elif isinstance(task, str):
+        task_id = task
+
+    if task_id:
+        set_task_progress(task_id, state, percent, message, result, error)
+
+    if task and hasattr(task, "update_state") and callable(getattr(task, "update_state")):
+        try:
+            task.update_state(
+                state=state, 
+                meta={
+                    "progress": percent,
+                    "progress_percent": percent,
+                    "status": message,
+                    "current_step_message": message
+                }
+            )
+        except Exception as exc:
+            logger.debug("safe_update_progress Celery backend push note: %s", exc)
+
 
 def clean_text(val: Optional[str], default: str = "") -> str:
     """Sanitizes text, stripping dummy placeholder strings like 'testtt...'."""
@@ -243,11 +309,12 @@ def resolve_proposal_category(itm: Proposal) -> str:
 )
 def compile_issp_document(self, metadata: dict):
     db = SessionLocal()
+    task_ref = self
     try:
         issp_period = metadata.get("issp_period_years", "2028-2030")
         export_format = metadata.get("export_format", "pdf").lower().strip()
         
-        self.update_state(state="PROGRESS", meta={"progress": 15, "status": "Certifying graph singularity and legal linkages..."})
+        safe_update_progress(task_ref, "PROGRESS", 15, "Certifying graph singularity and legal linkages...")
         try:
             ISSPSingularityEngine.validate_complete_issp_graph(db, issp_period)
         except Exception as exc:
@@ -260,7 +327,7 @@ def compile_issp_document(self, metadata: dict):
                 raise ValueError(f"ISSP Singularity Validation Failed: {detail}") from None
             raise ValueError(str(exc)) from None
 
-        self.update_state(state="PROGRESS", meta={"progress": 30, "status": "Asserting four-way financial parity..."})
+        safe_update_progress(task_ref, "PROGRESS", 30, "Asserting four-way financial parity...")
         try:
             parity_data = calculate_financial_summaries(db, issp_period, only_approved=True)
         except TypeError:
@@ -275,7 +342,7 @@ def compile_issp_document(self, metadata: dict):
                 f"Maximum Discrepancy: ₱{parity_data['parity_discrepancy']:,.2f}."
             )
 
-        self.update_state(state="PROGRESS", meta={"progress": 45, "status": "Extracting certified graph artifacts..."})
+        safe_update_progress(task_ref, "PROGRESS", 45, "Extracting certified graph artifacts...")
         narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
         if not narrative:
             raise ValueError(f"Active planning cycle '{issp_period}' is not configured in the database.")
@@ -394,7 +461,7 @@ def compile_issp_document(self, metadata: dict):
 
         # DUAL OUTPUT BRANCHING: WORD (.DOCX) VS PDF
         if export_format == "docx":
-            self.update_state(state="PROGRESS", meta={"progress": 70, "status": "Building editable Word (.docx) document structure..."})
+            safe_update_progress(task_ref, "PROGRESS", 70, "Building editable Word (.docx) document structure...")
             from app.services.docx_generator import create_issp_docx
             docx_buffer = create_issp_docx(
                 narrative=narrative,
@@ -449,7 +516,7 @@ def compile_issp_document(self, metadata: dict):
                 db.rollback()
                 logger.warning(f"Could not persist final_docx_vault_url: {db_save_err}")
 
-            return {
+            result_payload = {
                 "status": "SUCCESS",
                 "file_url": download_url,
                 "certified_grand_total": str(parity_data["certified_grand_total"]),
@@ -457,31 +524,46 @@ def compile_issp_document(self, metadata: dict):
                 "format": "docx",
                 "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")
             }
+            safe_update_progress(task_ref, "SUCCESS", 100, "Word (.docx) compilation complete.", result=result_payload)
+            return result_payload
 
         # DEFAULT: WEASYPRINT PDF COMPILATION
-        self.update_state(state="PROGRESS", meta={"progress": 65, "status": "Compiling dynamic DICT v.2026 HTML templates..."})
+        safe_update_progress(task_ref, "PROGRESS", 65, "Compiling dynamic DICT v.2026 HTML templates...")
         html_content = generate_complete_issp_html(
             db, narrative, outcomes, concerns, systems, projects, performance_metrics, items, inventory,
             human_capitals, staff_positions, stakeholders, egov_checklists,
             glossary, network_infra, cyber_controls, dr_teams, dr_bias, dr_metrics, parity_data
         )
 
-        self.update_state(state="PROGRESS", meta={"progress": 80, "status": "Rendering PDF binary via layout engine..."})
+        safe_update_progress(task_ref, "PROGRESS", 80, "Rendering PDF binary via layout engine...")
         try:
             from weasyprint import HTML
-        except OSError as os_err:
-            raise RuntimeError(
-                f"WeasyPrint OS shared libraries missing: {str(os_err)}. "
-                "Ensure libpango-1.0-0, libcairo2, and libgobject-2.0-0 are installed."
-            ) from os_err
+        except (OSError, ImportError) as os_err:
+            error_msg = (
+                f"WeasyPrint native OS libraries missing: {str(os_err)}. "
+                "Ensure libpango-1.0-0, libcairo2, and libgobject-2.0-0 are installed. "
+                "Alternatively, export as Word (.docx) format."
+            )
+            safe_update_progress(task_ref, "FAILURE", 100, "WeasyPrint OS library missing.", error=error_msg)
+            raise RuntimeError(error_msg) from os_err
 
         pdf_buffer = io.BytesIO()
         base_dir = str(Path(settings.LOCAL_UPLOAD_DIR).parent) if hasattr(settings, "LOCAL_UPLOAD_DIR") else None
-        html_doc = HTML(string=html_content, base_url=base_dir)
-        html_doc.write_pdf(target=pdf_buffer)
+        try:
+            html_doc = HTML(string=html_content, base_url=base_dir)
+            html_doc.write_pdf(target=pdf_buffer)
+        except OSError as render_os_err:
+            error_msg = (
+                f"WeasyPrint rendering failed: {str(render_os_err)}. "
+                "Host environment lacks required Pango/Cairo C-libraries. "
+                "Export as Word (.docx) format or run in container."
+            )
+            safe_update_progress(task_ref, "FAILURE", 100, "Rendering failed.", error=error_msg)
+            raise RuntimeError(error_msg) from render_os_err
+
         pdf_bytes = pdf_buffer.getvalue()
 
-        self.update_state(state="PROGRESS", meta={"progress": 95, "status": "Archiving certified binary to secure institutional vault..."})
+        safe_update_progress(task_ref, "PROGRESS", 95, "Archiving certified binary to secure institutional vault...")
         issp_id = f"ISSP-{issp_period}-FINAL"
         storage_client.upload_compiled_pdf(pdf_bytes, issp_id)
         download_url = storage_client.generate_download_url(storage_client.get_generated_pdf_key(issp_id))
@@ -497,7 +579,7 @@ def compile_issp_document(self, metadata: dict):
             db.rollback()
             logger.warning(f"Failed to record final_pdf_vault_url to MasterNarrative: {db_save_err}")
 
-        return {
+        result_payload = {
             "status": "SUCCESS",
             "file_url": download_url,
             "certified_grand_total": str(parity_data["certified_grand_total"]),
@@ -505,14 +587,19 @@ def compile_issp_document(self, metadata: dict):
             "format": "pdf",
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")
         }
+        safe_update_progress(task_ref, "SUCCESS", 100, "PDF compilation complete.", result=result_payload)
+        return result_payload
 
     except SoftTimeLimitExceeded:
         db.rollback()
         logger.error("Timeout exceeded during document compilation.")
-        raise Exception("CompilationError: Execution time limit exceeded.")
+        timeout_msg = "CompilationError: Execution time limit exceeded."
+        safe_update_progress(task_ref, "FAILURE", 100, "Compilation timed out.", error=timeout_msg)
+        raise Exception(timeout_msg)
     except Exception as e:
         db.rollback()
         logger.error(f"Compilation failure: {str(e)}", exc_info=True)
+        safe_update_progress(task_ref, "FAILURE", 100, "Compilation failed.", error=str(e))
         raise e
     finally:
         db.close()

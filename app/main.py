@@ -82,7 +82,7 @@ logging.basicConfig(
 logger = logging.getLogger("app.main")
 
 # Resolve allowed CORS origins safely
-cors_origins = settings.CORS_ORIGINS
+cors_origins = list(settings.CORS_ORIGINS) if isinstance(settings.CORS_ORIGINS, list) else []
 if not cors_origins:
     cors_origins = [
         "http://localhost:5173",
@@ -94,6 +94,14 @@ if not cors_origins:
     ]
 elif isinstance(cors_origins, str):
     cors_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+
+# Automatically add live Azure App Service hostname to CORS whitelist if running on Azure
+azure_host = os.getenv("WEBSITE_HOSTNAME")
+if azure_host:
+    for scheme in ("https://", "http://"):
+        origin_val = f"{scheme}{azure_host}"
+        if origin_val not in cors_origins:
+            cors_origins.append(origin_val)
 
 
 def patch_resilient_encrypted_json():
@@ -621,7 +629,7 @@ def align_database_schemas(engine):
         if not active_period:
             active_period = conn.execute(text(
                 "SELECT value FROM system_settings WHERE key = 'issp_active_cycle' LIMIT 1"
-            )).scalar() or getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+            )).scalar() or getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
 
         # Seed Baseline Stakeholder Analysis ONLY if table is completely empty for active cycle
         stakeholders_count = conn.execute(
@@ -1216,19 +1224,27 @@ def align_database_schemas(engine):
                     VALUES 
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'National Prioritization (PDP 2023-2028)', {bool_false}, {bool_true}, 1),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Resource Optimization (GovNet, GovCloud)', {bool_false}, {bool_true}, 2),
-                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Resource Optimization (GovNet, GovCloud)', {bool_false}, {bool_true}, 2),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'PeGIF Standardized APIs & Interoperability', {bool_true}, {bool_true}, 3),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Cross-Agency Collaboration (JMC / MOA)', {bool_false}, {bool_true}, 4),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Scalability and Sustainability (SPAR / PREXC)', {bool_true}, {bool_true}, 5);
                 """))
 
         if "system_settings" in table_names:
+            active_default_cycle = getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
+            start_yr = int(active_default_cycle.split("-")[0]) if "-" in active_default_cycle else 2026
+            default_inflation = json.dumps({
+                str(start_yr): 0.0,
+                str(start_yr + 1): 3.0,
+                str(start_yr + 2): 5.0
+            })
+
             defaults = [
                 ("capitalization_threshold", "50000.00"),
                 ("major_outlay_review_threshold", "2000000.00"),
-                ("inflation_rates_by_year", '{"2028": 0.0, "2029": 3.0, "2030": 5.0}'),
+                ("inflation_rates_by_year", default_inflation),
                 ("hardware_replacement_buffer_units", "3"),
                 ("canvas_expiration_warning_days", "14"),
+                ("issp_active_cycle", active_default_cycle),
             ]
             for k, v in defaults:
                 safe_exec(conn, text(f"""
@@ -1288,11 +1304,15 @@ async def lifespan(app: FastAPI):
                 dept_instances = bootstrap_metadata(db)
                 seed_pwd = getattr(settings, "DEFAULT_SEED_PASSWORD", None) or "admin123"
                 allowed = getattr(settings, "ALLOWED_EMAIL_DOMAINS", ["*"])
-                seed_domain = "cspc.edu.ph"
+                seed_domain = "agency.gov.ph"
                 for d in allowed:
                     if d and d != "*":
                         seed_domain = d.strip().lower()
                         break
+                if seed_domain == "agency.gov.ph" and hasattr(settings, "DEFAULT_AGENCY_WEBSITE"):
+                    site_domain = settings.DEFAULT_AGENCY_WEBSITE.replace("https://", "").replace("http://", "").split("/")[0]
+                    if site_domain:
+                        seed_domain = site_domain
 
                 onboard_user(db, f"mis@{seed_domain}", seed_pwd, "mis_admin", None, dept_instances)
                 onboard_user(db, f"planner@{seed_domain}", seed_pwd, "dept_user", "Public Frontline Services and Operations Division", dept_instances)
@@ -1436,7 +1456,7 @@ async def business_rule_exception_handler(request: Request, exc: BusinessRuleVio
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         headers=get_cors_headers(request),
-        content={"detail": str(exc)}
+        content={"detail": jsonable_encoder(str(exc))}
     )
 
 
@@ -1445,7 +1465,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         headers=get_cors_headers(request),
-        content={"detail": exc.detail}
+        content={"detail": jsonable_encoder(exc.detail)}
     )
 
 
@@ -1475,18 +1495,17 @@ app.include_router(dept_router)
 app.include_router(admin_router)
 app.include_router(supply_router)
 
-# Mount local upload file system statically
-if settings.STORAGE_TYPE == "local":
-    try:
-        os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
-        app.mount(
-            "/static/uploads", 
-            StaticFiles(directory=settings.LOCAL_UPLOAD_DIR), 
-            name="static"
-        )
-        logger.info(f"Successfully mounted local uploads directory: {settings.LOCAL_UPLOAD_DIR}")
-    except Exception as e:
-        logger.error(f"Failed to configure or mount local upload directory: {str(e)}")
+# Mount local upload file system statically (defensive fallback directory creation)
+try:
+    os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
+    app.mount(
+        "/static/uploads", 
+        StaticFiles(directory=settings.LOCAL_UPLOAD_DIR), 
+        name="static"
+    )
+    logger.info(f"Successfully mounted local uploads directory: {settings.LOCAL_UPLOAD_DIR}")
+except Exception as e:
+    logger.error(f"Failed to configure or mount local upload directory: {str(e)}")
 
 
 # ==========================================================
