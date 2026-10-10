@@ -1275,7 +1275,7 @@ def bootstrap_metadata(db):
             drbcp_recovery_strategy_text=drbcp_recovery_strategy_default,
             drbcp_sop_phases_text=drbcp_sop_phases_default,
             drbcp_compliance_narrative_text=drbcp_compliance_narrative_default,
-            subsystem_network_layouts_json=[],
+            # subsystem_network_layouts_json=[],
             is_archived=False,
             final_pdf_vault_url=None,
             final_docx_vault_url=None,

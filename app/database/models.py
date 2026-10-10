@@ -731,7 +731,9 @@ class MasterNarrative(Base):
     drbcp_recovery_strategy_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     drbcp_sop_phases_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     drbcp_compliance_narrative_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
+    
+    subsystem_network_layouts_json: Mapped[Optional[List[Any]]] = mapped_column(JSON, default=list, server_default=text("'[]'"), nullable=True)
+    
     planners_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, server_default=text("'[]'"), nullable=False)
     manpower_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, server_default=text("'{}'"), nullable=True)
     annual_ict_budget: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), server_default=text("0.00"), nullable=False)
