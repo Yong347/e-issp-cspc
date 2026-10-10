@@ -1918,9 +1918,6 @@ def bootstrap_metadata(db):
             agency_logo_url=None,
             dict_logo_url=None,
             bagong_pilipinas_logo_url=None,
-            cert_logo_url=None,
-            cio_signature_url=None,
-            head_signature_url=None,
             is_active=True,
             is_amendment=False,
             amendment_number=None,
@@ -4026,6 +4023,7 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — FASTAPI APPLICATION CORE & LIFESPAN
 =============================================================================
 Core Capabilities:
 - Application Bootstrapping, Dynamic Lifespan Context & Diagnostics
+- Automated Default User & Metadata Bootstrapping on Fresh Deployments
 - Dialect-Agnostic Schema Alignment & Native Operator Cleaning (Postgres/SQLite)
 - Resilience Patching for Cryptographic Decryption & JSON Serialization
 - CORS Security Middleware & Structured JSON Error Handlers
@@ -4041,6 +4039,7 @@ import time
 import json
 import enum
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status, HTTPException
@@ -5235,6 +5234,7 @@ def align_database_schemas(engine):
                     VALUES 
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'National Prioritization (PDP 2023-2028)', {bool_false}, {bool_true}, 1),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Resource Optimization (GovNet, GovCloud)', {bool_false}, {bool_true}, 2),
+                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Resource Optimization (GovNet, GovCloud)', {bool_false}, {bool_true}, 2),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'PeGIF Standardized APIs & Interoperability', {bool_true}, {bool_true}, 3),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Cross-Agency Collaboration (JMC / MOA)', {bool_false}, {bool_true}, 4),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Scalability and Sustainability (SPAR / PREXC)', {bool_true}, {bool_true}, 5);
@@ -5261,6 +5261,7 @@ async def lifespan(app: FastAPI):
     """
     Handles application startup and shutdown procedures safely.
     Defensively verifies schemas, purges legacy tables, patches runtime enums,
+    auto-bootstraps fresh databases with required users and metadata,
     and automatically executes cycle expiration / rollover checks.
     """
     agency_label = getattr(settings, "DEFAULT_AGENCY_NAME", "INSTITUTIONAL")
@@ -5268,7 +5269,6 @@ async def lifespan(app: FastAPI):
     logger.info(f"INITIALIZING {agency_label.upper()} E-ISSP COMPLIANCE ENGINE (DICT v.2026)")
     logger.info("=" * 70)
     
-    # 0. Defensively patch models listener globals
     # 1. Verify and compile database schema structures
     try:
         logger.info("Verifying and registering database schema metadata...")
@@ -5289,7 +5289,38 @@ async def lifespan(app: FastAPI):
     except Exception as enum_err:
         logger.error(f"Runtime enum column patching warning: {str(enum_err)}")
 
-    # 4. Automated Lifecycle Rollover Evaluation on Startup
+    # 4. Automated Default Accounts Bootstrapping on Startup (If Database is Fresh/Empty)
+    try:
+        with SessionLocal() as db:
+            from app.database.models import User
+            if db.query(User).count() == 0:
+                logger.info("Fresh database detected (0 users). Auto-bootstrapping default accounts & metadata...")
+                try:
+                    from seed import bootstrap_metadata, onboard_user
+                except ImportError:
+                    root_dir = Path(__file__).resolve().parent.parent
+                    if str(root_dir) not in sys.path:
+                        sys.path.insert(0, str(root_dir))
+                    from seed import bootstrap_metadata, onboard_user
+
+                dept_instances = bootstrap_metadata(db)
+                seed_pwd = getattr(settings, "DEFAULT_SEED_PASSWORD", None) or "admin123"
+                allowed = getattr(settings, "ALLOWED_EMAIL_DOMAINS", ["*"])
+                seed_domain = "cspc.edu.ph"
+                for d in allowed:
+                    if d and d != "*":
+                        seed_domain = d.strip().lower()
+                        break
+
+                onboard_user(db, f"mis@{seed_domain}", seed_pwd, "mis_admin", None, dept_instances)
+                onboard_user(db, f"planner@{seed_domain}", seed_pwd, "dept_user", "Public Frontline Services and Operations Division", dept_instances)
+                onboard_user(db, f"supply@{seed_domain}", seed_pwd, "supply_user", "Procurement and Property Management Office", dept_instances)
+                db.commit()
+                logger.info(f"Default accounts bootstrapped successfully for domain: @{seed_domain}")
+    except Exception as seed_err:
+        logger.warning(f"Auto-seed during startup note: {str(seed_err)}")
+
+    # 5. Automated Lifecycle Rollover Evaluation on Startup
     try:
         with SessionLocal() as db:
             from app.services.lifecycle_service import ISSPLifecycleEngine
@@ -5298,7 +5329,7 @@ async def lifespan(app: FastAPI):
     except Exception as lc_err:
         logger.warning(f"Lifecycle startup check note: {str(lc_err)}")
 
-    # 5. Scan and Log Registered Routing Tables
+    # 6. Scan and Log Registered Routing Tables
     logger.info("Scanning active API routing tables...")
     routes_registered = []
     for route in app.routes:
@@ -26179,11 +26210,10 @@ VITE_ALLOWED_DOMAINS=cspc.edu.ph
 CORE SYSTEM FILE: ./frontend/.env.production
 =========================================
 
-VITE_API_URL=
-VITE_API_BASE_URL=
+VITE_API_URL=https://e-issp-cspc-dsasc5gff9c7czhg.eastasia-01.azurewebsites.net
+VITE_API_BASE_URL=https://e-issp-cspc-dsasc5gff9c7czhg.eastasia-01.azurewebsites.net
 VITE_DEFAULT_AGENCY_NAME="Camarines Sur Polytechnic Colleges"
 VITE_DEFAULT_AGENCY_HEAD_TITLE="College President"
-
 =========================================
 CORE SYSTEM FILE: ./frontend/.oxlintrc.json
 =========================================
@@ -26980,8 +27010,23 @@ CORE SYSTEM FILE: ./frontend/src/api/admin.js
 
 // frontend/src/api/admin.js
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-export const API_BASE_URL = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+const getApiBaseUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+};
+
+export const API_BASE_URL = getApiBaseUrl();
 
 /**
  * Enhanced error parsing handler that formats Pydantic validation arrays,
@@ -27475,7 +27520,7 @@ export const createStakeholder = async (token, cycleOrPayload, maybePayload = nu
   let body = cycleOrPayload;
 
   if (typeof cycleOrPayload === "string" && maybePayload) {
-    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload)}/stakeholders`;
+    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cyclePayload)}/stakeholders`;
     body = maybePayload;
   } else if (typeof cycleOrPayload === "object" && cycleOrPayload?.issp_period) {
     url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload.issp_period)}/stakeholders`;
@@ -28808,28 +28853,35 @@ CORE SYSTEM FILE: ./frontend/src/api/apiClient.js
  * CENTRALIZED API CLIENT & GLOBAL 401 INTERCEPTOR
  * DICT ISSP v.2026 Compliance Engine Client
  * ==============================================================================
- * Capabilities & Safeguards:
- * - Dynamic Base URL Resolution (VITE_API_URL / VITE_API_BASE_URL fallback)
- * - Automatic Bearer Token Extraction & Authorization Injection
- * - Global 401 Unauthorized Interceptor with Clean Route Preservation
- * - Multi-Part FormData Boundary Protection (Zero Content-Type override)
- * - Comprehensive Human-Readable Error Parsing:
- *    * Pydantic array transformation without machine "body ->" jargon
- *    * DICT Singularity Graph violation list extraction (err.violations)
- *    * Complete elimination of "[object Object]" display bugs
- *    * Rich Error object metadata (err.status, err.data, err.violations)
- * - URL Query Parameter helper integration (options.params support)
- * ==============================================================================
  */
 
-const rawRoot =
-  import.meta.env?.VITE_API_URL ||
-  import.meta.env?.VITE_API_BASE_URL ||
-  "http://localhost:8000";
+// Dynamically resolves API root: prioritizes current browser origin in production
+// (Azure App Service / live domains) to prevent Vite from hardcoding localhost:8000,
+// while preserving local development server behavior on port 5173 or 3000.
+const getBaseUrl = () => {
+  // 1. If running in browser and deployed (not on local Vite dev server ports):
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
 
-export const API_BASE_URL = rawRoot.endsWith("/")
-  ? rawRoot.slice(0, -1)
-  : rawRoot;
+  // 2. Local development fallback:
+  const envUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (envUrl && envUrl.trim() !== "") {
+    return envUrl.trim().endsWith("/") ? envUrl.trim().slice(0, -1) : envUrl.trim();
+  }
+
+  return "http://localhost:8000";
+};
+
+export const API_BASE_URL = getBaseUrl();
 
 /**
  * Retrieves the stored JWT access token from localStorage safely.
@@ -28878,7 +28930,6 @@ function handleSessionExpired() {
 
 /**
  * Formats machine field keys into clean, human-readable titles.
- * e.g., "yearly_quantities" -> "Yearly Quantities", "uacs_object_code" -> "UACS Object Code"
  *
  * @param {string} fieldKey
  * @returns {string}
@@ -28927,8 +28978,6 @@ function humanizeFieldName(fieldKey) {
 
 /**
  * Comprehensive HTTP response parser.
- * Unpacks Pydantic validation arrays, custom DAG violation envelopes,
- * and attaches structured metadata directly to the thrown Error object.
  *
  * @param {Response} res - Native Fetch Response object
  * @param {string} fallbackMessage - Default message if parsing fails
@@ -28947,7 +28996,6 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
     try {
       rawErrorData = await res.json();
       if (rawErrorData) {
-        // 1. Detect Singularity DAG Violations Envelope (Top-level or detail-nested)
         if (Array.isArray(rawErrorData.violations)) {
           violationList = rawErrorData.violations;
         } else if (rawErrorData.detail && Array.isArray(rawErrorData.detail.violations)) {
@@ -28957,7 +29005,6 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
         if (typeof rawErrorData.detail === "string") {
           detailMessage = rawErrorData.detail;
         } else if (Array.isArray(rawErrorData.detail)) {
-          // 2. Format Pydantic field-level validation errors
           detailMessage = rawErrorData.detail
             .map((err) => {
               if (typeof err === "string") return err;
@@ -28971,11 +29018,9 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
             })
             .join(" | ");
         } else if (violationList.length > 0) {
-          // 3. Format DAG Violations Checklist
           const header = rawErrorData.error || rawErrorData.detail?.error || "Compliance Integrity Failure";
           detailMessage = `${header} (${violationList.length} issue${violationList.length > 1 ? "s" : ""}):\n• ${violationList.join("\n• ")}`;
         } else if (rawErrorData.detail && typeof rawErrorData.detail === "object") {
-          // 4. Nested detail object handling (prevent [object Object])
           if (rawErrorData.detail.message) {
             detailMessage = rawErrorData.detail.message;
           } else if (rawErrorData.detail.error) {
@@ -28992,11 +29037,9 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
         }
       }
     } catch {
-      // Body is not JSON (raw text or HTML)
       detailMessage = await res.text().catch(() => "");
     }
 
-    // Safety fallback: Ensure [object Object] is never rendered to the user
     const finalErrorMessage =
       detailMessage && String(detailMessage).trim() !== "[object Object]"
         ? String(detailMessage).trim()
@@ -29012,7 +29055,6 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
     throw errorObj;
   }
 
-  // Handle 204 No Content
   if (res.status === 204) {
     return null;
   }
@@ -29027,9 +29069,9 @@ export async function handleResponse(res, fallbackMessage = "Request failed") {
 /**
  * Central fetch wrapper that injects headers, tokens, query params, and dispatches requests.
  *
- * @param {string} endpoint - API path (e.g. "/api/admin/proposals") or full URL
- * @param {RequestInit & { token?: string, params?: Record<string, any> }} options - Fetch options
- * @returns {Promise<Response>} Native fetch response
+ * @param {string} endpoint - API path or full URL
+ * @param {RequestInit & { token?: string, params?: Record<string, any> }} options
+ * @returns {Promise<Response>}
  */
 export async function customFetch(endpoint, options = {}) {
   let url =
@@ -29037,7 +29079,6 @@ export async function customFetch(endpoint, options = {}) {
       ? endpoint
       : `${API_BASE_URL}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
 
-  // Process optional query parameters dictionary (options.params)
   if (options.params && typeof options.params === "object") {
     const query = new URLSearchParams();
     Object.entries(options.params).forEach(([k, v]) => {
@@ -29057,12 +29098,10 @@ export async function customFetch(endpoint, options = {}) {
 
   const headers = { ...(options.headers || {}) };
 
-  // Inject Authorization header if not explicitly provided
   if (token && !headers["Authorization"] && !headers["authorization"]) {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  // Do not set Content-Type if FormData is used; browser must determine multi-part boundary
   if (!isFormData && !headers["Content-Type"] && !headers["content-type"]) {
     headers["Content-Type"] = "application/json";
   }
@@ -29072,7 +29111,6 @@ export async function customFetch(endpoint, options = {}) {
     headers,
   };
 
-  // Automatically serialize objects into JSON strings if not FormData or URLSearchParams
   if (
     fetchConfig.body &&
     typeof fetchConfig.body === "object" &&
@@ -29096,21 +29134,12 @@ export async function customFetch(endpoint, options = {}) {
   }
 }
 
-/**
- * Standardized API client with helper methods for REST operations.
- */
 export const apiClient = {
-  /**
-   * Performs a GET request and returns parsed JSON.
-   */
   async get(endpoint, options = {}) {
     const res = await customFetch(endpoint, { ...options, method: "GET" });
     return handleResponse(res, `GET ${endpoint} failed`);
   },
 
-  /**
-   * Performs a POST request and returns parsed JSON.
-   */
   async post(endpoint, body = {}, options = {}) {
     const res = await customFetch(endpoint, {
       ...options,
@@ -29120,9 +29149,6 @@ export const apiClient = {
     return handleResponse(res, `POST ${endpoint} failed`);
   },
 
-  /**
-   * Performs a PUT request and returns parsed JSON.
-   */
   async put(endpoint, body = {}, options = {}) {
     const res = await customFetch(endpoint, {
       ...options,
@@ -29132,17 +29158,11 @@ export const apiClient = {
     return handleResponse(res, `PUT ${endpoint} failed`);
   },
 
-  /**
-   * Performs a DELETE request and returns parsed JSON.
-   */
   async delete(endpoint, options = {}) {
     const res = await customFetch(endpoint, { ...options, method: "DELETE" });
     return handleResponse(res, `DELETE ${endpoint} failed`);
   },
 
-  /**
-   * Performs a multipart upload (FormData) and returns parsed JSON.
-   */
   async upload(endpoint, formData, options = {}) {
     const res = await customFetch(endpoint, {
       ...options,
@@ -29160,8 +29180,33 @@ CORE SYSTEM FILE: ./frontend/src/api/auth.js
 
 // frontend/src/api/auth.js
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-export const API_ROOT = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+/**
+ * Dynamically resolves the API root:
+ * In deployed/production browser environments (not running on local Vite dev server ports),
+ * it uses window.location.origin so requests hit the live server instead of localhost:8000.
+ */
+const getApiRoot = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+
+  const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (rawRoot && rawRoot.trim() !== "") {
+    return rawRoot.trim().endsWith("/") ? rawRoot.trim().slice(0, -1) : rawRoot.trim();
+  }
+
+  return "http://localhost:8000";
+};
+
+export const API_ROOT = getApiRoot();
 const BASE_URL = `${API_ROOT}/api/auth`;
 
 /**
@@ -29251,8 +29296,33 @@ CORE SYSTEM FILE: ./frontend/src/api/dept.js
  * ==============================================================================
  */
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-export const API_BASE_URL = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+// Dynamically resolves API root: prioritizes current browser origin in production
+// (Azure App Service / live domains) to prevent Vite from hardcoding localhost:8000,
+// while preserving local development server behavior on port 5173 or 3000.
+const getBaseUrl = () => {
+  // 1. If running in browser and deployed (not on local Vite dev server ports):
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+
+  // 2. Local development fallback:
+  const envUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (envUrl && envUrl.trim() !== "") {
+    return envUrl.trim().endsWith("/") ? envUrl.trim().slice(0, -1) : envUrl.trim();
+  }
+
+  return "http://localhost:8000";
+};
+
+export const API_BASE_URL = getBaseUrl();
 
 /**
  * Builds standard authorization and content headers.
@@ -31039,6 +31109,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useCycle } from "../../context/CycleContext";
 import { useNotifications } from "../../context/NotificationContext";
 import { useTheme } from "../../context/ThemeContext";
+import { API_BASE_URL } from "../../api/apiClient";
 import { 
   Search, Bell, Mail, CheckCircle2, Sun, Moon, 
   LayoutDashboard, FolderKanban, Database, 
@@ -31126,11 +31197,9 @@ export default function DashboardLayout() {
 
   useEffect(() => {
     if (userRole === "ROLE_DEPT_USER") {
-      const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-      const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
       const authToken = user?.token || localStorage.getItem("access_token") || "";
 
-      fetch(`${apiUrl}/api/dept/budget-summary`, {
+      fetch(`${API_BASE_URL}/api/dept/budget-summary`, {
         headers: { Authorization: `Bearer ${authToken}` }
       })
       .then(res => res.ok ? res.json() : null)
@@ -31970,8 +32039,29 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 
 const CycleContext = createContext(null);
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-const API_ROOT = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+// Dynamically resolves API root: prioritizes current browser origin in production
+// (Azure App Service / live domains) to prevent hardcoded localhost:8000 failures,
+// while preserving local development server behavior on port 5173 or 3000.
+const getApiRoot = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const envUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (envUrl && envUrl.trim() !== "") {
+    return envUrl.trim().endsWith("/") ? envUrl.trim().slice(0, -1) : envUrl.trim();
+  }
+  return "http://localhost:8000";
+};
+
+const API_ROOT = getApiRoot();
 
 export function CycleProvider({ children }) {
   const [activeCycle, setActiveCycleState] = useState("2026-2028");
@@ -32163,12 +32253,24 @@ export function NotificationProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // Resolve API Base URL without trailing slash
-  const rawUrl = 
-    import.meta.env?.VITE_API_URL || 
-    import.meta.env?.VITE_API_BASE_URL || 
-    "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  // Dynamically resolves API root: uses window.location.origin in production
+  // to prevent Vite from hardcoding localhost:8000, while preserving local development.
+  const getApiUrl = () => {
+    if (typeof window !== "undefined" && window.location?.origin) {
+      const { hostname, origin, port } = window.location;
+      if (
+        port !== "5173" &&
+        port !== "3000" &&
+        hostname !== "localhost" &&
+        hostname !== "127.0.0.1"
+      ) {
+        return origin;
+      }
+    }
+    const raw = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+    return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+  };
+  const apiUrl = getApiUrl();
 
   // Resolve Active Authentication Token & Role strictly from active authenticated session
   const authToken = user?.token || token || null;
@@ -32669,8 +32771,24 @@ export default function ComplianceAnalytics() {
   const [filterStatus, setFilterStatus] = useState("all"); // 'all' | 'flagged' | 'compliant'
   const [sortBy, setSortBy] = useState("ratio-desc"); // 'ratio-desc' | 'canvas-desc' | 'proposals-desc' | 'name-asc'
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  // Dynamic self-resolving API URL for production Azure & local development
+  const getApiUrl = () => {
+    if (typeof window !== "undefined" && window.location?.origin) {
+      const { hostname, origin, port } = window.location;
+      if (
+        port !== "5173" &&
+        port !== "3000" &&
+        hostname !== "localhost" &&
+        hostname !== "127.0.0.1"
+      ) {
+        return origin;
+      }
+    }
+    const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+    return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  };
+  const apiUrl = getApiUrl();
+
   const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
 
   const fetchAnalytics = useCallback(async () => {
@@ -33118,6 +33236,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { getAuditLogs, getDepartments } from "../../../api/admin";
+import { API_BASE_URL } from "../../../api/apiClient";
 import { 
   History, 
   RefreshCw, 
@@ -33137,7 +33256,7 @@ import {
   Lock, 
   Coins, 
   ChevronLeft, 
-  ChevronRight,
+  ChevronRight, 
   Download,
   FileSpreadsheet,
   CheckCircle2,
@@ -33146,6 +33265,29 @@ import {
   Building,
   Key
 } from "lucide-react";
+
+// Dynamic API URL resolver: prioritizes production origin on live hosts (e.g. Azure)
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  if (API_BASE_URL && API_BASE_URL.trim() !== "") {
+    return API_BASE_URL;
+  }
+  const raw = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (raw && raw.trim() !== "") {
+    return raw.trim().endsWith("/") ? raw.trim().slice(0, -1) : raw.trim();
+  }
+  return "http://localhost:8000";
+};
 
 export default function AuditTrails() {
   const { user } = useAuth();
@@ -33173,9 +33315,8 @@ export default function AuditTrails() {
   // Detailed Modal Inspection State
   const [selectedLog, setSelectedLog] = useState(null);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : "") || "";
 
   // Auto-dismiss transient notifications
   useEffect(() => {
@@ -33478,7 +33619,7 @@ export default function AuditTrails() {
         ...rows.map(r => r.map(f => `"${f}"`).join(","))
       ].join("\n");
 
-      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -38040,7 +38181,7 @@ CORE SYSTEM FILE: ./frontend/src/views/admin/Dashboard/Dashboard.jsx
 =========================================
 
 // frontend/src/views/admin/Dashboard/Dashboard.jsx
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -38067,14 +38208,64 @@ import {
 } from "lucide-react";
 import Modal from "../../../components/common/Modal";
 
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { activeCycle } = useCycle();
   
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const apiUrl = getApiUrl();
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Key Dashboard Statistics
   const [pendingCount, setPendingCount] = useState(0);
@@ -38119,47 +38310,53 @@ export default function AdminDashboard() {
   const [alertError, setAlertError] = useState(null);
   const [alertSuccess, setAlertSuccess] = useState(null);
 
-  const addSystemLog = (text, type = "") => {
+  const addSystemLog = useCallback((text, type = "") => {
     const now = new Date();
     const timeStr = now.toTimeString().split(" ")[0];
     setSystemLogs(prev => [{ time: timeStr, text, type }, ...prev.slice(0, 49)]);
-  };
+  }, []);
 
-  const getDeptName = (proposal) => {
+  const getDeptName = useCallback((proposal) => {
     if (proposal.target_office_automated) return proposal.target_office_automated;
     if (proposal.department?.name) return proposal.department.name;
     const deptObj = departments.find(d => (d.department_id || d.id) === proposal.department_id);
     return deptObj ? (deptObj.department_name || deptObj.name) : "Central Office";
-  };
+  }, [departments]);
 
   const fetchLiveProposals = useCallback(async () => {
+    if (!token) return;
     setLoading(true);
     try {
-      // 1. Fetch Department Roster
-      const deptRes = await fetch(`${apiUrl}/api/admin/departments`, {
-        headers: { Authorization: `Bearer ${token}` }
-      }).catch(() => null);
+      const headers = { 
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      };
 
+      // 1. Fetch Department Roster
+      const deptRes = await fetch(`${apiUrl}/api/admin/departments`, { headers }).catch(() => null);
       if (deptRes && deptRes.ok) {
         const deptData = await deptRes.json();
-        setDepartments(Array.isArray(deptData) ? deptData : []);
+        if (isMountedRef.current) {
+          setDepartments(Array.isArray(deptData) ? deptData : []);
+        }
       }
 
       // 2. Fetch Proposals Queue for active cycle
-      const response = await fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) throw new Error("Failed to fetch database queue.");
+      const response = await fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle)}`, { headers });
+      if (!response.ok) {
+        const errPayload = await response.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to fetch database queue."));
+      }
       
       const payload = await response.json();
       const itemsList = Array.isArray(payload) ? payload : (payload.data || []);
-      setProposals(itemsList);
+      if (isMountedRef.current) {
+        setProposals(itemsList);
+      }
 
       // 3. Fetch Master Dashboard Metrics
-      const metricsResponse = await fetch(`${apiUrl}/api/admin/dashboard-metrics`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (metricsResponse.ok) {
+      const metricsResponse = await fetch(`${apiUrl}/api/admin/dashboard-metrics`, { headers });
+      if (metricsResponse.ok && isMountedRef.current) {
         const metricsData = await metricsResponse.json();
         setBudgetMetrics({
           global_ceiling: metricsData.global_ceiling || 200000000.00,
@@ -38167,17 +38364,14 @@ export default function AdminDashboard() {
         });
         setPendingCount(metricsData.pending_count ?? itemsList.filter(p => p.status === "Submitted").length);
         setApprovedCount(metricsData.approved_count ?? itemsList.filter(p => p.status === "Approved").length);
-      } else {
+      } else if (isMountedRef.current) {
         setPendingCount(itemsList.filter(p => p.status === "Submitted").length);
         setApprovedCount(itemsList.filter(p => p.status === "Approved").length);
       }
 
       // 4. Fetch Live COA Audit Logs
-      const auditRes = await fetch(`${apiUrl}/api/admin/audit-logs?limit=15`, {
-        headers: { Authorization: `Bearer ${token}` }
-      }).catch(() => null);
-
-      if (auditRes && auditRes.ok) {
+      const auditRes = await fetch(`${apiUrl}/api/admin/audit-logs?limit=15`, { headers }).catch(() => null);
+      if (auditRes && auditRes.ok && isMountedRef.current) {
         const auditData = await auditRes.json();
         if (Array.isArray(auditData)) {
           setAuditLogs(auditData);
@@ -38185,11 +38379,8 @@ export default function AdminDashboard() {
       }
 
       // 5. Fetch Active Master Narrative to hydrate pre-compiled vault URLs independently
-      const narrRes = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      }).catch(() => null);
-
-      if (narrRes && narrRes.ok) {
+      const narrRes = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, { headers }).catch(() => null);
+      if (narrRes && narrRes.ok && isMountedRef.current) {
         const narrData = await narrRes.json();
         if (narrData.final_pdf_vault_url) {
           setPdfDownloadUrl(narrData.final_pdf_vault_url);
@@ -38199,11 +38390,15 @@ export default function AdminDashboard() {
         }
       }
     } catch (err) {
-      addSystemLog(`ERROR: Database connection failed. ${err.message}`, "text-rose-400");
+      if (isMountedRef.current) {
+        addSystemLog(`ERROR: Database connection failed. ${err.message}`, "text-rose-400");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
-  }, [apiUrl, token, activeCycle]);
+  }, [apiUrl, token, activeCycle, addSystemLog]);
 
   useEffect(() => {
     if (token) {
@@ -38220,32 +38415,37 @@ export default function AdminDashboard() {
     try {
       const res = await fetch(`${apiUrl}/api/admin/governance/verify-compiler-sync?module=parity&issp_period=${encodeURIComponent(activeCycle)}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        let errMsg = err.detail || "Compiler sync verification failed.";
-        if (typeof errMsg === "object" && errMsg !== null && errMsg.violations) {
-          errMsg = `${errMsg.error || "Validation Failure"}: ${errMsg.violations.join(" | ")}`;
-        }
-        throw new Error(errMsg);
+        throw new Error(parseErrorMessage(err, "Compiler sync verification failed."));
       }
 
       const data = await res.json();
-      setCompilerAudit(data);
+      if (isMountedRef.current) {
+        setCompilerAudit(data);
+      }
 
       if (data.compiler_ready) {
         addSystemLog("SUCCESS: Singularity Graph verified. 4-Way Parity confirmed across all cycle tables.", "text-emerald-400");
         setAlertSuccess("Compiler sync verified: Four-way financial parity is balanced and ready for compilation.");
       } else {
-        addSystemLog(`WARNING: Parity or linkage disconnect detected: ${data.warnings?.join(" | ")}`, "text-amber-400");
+        addSystemLog(`WARNING: Parity or linkage disconnect detected: ${(data.warnings || []).join(" | ")}`, "text-amber-400");
       }
     } catch (err) {
       addSystemLog(`VERIFY FAILED: ${err.message}`, "text-rose-400");
-      setAlertError(`Compiler verification failure: ${err.message}`);
+      if (isMountedRef.current) {
+        setAlertError(`Compiler verification failure: ${err.message}`);
+      }
     } finally {
-      setIsVerifying(false);
+      if (isMountedRef.current) {
+        setIsVerifying(false);
+      }
     }
   };
 
@@ -38254,22 +38454,29 @@ export default function AdminDashboard() {
     try {
       const res = await fetch(`${apiUrl}/api/admin/proposals/${id}/approve`, {
         method: "PUT",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Approval transaction failed.");
+        throw new Error(parseErrorMessage(errData, "Approval transaction failed."));
       }
       
-      setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Approved" } : p));
-      setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
-      setApprovedCount(prev => prev + 1);
+      if (isMountedRef.current) {
+        setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Approved" } : p));
+        setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
+        setApprovedCount(prev => prev + 1);
+        setAlertSuccess(`"${itemName}" approved successfully.`);
+      }
       
       addSystemLog(`APPROVED: "${itemName}" approved.`, "text-emerald-400");
-      setAlertSuccess(`"${itemName}" approved successfully.`);
     } catch (err) {
       addSystemLog(`ERROR: Approval failed - ${err.message}`, "text-rose-400");
-      setAlertError(`Approval failed: ${err.message}`);
+      if (isMountedRef.current) {
+        setAlertError(`Approval failed: ${err.message}`);
+      }
     }
   };
 
@@ -38284,11 +38491,14 @@ export default function AdminDashboard() {
     try {
       const returnRes = await fetch(`${apiUrl}/api/admin/proposals/${id}/return`, {
         method: "PUT",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!returnRes.ok) {
         const errData = await returnRes.json().catch(() => ({}));
-        throw new Error(errData.detail || "Return state transition failed.");
+        throw new Error(parseErrorMessage(errData, "Return state transition failed."));
       }
 
       await fetch(`${apiUrl}/api/dept/proposals/${id}/comments`, {
@@ -38304,17 +38514,23 @@ export default function AdminDashboard() {
         })
       });
 
-      setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Returned" } : p));
-      setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
+      if (isMountedRef.current) {
+        setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Returned" } : p));
+        setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
+        setReturnModalItem(null);
+        setReturnRemark("");
+        setAlertSuccess(`"${itemName}" returned to department with instructions.`);
+      }
       
       addSystemLog(`RETURNED: "${itemName}" returned to department with instructions.`, "text-amber-400");
-      setReturnModalItem(null);
-      setReturnRemark("");
-      setAlertSuccess(`"${itemName}" returned to department.`);
     } catch (err) {
-      setAlertError(`Return execution failed: ${err.message}`);
+      if (isMountedRef.current) {
+        setAlertError(`Return execution failed: ${err.message}`);
+      }
     } finally {
-      setIsSubmittingReturn(false);
+      if (isMountedRef.current) {
+        setIsSubmittingReturn(false);
+      }
     }
   };
 
@@ -38324,23 +38540,20 @@ export default function AdminDashboard() {
     setCompiledFormat(exportFormat);
     setGenerationProgress(15);
     const formatLabel = exportFormat === "docx" ? "Word (.docx)" : "PDF";
-    setGenerationStatusMsg(`Queuing background task (${formatLabel}) & verifying admin cryptographic token...`);
+    setGenerationStatusMsg(`Queuing background task (${formatLabel}) & verifying cryptographic token...`);
     addSystemLog(`INIT: Dispatching document trigger payload (${formatLabel}) to background compilation workers...`, "text-blue-400");
 
     try {
       const response = await fetch(`${apiUrl}/api/admin/governance/generate-issp?issp_period=${encodeURIComponent(activeCycle)}&export_format=${encodeURIComponent(exportFormat)}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        let detailMsg = errData.detail;
-        if (typeof detailMsg === "object" && detailMsg !== null && detailMsg.violations) {
-          detailMsg = `${detailMsg.error || "Validation Failure"}:\n• ${detailMsg.violations.join("\n• ")}`;
-        } else if (Array.isArray(detailMsg)) {
-          detailMsg = detailMsg.map(e => e.msg || JSON.stringify(e)).join(" | ");
-        }
-        throw new Error(detailMsg || "Compilation queue registration failed.");
+        throw new Error(parseErrorMessage(errData, "Compilation queue registration failed."));
       }
       const data = await response.json();
       
@@ -38350,17 +38563,26 @@ export default function AdminDashboard() {
       }
     } catch (err) {
       addSystemLog(`ERROR: Task dispatch failed: ${err.message}`, "text-rose-400");
-      setAlertError(`Document compilation failed: ${err.message}`);
-      setIsGenerating(false);
+      if (isMountedRef.current) {
+        setAlertError(`Document compilation failed: ${err.message}`);
+        setIsGenerating(false);
+      }
     }
   };
 
   const pollTaskStatus = async (taskId, exportFormat = "pdf") => {
+    if (!isMountedRef.current) return;
+
     try {
       const res = await fetch(`${apiUrl}/api/admin/governance/task-status/${encodeURIComponent(taskId)}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       const data = await res.json();
+
+      if (!isMountedRef.current) return;
 
       if (data.state === "PROGRESS" || data.state === "PENDING") {
         const prog = data.progress_percent || (data.meta && data.meta.progress) || 35;
@@ -38393,9 +38615,10 @@ export default function AdminDashboard() {
         setAlertError(`Document generation failed: ${errMsg}`);
       }
     } catch (e) {
-      console.error("Task polling exception:", e);
-      setIsGenerating(false);
-      setAlertError(`Polling error: ${e.message}`);
+      if (isMountedRef.current) {
+        setIsGenerating(false);
+        setAlertError(`Polling error: ${e.message}`);
+      }
     }
   };
 
@@ -44976,6 +45199,49 @@ const isTestArtwork = (urlOrName) => {
   return TEST_ARTWORK_BLACKLIST.some(keyword => lower.includes(keyword));
 };
 
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
 export default function DiagramVault() {
   const { user } = useAuth();
   const { activeCycle, fetchActiveCycle } = useCycle();
@@ -45005,9 +45271,8 @@ export default function DiagramVault() {
     system_architecture: null
   });
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
 
   // Auto-dismiss transient alerts
   useEffect(() => {
@@ -45077,7 +45342,10 @@ export default function DiagramVault() {
     setError(null);
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (res.ok) {
         const data = await res.json();
@@ -45099,7 +45367,7 @@ export default function DiagramVault() {
         });
       } else {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to retrieve registered diagram filepaths.");
+        throw new Error(parseErrorMessage(errData, "Failed to retrieve registered diagram filepaths."));
       }
     } catch (e) {
       setError(e.message);
@@ -45141,7 +45409,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to update schematic title in database.");
+        throw new Error(parseErrorMessage(errData, "Failed to update schematic title in database."));
       }
 
       setCustomTitles(updatedCustomTitles);
@@ -45181,7 +45449,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to reset schematic title.");
+        throw new Error(parseErrorMessage(errData, "Failed to reset schematic title."));
       }
 
       setCustomTitles(updatedCustomTitles);
@@ -45237,7 +45505,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to upload diagram asset.");
+        throw new Error(parseErrorMessage(errData, "Failed to upload diagram asset."));
       }
 
       const resData = await res.json();
@@ -45286,7 +45554,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to clear diagram asset.");
+        throw new Error(parseErrorMessage(errData, "Failed to clear diagram asset."));
       }
 
       setSuccess(`Graphic asset for '${displayTitle}' removed.`);
@@ -45329,7 +45597,11 @@ export default function DiagramVault() {
         body: JSON.stringify(updates)
       });
 
-      if (!res.ok) throw new Error("Failed to purge unverified test artworks.");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errData, "Failed to purge unverified test artworks."));
+      }
+
       setSuccess("All unverified test artworks purged from database.");
       await fetchVaultData();
       if (fetchActiveCycle) fetchActiveCycle();
@@ -45900,7 +46172,7 @@ CORE SYSTEM FILE: ./frontend/src/views/admin/Narrative/NarrativeManager.jsx
 =========================================
 
 // frontend/src/views/admin/Narrative/NarrativeManager.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -45951,6 +46223,49 @@ import {
   ArrowRight,
   CheckSquare
 } from "lucide-react";
+
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
 
 // Presets for Standard Public-Sector Stakeholder Groups
 const STAKEHOLDER_PRESETS = [
@@ -46010,6 +46325,14 @@ export default function NarrativeManager() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { activeCycle, fetchActiveCycle } = useCycle();
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Dynamic Institutional Fallbacks
   const defaultAgencyName = import.meta.env?.VITE_DEFAULT_AGENCY_NAME || import.meta.env?.VITE_AGENCY_NAME || user?.agency_name || "National Government Agency";
@@ -46131,9 +46454,27 @@ export default function NarrativeManager() {
   const [drBia, setDrBia] = useState([]);
   const [drMetrics, setDrMetrics] = useState([]);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : "");
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
 
   useEffect(() => {
     if (activeCycle) {
@@ -46238,15 +46579,20 @@ export default function NarrativeManager() {
   };
 
   const fetchCycleData = useCallback(async () => {
-    if (!activeCycle) return;
+    if (!activeCycle || !token) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (res.ok) {
         const data = await res.json();
+        if (!isMountedRef.current) return;
+
         setAgencyName(data.agency_name || defaultAgencyName);
         setWebsiteUrl(data.agency_website_url || defaultWebsiteUrl);
         setIsAmendment(Boolean(data.is_amendment));
@@ -46303,72 +46649,104 @@ export default function NarrativeManager() {
     } catch (e) {
       console.warn("Initializing cycle metadata:", e);
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
     }
   }, [activeCycle, apiUrl, token, defaultAgencyName, defaultWebsiteUrl, defaultAgencyHeadTitle]);
 
   const fetchHumanCapitals = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setHumanCapitals(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setHumanCapitals(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchStakeholders = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setStakeholders(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setStakeholders(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchNetworkAndCyber = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
+      const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
       const [netRes, cyberRes] = await Promise.all([
-        fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${apiUrl}/api/admin/cybersecurity-controls?issp_period=${encodeURIComponent(activeCycle)}`, { headers: { Authorization: `Bearer ${token}` } })
+        fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, { headers }),
+        fetch(`${apiUrl}/api/admin/cybersecurity-controls?issp_period=${encodeURIComponent(activeCycle)}`, { headers })
       ]);
-      if (netRes.ok) setNetworkInfraList(await netRes.json());
-      if (cyberRes.ok) setCyberControlsList(await cyberRes.json());
+      if (netRes.ok) {
+        const netData = await netRes.json();
+        if (isMountedRef.current) setNetworkInfraList(Array.isArray(netData) ? netData : []);
+      }
+      if (cyberRes.ok) {
+        const cyberData = await cyberRes.json();
+        if (isMountedRef.current) setCyberControlsList(Array.isArray(cyberData) ? cyberData : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchEgovChecklists = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/egov-checklists`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setEgovChecklists(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setEgovChecklists(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchDrTeams = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-teams`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setDrTeam(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setDrTeam(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchDrBias = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-bias`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setDrBia(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setDrBia(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchDrMetrics = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-metrics`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setDrMetrics(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setDrMetrics(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
@@ -46446,14 +46824,18 @@ export default function NarrativeManager() {
 
     try {
       await updateNarrative(token, activeCycle, payload);
-      setSuccess("Primary narrative, statutory mandates, Signatories, and DRBCP compliance sections saved successfully as structured plain text.");
+      if (isMountedRef.current) {
+        setSuccess("Primary narrative, statutory mandates, Signatories, and DRBCP compliance sections saved successfully as structured plain text.");
+      }
       fetchCycleData();
       return true;
     } catch (err) {
-      setError(err.message || "Failed to save parameters.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to save parameters.");
+      }
       throw err;
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -46481,12 +46863,14 @@ export default function NarrativeManager() {
 
     try {
       await activateCycle(token, targetCycle);
-      setSuccess(`Planning cycle updated and activated to: FY ${targetCycle} (${span}-Year Horizon)`);
+      if (isMountedRef.current) {
+        setSuccess(`Planning cycle updated and activated to: FY ${targetCycle} (${span}-Year Horizon)`);
+      }
       await fetchActiveCycle();
     } catch (err) {
-      setError(err.message);
+      if (isMountedRef.current) setError(err.message);
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -46501,12 +46885,14 @@ export default function NarrativeManager() {
 
     try {
       await resetCycle(token, activeCycle);
-      setSuccess("Active cycle successfully reset. Clean state established.");
+      if (isMountedRef.current) {
+        setSuccess("Active cycle successfully reset. Clean state established.");
+      }
       await fetchActiveCycle();
     } catch (err) {
-      setError(err.message);
+      if (isMountedRef.current) setError(err.message);
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -46519,18 +46905,22 @@ export default function NarrativeManager() {
     setSubmitting(true);
     try {
       const res = await evaluateLifecycleRollover(token, force);
-      setRolloverModal({
-        isOpen: true,
-        data: res,
-        currentYear: new Date().getFullYear(),
-        activeCycle
-      });
+      if (isMountedRef.current) {
+        setRolloverModal({
+          isOpen: true,
+          data: res,
+          currentYear: new Date().getFullYear(),
+          activeCycle
+        });
+      }
       if (fetchActiveCycle) fetchActiveCycle();
       loadAllData();
     } catch (err) {
-      setError(err.message || "Failed to execute lifecycle rollover evaluation.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to execute lifecycle rollover evaluation.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -46585,32 +46975,52 @@ export default function NarrativeManager() {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(hcForm)
         });
-        if (!res.ok) throw new Error("Failed to update human capital matrix entry.");
-        setSuccess("Staffing matrix row updated.");
-        handleCancelEditHc();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to update human capital matrix entry."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Staffing matrix row updated.");
+          handleCancelEditHc();
+        }
       } else {
         const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(hcForm)
         });
-        if (!res.ok) throw new Error("Failed to record human capital matrix entry.");
-        setSuccess("Staffing matrix row added.");
-        setHcForm({ employment_status: "Plantilla (Filled)", is_proposed: false, it_positions_count: 0, non_it_positions_count: 0, male_count: 0, female_count: 0 });
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to record human capital matrix entry."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Staffing matrix row added.");
+          setHcForm({ employment_status: "Plantilla (Filled)", is_proposed: false, it_positions_count: 0, non_it_positions_count: 0, male_count: 0, female_count: 0 });
+        }
       }
       fetchHumanCapitals();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    } finally { 
+      if (isMountedRef.current) setSubmitting(false); 
+    }
   };
 
   const handleDeleteHumanCapital = async (id) => {
     if (!window.confirm("Permanently delete this staffing matrix entry?")) return;
     try {
-      await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(id)}`, {
+      const res = await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to delete staffing entry."));
+      }
       fetchHumanCapitals();
-    } catch (err) { setError(err.message); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    }
   };
 
   // --- TAB 6: STAKEHOLDER ANALYSIS HANDLERS ---
@@ -46662,32 +47072,52 @@ export default function NarrativeManager() {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(shForm)
         });
-        if (!res.ok) throw new Error("Failed to update stakeholder analysis.");
-        setSuccess("Stakeholder analysis updated successfully.");
-        handleCancelEditStakeholder();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to update stakeholder analysis."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Stakeholder analysis updated successfully.");
+          handleCancelEditStakeholder();
+        }
       } else {
         const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(shForm)
         });
-        if (!res.ok) throw new Error("Failed to record stakeholder analysis.");
-        setSuccess("Stakeholder analysis recorded successfully.");
-        setShForm({ stakeholder_group: "", transaction_processed_incoming: "", transaction_processed_outgoing: "", complexity_incoming: "Simple", complexity_outgoing: "Simple" });
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to record stakeholder analysis."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Stakeholder analysis recorded successfully.");
+          setShForm({ stakeholder_group: "", transaction_processed_incoming: "", transaction_processed_outgoing: "", complexity_incoming: "Simple", complexity_outgoing: "Simple" });
+        }
       }
       fetchStakeholders();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    } finally { 
+      if (isMountedRef.current) setSubmitting(false); 
+    }
   };
 
   const handleDeleteStakeholder = async (id, groupName) => {
     if (!window.confirm(`Permanently delete stakeholder group '${groupName}'?`)) return;
     try {
-      await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(id)}`, {
+      const res = await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to delete stakeholder record."));
+      }
       fetchStakeholders();
-    } catch (err) { setError(err.message); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    }
   };
 
   // --- TAB 7: NETWORK INFRASTRUCTURE HANDLERS ---
@@ -46731,32 +47161,52 @@ export default function NarrativeManager() {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(netForm)
         });
-        if (!res.ok) throw new Error("Failed to update network infrastructure.");
-        setSuccess("Network profile updated.");
-        handleCancelEditNet();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to update network infrastructure."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Network profile updated.");
+          handleCancelEditNet();
+        }
       } else {
         const res = await fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(netForm)
         });
-        if (!res.ok) throw new Error("Failed to register network infrastructure.");
-        setSuccess("Network infrastructure profile saved.");
-        handleCancelEditNet();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to register network infrastructure."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Network infrastructure profile saved.");
+          handleCancelEditNet();
+        }
       }
       fetchNetworkAndCyber();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    } finally { 
+      if (isMountedRef.current) setSubmitting(false); 
+    }
   };
 
   const handleDeleteNetworkInfra = async (id) => {
     if (!window.confirm("Delete this network infrastructure profile?")) return;
     try {
-      await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(id)}`, {
+      const res = await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to delete network profile."));
+      }
       fetchNetworkAndCyber();
-    } catch (err) { setError(err.message); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    }
   };
 
   const calculatedSpan = (parseInt(endYear, 10) || 2030) - (parseInt(startYear, 10) || 2028) + 1;
@@ -46802,7 +47252,7 @@ export default function NarrativeManager() {
       {error && (
         <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
           <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>{error}</span>
+          <span className="whitespace-pre-wrap leading-relaxed">{error}</span>
         </div>
       )}
 
@@ -50346,9 +50796,30 @@ const STANDARD_ICT_PRESETS = [
   { title: "Technical Support Specialist", status: "Outsourced (JO / COS / HTC)" }
 ];
 
+/**
+ * Normalizes error messages from API or Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const extractErrorMessage = (err, fallbackMsg = "Operation failed") => {
+  if (!err) return fallbackMsg;
+  if (typeof err === "string") return err;
+  if (err.message && typeof err.message === "string") return err.message;
+  if (err.detail) {
+    if (typeof err.detail === "string") return err.detail;
+    if (Array.isArray(err.detail)) {
+      return err.detail
+        .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+        .join(" | ");
+    }
+    return JSON.stringify(err.detail);
+  }
+  return fallbackMsg;
+};
+
 export default function StaffPositionsManager() {
   const { user } = useAuth();
   const { activeCycle } = useCycle();
+  
   const [positions, setPositions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -50373,7 +50844,33 @@ export default function StaffPositionsManager() {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(initialFormState);
 
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "") || "";
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 7000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard Escape listener to cancel inline edit mode
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && editingId !== null) {
+        handleCancelEdit();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editingId]);
 
   const fetchPositions = useCallback(async () => {
     if (!activeCycle || !token) return;
@@ -50383,7 +50880,7 @@ export default function StaffPositionsManager() {
       const data = await getStaffPositions(token, activeCycle);
       setPositions(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err.message || "Failed to load proposed ICT staff positions.");
+      setError(extractErrorMessage(err, "Failed to load proposed ICT staff positions."));
     } finally {
       setLoading(false);
     }
@@ -50424,18 +50921,20 @@ export default function StaffPositionsManager() {
       setForm(initialFormState);
       fetchPositions();
     } catch (err) {
-      setError(err.message || "Failed to register proposed ICT staff position.");
+      setError(extractErrorMessage(err, "Failed to register proposed ICT staff position."));
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleStartEdit = (pos) => {
+    setError(null);
+    setSuccess(null);
     setEditingId(pos.id);
     setEditForm({
-      position_title: pos.position_title,
-      status: pos.status,
-      count: pos.count
+      position_title: pos.position_title || "",
+      status: pos.status || "Plantilla (Permanent)",
+      count: pos.count || 1
     });
   };
 
@@ -50473,7 +50972,7 @@ export default function StaffPositionsManager() {
       setEditingId(null);
       fetchPositions();
     } catch (err) {
-      setError(err.message || "Failed to update proposed ICT staff position.");
+      setError(extractErrorMessage(err, "Failed to update proposed ICT staff position."));
     } finally {
       setSubmitting(false);
     }
@@ -50489,7 +50988,7 @@ export default function StaffPositionsManager() {
       if (editingId === id) handleCancelEdit();
       fetchPositions();
     } catch (err) {
-      setError(err.message || "Failed to delete proposed staff position.");
+      setError(extractErrorMessage(err, "Failed to delete proposed staff position."));
     }
   };
 
@@ -50534,7 +51033,7 @@ export default function StaffPositionsManager() {
   const filteredPositions = useMemo(() => {
     return positions.filter(pos => {
       const matchesSearch = !searchTerm.trim() || 
-        pos.position_title.toLowerCase().includes(searchTerm.toLowerCase());
+        (pos.position_title || "").toLowerCase().includes(searchTerm.toLowerCase());
       
       const matchesStatus = statusFilter === "ALL" || pos.status === statusFilter;
       return matchesSearch && matchesStatus;
@@ -50589,9 +51088,10 @@ export default function StaffPositionsManager() {
           />
 
           <button
+            type="button"
             onClick={fetchPositions}
             disabled={loading}
-            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
+            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
             title="Refresh positions list"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -50655,9 +51155,13 @@ export default function StaffPositionsManager() {
         <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
           <div className="flex items-center gap-2.5">
             <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
-            <span>{error}</span>
+            <span className="whitespace-pre-wrap">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button 
+            type="button"
+            onClick={() => setError(null)} 
+            className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -50669,7 +51173,11 @@ export default function StaffPositionsManager() {
             <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
           </div>
-          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button 
+            type="button"
+            onClick={() => setSuccess(null)} 
+            className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -50758,7 +51266,7 @@ export default function StaffPositionsManager() {
           <div className="p-3 bg-blue-50 dark:bg-blue-955/20 border border-blue-200 dark:border-blue-900/40 rounded-xl text-[10px] text-blue-800 dark:text-blue-300 leading-relaxed flex items-start gap-2">
             <Info className="w-4 h-4 shrink-0 mt-0.5 text-blue-600 dark:text-blue-400" />
             <span>
-              <strong>DICT Template Page 19:</strong> These positions populate the <em>Part III.C Proposed ICT Human Capital</em> table, validating technical staffing feasibility for in-house developed systems.
+              <strong>DICT Template Page 19:</strong> These positions populate the <em>Part III.C Proposed ICT Human Capital</em> table, validating technical staffing feasibility for in-house developed systems [5].
             </span>
           </div>
 
@@ -50796,6 +51304,15 @@ export default function StaffPositionsManager() {
                     onChange={e => setSearchTerm(e.target.value)}
                     className="pl-8 pr-2.5 py-1.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-xs outline-none text-slate-900 dark:text-white focus:border-blue-500 w-40 sm:w-48"
                   />
+                  {searchTerm && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchTerm("")}
+                      className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
 
                 <select
@@ -50899,6 +51416,7 @@ export default function StaffPositionsManager() {
                             <td className="py-3 px-3 text-right">
                               <div className="flex justify-end gap-1.5">
                                 <button
+                                  type="button"
                                   onClick={() => handleStartEdit(pos)}
                                   className="p-1.5 hover:text-blue-600 dark:hover:text-blue-400 text-slate-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                                   title="Edit properties"
@@ -50906,6 +51424,7 @@ export default function StaffPositionsManager() {
                                   <Edit3 className="w-3.5 h-3.5" />
                                 </button>
                                 <button
+                                  type="button"
                                   onClick={() => handleDelete(pos.id, pos.position_title)}
                                   className="p-1.5 hover:text-rose-600 dark:hover:text-rose-400 text-slate-400 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-955/40 transition-colors cursor-pointer"
                                   title="Purge staff position record"
@@ -50949,7 +51468,7 @@ CORE SYSTEM FILE: ./frontend/src/views/admin/Narrative/StrategicConcernsManager.
 =========================================
 
 // frontend/src/views/admin/Narrative/StrategicConcernsManager.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -51036,6 +51555,14 @@ export default function StrategicConcernsManager() {
   const { user } = useAuth();
   const { activeCycle } = useCycle();
 
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // Core Data States
   const [concerns, setConcerns] = useState([]);
   const [outcomes, setOutcomes] = useState([]);
@@ -51073,7 +51600,37 @@ export default function StrategicConcernsManager() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard navigation: Escape key cancels edit/aggregation mode
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && (editId || form.source_needs_assessment_id)) {
+        handleCancelEdit();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editId, form.source_needs_assessment_id]);
 
   // Load All Relational Artifacts
   const loadAllData = useCallback(async () => {
@@ -51083,47 +51640,64 @@ export default function StrategicConcernsManager() {
     try {
       // 1. Fetch Strategic Concerns (Part II.A)
       const concernsData = await getStrategicConcerns(token, activeCycle);
-      setConcerns(Array.isArray(concernsData) ? concernsData : []);
+      if (isMountedRef.current) {
+        setConcerns(Array.isArray(concernsData) ? concernsData : []);
+      }
 
       // 2. Fetch Organizational Outcomes (Part I.A.4 Link)
       const outData = await getOutcomes(token, activeCycle).catch(() => []);
       const outList = Array.isArray(outData) ? outData : [];
-      setOutcomes(outList);
-
-      setForm(prev => {
-        if (!prev.outcome_id && outList.length > 0) {
-          return {
-            ...prev,
-            outcome_id: String(outList[0].id),
-            mfo: outList[0].outcome_name || outList[0].program_name || ""
-          };
-        }
-        return prev;
-      });
+      if (isMountedRef.current) {
+        setOutcomes(outList);
+        setForm(prev => {
+          if (!prev.outcome_id && outList.length > 0) {
+            return {
+              ...prev,
+              outcome_id: String(outList[0].id),
+              mfo: outList[0].outcome_name || outList[0].program_name || ""
+            };
+          }
+          return prev;
+        });
+      }
 
       // 3. Fetch Downstream Information Systems (Part II.C & III.D)
       const sysData = await getInformationSystems(token, activeCycle).catch(() => []);
-      setSystems(Array.isArray(sysData) ? sysData : []);
+      if (isMountedRef.current) {
+        setSystems(Array.isArray(sysData) ? sysData : []);
+      }
 
       // 4. Fetch ICT Projects (Part III.E)
       const projData = await getIctProjects(token, activeCycle).catch(() => []);
-      setProjects(Array.isArray(projData) ? projData : []);
+      if (isMountedRef.current) {
+        setProjects(Array.isArray(projData) ? projData : []);
+      }
 
       // 5. Fetch Hardware Proposals (Part IV.A)
       const propData = await getProposalsQueue(token, { issp_period: activeCycle, limit: 1000 }).catch(() => []);
-      setProposals(Array.isArray(propData) ? propData : (propData?.data || []));
+      if (isMountedRef.current) {
+        setProposals(Array.isArray(propData) ? propData : (propData?.data || []));
+      }
 
       // 6. Fetch Network Infrastructures (Parts II.B.1 & III.A.1)
       const netData = await getNetworkInfrastructures(token, activeCycle).catch(() => []);
-      setNetworkInfrastructures(Array.isArray(netData) ? netData : []);
+      if (isMountedRef.current) {
+        setNetworkInfrastructures(Array.isArray(netData) ? netData : []);
+      }
 
       // 7. Fetch Department Needs Assessments (Section 8.0 Intake Pool)
       const naData = await getAllNeedsAssessments(token).catch(() => []);
-      setNeedsAssessments(Array.isArray(naData) ? naData : []);
+      if (isMountedRef.current) {
+        setNeedsAssessments(Array.isArray(naData) ? naData : []);
+      }
     } catch (err) {
-      setError(err.message || "Failed to load strategic concerns and verification dependencies.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to load strategic concerns and verification dependencies.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [activeCycle, token]);
 
@@ -51300,7 +51874,9 @@ export default function StrategicConcernsManager() {
         };
 
         await aggregateNeedsToStrategicConcern(token, payload, activeCycle);
-        setSuccess(`Department Needs Assessment aggregated into Strategic Concern '${form.critical_system}'.`);
+        if (isMountedRef.current) {
+          setSuccess(`Department Needs Assessment aggregated into Strategic Concern '${form.critical_system}'.`);
+        }
       } else if (editId) {
         await updateStrategicConcern(token, editId, {
           outcome_id: form.outcome_id ? parseInt(form.outcome_id, 10) : null,
@@ -51310,7 +51886,9 @@ export default function StrategicConcernsManager() {
           intended_use: form.intended_use.trim(),
           order_index: parseInt(form.order_index, 10) || 1
         });
-        setSuccess("Strategic concern updated successfully.");
+        if (isMountedRef.current) {
+          setSuccess("Strategic concern updated successfully.");
+        }
       } else {
         await createStrategicConcern(token, activeCycle, {
           outcome_id: form.outcome_id ? parseInt(form.outcome_id, 10) : null,
@@ -51320,24 +51898,36 @@ export default function StrategicConcernsManager() {
           intended_use: form.intended_use.trim(),
           order_index: parseInt(form.order_index, 10) || 1
         });
-        setSuccess("Strategic concern successfully registered.");
+        if (isMountedRef.current) {
+          setSuccess("Strategic concern successfully registered.");
+        }
       }
 
-      setForm({
-        outcome_id: outcomes.length > 0 ? String(outcomes[0].id) : "",
-        mfo: outcomes.length > 0 ? (outcomes[0].outcome_name || outcomes[0].program_name) : "",
-        critical_system: "",
-        problems: "",
-        intended_use: "",
-        order_index: concerns.length + 2,
-        source_needs_assessment_id: null
-      });
-      setEditId(null);
+      if (isMountedRef.current) {
+        setForm({
+          outcome_id: outcomes.length > 0 ? String(outcomes[0].id) : "",
+          mfo: outcomes.length > 0 ? (outcomes[0].outcome_name || outcomes[0].program_name) : "",
+          critical_system: "",
+          problems: "",
+          intended_use: "",
+          order_index: concerns.length + 2,
+          source_needs_assessment_id: null
+        });
+        setEditId(null);
+      }
       loadAllData();
     } catch (err) {
-      setError(err.message || "Failed to persist strategic concern.");
+      if (isMountedRef.current) {
+        let msg = err.message || "Failed to persist strategic concern.";
+        if (err.violations && Array.isArray(err.violations) && err.violations.length > 0) {
+          msg = `${msg}\n• ${err.violations.join("\n• ")}`;
+        }
+        setError(msg);
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -51377,10 +51967,14 @@ export default function StrategicConcernsManager() {
     setSuccess(null);
     try {
       await deleteStrategicConcern(token, id);
-      setSuccess("Strategic concern purged from registry.");
+      if (isMountedRef.current) {
+        setSuccess("Strategic concern purged from registry.");
+      }
       loadAllData();
     } catch (err) {
-      setError(err.message);
+      if (isMountedRef.current) {
+        setError(err.message || "Deletion failed.");
+      }
     }
   };
 
@@ -51462,10 +52056,11 @@ export default function StrategicConcernsManager() {
             type="button"
             onClick={loadAllData}
             disabled={loading}
-            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 font-bold shadow-xs cursor-pointer text-xs"
+            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 font-bold shadow-xs cursor-pointer text-xs disabled:opacity-50"
             title="Refresh Strategic Concerns Ledger"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>Sync</span>
           </button>
         </div>
       </div>
@@ -51474,9 +52069,9 @@ export default function StrategicConcernsManager() {
         <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center justify-between gap-2.5 animate-fadeIn shadow-xs">
           <div className="flex items-center gap-2.5">
             <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
-            <span>{error}</span>
+            <span className="whitespace-pre-wrap leading-relaxed">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -51488,7 +52083,7 @@ export default function StrategicConcernsManager() {
             <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
           </div>
-          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -51577,7 +52172,7 @@ export default function StrategicConcernsManager() {
           {/* Left Column: Form Panel */}
           <form onSubmit={handleSubmit} className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-4 h-fit shadow-xs">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
+              <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider flex items-center gap-1.5 font-serif">
                 {form.source_needs_assessment_id ? (
                   <Sparkles className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 ) : editId ? (
@@ -52162,7 +52757,7 @@ CORE SYSTEM FILE: ./frontend/src/views/admin/Projects/InternalProjectsManager.js
 =========================================
 
 ﻿// frontend/src/views/admin/Projects/InternalProjectsManager.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -52221,6 +52816,49 @@ import {
   Tag
 } from "lucide-react";
 
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
 // Default Canonical Harmonization Framework Criteria (DICT ISSP Guidelines v.2026)
 const CANONICAL_HARMONIZATION_CRITERIA = [
   { id: 1, name: "National Prioritization (PDP 2023-2028)", is_mandatory: false, description: "Alignment with National Development Goals" },
@@ -52234,6 +52872,14 @@ export default function InternalProjectsManager() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
   const navigate = useNavigate();
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Dynamic institutional default unit
   const defaultImplementingUnit = 
@@ -52317,7 +52963,8 @@ export default function InternalProjectsManager() {
   };
   const [form, setForm] = useState(initialFormState);
 
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const apiUrl = getApiUrl();
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
@@ -52340,6 +52987,33 @@ export default function InternalProjectsManager() {
     }
   }, [activeCycle]);
 
+  // Auto-dismiss temporary alerts
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Modal escape key handler
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (isModalOpen) setIsModalOpen(false);
+        if (linkingProject) setLinkingProject(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isModalOpen, linkingProject]);
+
   // Data Fetching Pipeline
   const fetchAllData = useCallback(async () => {
     if (!token || !activeCycle) return;
@@ -52347,13 +53021,27 @@ export default function InternalProjectsManager() {
     setError(null);
     try {
       const [projectsData, systemsData, policyData, metricsData, harmData, categoriesData] = await Promise.all([
-        getIctProjects(token, activeCycle).catch(() => []),
+        getIctProjects(token, activeCycle).catch(async () => {
+          const res = await fetch(`${apiUrl}/api/admin/ict-projects?issp_period=${encodeURIComponent(activeCycle)}`, {
+            headers: { 
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }
+          });
+          if (res.ok) {
+            const raw = await res.json();
+            return Array.isArray(raw) ? raw : (raw?.data || []);
+          }
+          return [];
+        }),
         getInformationSystems(token, activeCycle).catch(() => []),
         getPolicySettings(token).catch(() => null),
         getPerformanceMetrics(token, activeCycle).catch(() => []),
         getHarmonizationCriteria(token).catch(() => null),
         getStrategicCategories(token).catch(() => [])
       ]);
+
+      if (!isMountedRef.current) return;
 
       setProjects(Array.isArray(projectsData) ? projectsData : (projectsData?.data || []));
       setSystems(Array.isArray(systemsData) ? systemsData : (systemsData?.data || []));
@@ -52368,11 +53056,15 @@ export default function InternalProjectsManager() {
         setAvailableCriteria(harmData);
       }
     } catch (err) {
-      setError(err.message || "Failed to load project portfolio.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to load project portfolio.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
-  }, [activeCycle, token]);
+  }, [activeCycle, token, apiUrl]);
 
   useEffect(() => {
     fetchAllData();
@@ -52428,9 +53120,13 @@ export default function InternalProjectsManager() {
           seenIds.add(String(lp.id));
         }
       });
-      setAllAvailableProposals(mergedList);
+      if (isMountedRef.current) {
+        setAllAvailableProposals(mergedList);
+      }
     } catch {
-      setAllAvailableProposals(proj.linked_proposals || []);
+      if (isMountedRef.current) {
+        setAllAvailableProposals(proj.linked_proposals || []);
+      }
     }
   };
 
@@ -52466,7 +53162,9 @@ export default function InternalProjectsManager() {
     } catch (err) {
       setError(err.message || "Failed to link items to project.");
     } finally {
-      setSavingLinks(false);
+      if (isMountedRef.current) {
+        setSavingLinks(false);
+      }
     }
   };
 
@@ -52790,7 +53488,9 @@ export default function InternalProjectsManager() {
     } catch (err) {
       setError(err.message || "Failed to persist ICT project.");
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -53678,7 +54378,7 @@ export default function InternalProjectsManager() {
                         {proj.harmonizes_national_priority && <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">National Priority</span>}
                         {proj.harmonizes_resource_optimization && <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">Resource Optimization</span>}
                         {proj.harmonizes_pegif && <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 font-bold">PeGIF / APIs</span>}
-                        {proj.harmonizes_scalability && <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20 font-bold">SPAR / PREXC</span>}
+                        {proj.harmonizes_scalability && <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20 font-bold">SPAR / PREXC</span>}
                       </>
                     )}
                   </div>
@@ -58691,7 +59391,7 @@ CORE SYSTEM FILE: ./frontend/src/views/admin/Users/UserWhitelisting.jsx
 =========================================
 
 // frontend/src/views/admin/Users/UserWhitelisting.jsx
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { 
   UserPlus, 
@@ -58716,6 +59416,24 @@ import {
   ShieldCheck,
   PackageCheck
 } from "lucide-react";
+
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
 
 export default function UserWhitelisting() {
   const { user } = useAuth();
@@ -58754,9 +59472,35 @@ export default function UserWhitelisting() {
   const [editingDept, setEditingDept] = useState(null);
   const [editDeptName, setEditDeptName] = useState("");
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || localStorage.getItem("access_token") || localStorage.getItem("token") || "";
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard navigation for closing edit modals on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (editingUser) setEditingUser(null);
+        if (editingDept) setEditingDept(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editingUser, editingDept]);
 
   const parseErrorMessage = async (res, defaultContext) => {
     let detail = "";
@@ -58769,8 +59513,12 @@ export default function UserWhitelisting() {
           detail = errorData.detail
             .map(err => `${err.loc ? err.loc.filter(p => p !== "body").join(" -> ") + ": " : ""}${err.msg || JSON.stringify(err)}`)
             .join(" | ");
-        } else {
-          detail = JSON.stringify(errorData.detail);
+        } else if (typeof errorData.detail === "object" && errorData.detail !== null) {
+          if (Array.isArray(errorData.detail.violations)) {
+            detail = `${errorData.detail.error || "Validation Failure"}:\n• ${errorData.detail.violations.join("\n• ")}`;
+          } else {
+            detail = JSON.stringify(errorData.detail);
+          }
         }
       } else if (errorData?.message) {
         detail = errorData.message;
@@ -58781,17 +59529,24 @@ export default function UserWhitelisting() {
     return detail || `${defaultContext} (HTTP ${res.status})`;
   };
 
-  const fetchDepartments = async () => {
+  const fetchDepartments = useCallback(async () => {
+    if (!token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/departments`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (res.ok) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : [];
         setDepartments(list);
-        if (list.length > 0 && !deptId) {
-          setDeptId(String(list[0].department_id || list[0].id));
+        if (list.length > 0) {
+          setDeptId(prev => {
+            const hasExisting = list.some(d => String(d.department_id || d.id) === String(prev));
+            return hasExisting ? prev : String(list[0].department_id || list[0].id);
+          });
         }
       } else {
         const msg = await parseErrorMessage(res, "Failed to load departments registry");
@@ -58800,14 +59555,18 @@ export default function UserWhitelisting() {
     } catch (e) {
       setError(e.message || "Failed to query the departments endpoint.");
     }
-  };
+  }, [apiUrl, token]);
 
-  const fetchWhitelist = async () => {
+  const fetchWhitelist = useCallback(async () => {
+    if (!token) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${apiUrl}/api/admin/users/whitelist`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (res.ok) {
         const data = await res.json();
@@ -58823,14 +59582,14 @@ export default function UserWhitelisting() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [apiUrl, token]);
 
   useEffect(() => {
     if (token) {
       fetchDepartments();
       fetchWhitelist();
     }
-  }, [token]);
+  }, [token, fetchDepartments, fetchWhitelist]);
 
   // Compute Metrics for Executive Header Bar
   const stats = useMemo(() => {
@@ -58847,12 +59606,22 @@ export default function UserWhitelisting() {
     setError(null);
     setSuccess(null);
 
+    const emailClean = email.trim().toLowerCase();
+    if (!emailClean) {
+      setError("Institutional email address is required.");
+      return;
+    }
+
     if (!password || password.trim().length < 8) {
       setError("Initial account password is required and must be at least 8 characters long.");
       return;
     }
 
-    if (role !== "ROLE_MIS_ADMIN" && !deptId) {
+    const effectiveDeptId = role === "ROLE_MIS_ADMIN" 
+      ? null 
+      : (deptId ? parseInt(deptId, 10) : (departments[0]?.department_id || departments[0]?.id || null));
+
+    if (role !== "ROLE_MIS_ADMIN" && !effectiveDeptId) {
       setError("Department assignment is mandatory for Department Planners and Supply Officers.");
       return;
     }
@@ -58866,9 +59635,9 @@ export default function UserWhitelisting() {
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-          email: email.trim().toLowerCase(),
+          email: emailClean,
           password: password.trim(),
-          assigned_department_id: role === "ROLE_MIS_ADMIN" ? null : parseInt(deptId, 10),
+          assigned_department_id: effectiveDeptId,
           role_tag: role
         })
       });
@@ -58877,9 +59646,10 @@ export default function UserWhitelisting() {
         const msg = await parseErrorMessage(res, "Failed to onboard user account");
         setError(msg);
       } else {
-        setSuccess(`User account '${email}' successfully onboarded and authorized.`);
+        setSuccess(`User account '${emailClean}' successfully onboarded and authorized.`);
         setEmail("");
         setPassword("");
+        setShowPassword(false);
         fetchWhitelist();
       }
     } catch (err) {
@@ -58894,7 +59664,7 @@ export default function UserWhitelisting() {
     setEditingUser(u);
     setEditEmail(u.email);
     setEditRole(u.role_tag);
-    const existingDeptId = u.department_id || u.department?.id;
+    const existingDeptId = u.department_id || u.assigned_department_id || u.department?.id;
     setEditDeptId(
       existingDeptId 
         ? String(existingDeptId) 
@@ -58909,7 +59679,17 @@ export default function UserWhitelisting() {
     setError(null);
     setSuccess(null);
 
-    if (editRole !== "ROLE_MIS_ADMIN" && !editDeptId) {
+    const emailClean = editEmail.trim().toLowerCase();
+    if (!emailClean) {
+      setError("Institutional email address is required.");
+      return;
+    }
+
+    const effectiveDeptId = editRole === "ROLE_MIS_ADMIN" 
+      ? null 
+      : (editDeptId ? parseInt(editDeptId, 10) : null);
+
+    if (editRole !== "ROLE_MIS_ADMIN" && !effectiveDeptId) {
       setError("Department assignment is mandatory for this role.");
       return;
     }
@@ -58921,9 +59701,9 @@ export default function UserWhitelisting() {
 
     setSubmitting(true);
     const payload = {
-      email: editEmail.trim().toLowerCase(),
+      email: emailClean,
       role_tag: editRole,
-      assigned_department_id: editRole === "ROLE_MIS_ADMIN" ? null : parseInt(editDeptId, 10)
+      assigned_department_id: effectiveDeptId
     };
 
     if (editPassword.trim()) {
@@ -58944,7 +59724,7 @@ export default function UserWhitelisting() {
         const msg = await parseErrorMessage(res, "Failed to update user profile");
         setError(msg);
       } else {
-        setSuccess(`Account profile for '${editEmail}' updated successfully.`);
+        setSuccess(`Account profile for '${emailClean}' updated successfully.`);
         setEditingUser(null);
         fetchWhitelist();
       }
@@ -59105,7 +59885,7 @@ export default function UserWhitelisting() {
         <div>
           <h2 className="text-slate-900 dark:text-white font-serif font-bold text-base flex items-center gap-2">
             <Shield className="w-5 h-5 text-blue-600 dark:text-blue-500" />
-            <span>Institutional Access Control & User Registry</span>
+            <span>Institutional Access Control &amp; User Registry</span>
           </h2>
           <p className="text-slate-500 dark:text-slate-400 mt-1">
             Manage Department Planners, Supply Officers, and Administrators with role-based access, credential provisioning, and department mappings.
@@ -59114,7 +59894,7 @@ export default function UserWhitelisting() {
         <button
           onClick={() => { fetchDepartments(); fetchWhitelist(); }}
           disabled={loading}
-          className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 text-xs font-bold disabled:opacity-50 cursor-pointer self-start"
+          className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 text-xs font-bold disabled:opacity-50 cursor-pointer self-start shadow-xs"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           <span>Sync Registry</span>
@@ -59164,7 +59944,7 @@ export default function UserWhitelisting() {
         </div>
 
         <div className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3 col-span-2 sm:col-span-1">
-          <div className="p-2 bg-emerald-50 dark:bg-emerald-950/50 rounded-lg text-emerald-600 dark:text-emerald-400">
+          <div className="p-2 bg-emerald-50 dark:bg-emerald-955/50 rounded-lg text-emerald-600 dark:text-emerald-400">
             <Landmark className="w-4 h-4" />
           </div>
           <div>
@@ -59175,16 +59955,26 @@ export default function UserWhitelisting() {
       </div>
 
       {error && (
-        <div className="p-4 bg-rose-50 dark:bg-rose-955/30 border border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300 rounded-xl flex items-center gap-2.5 animate-fadeIn shadow-xs">
-          <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
-          <span className="font-medium">{error}</span>
+        <div className="p-4 bg-rose-50 dark:bg-rose-955/30 border border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300 rounded-xl flex items-center justify-between gap-2.5 animate-fadeIn shadow-xs">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+            <span className="font-medium whitespace-pre-wrap">{error}</span>
+          </div>
+          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50 text-emerald-700 dark:text-emerald-300 rounded-xl flex items-center gap-2.5 animate-fadeIn shadow-xs">
-          <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <span className="font-medium">{success}</span>
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50 text-emerald-700 dark:text-emerald-300 rounded-xl flex items-center justify-between gap-2.5 animate-fadeIn shadow-xs">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span className="font-medium">{success}</span>
+          </div>
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
@@ -59193,7 +59983,7 @@ export default function UserWhitelisting() {
         <div className="space-y-6">
           {/* User Onboarding Form Box */}
           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
-            <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5">
+            <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5 font-serif">
               <UserPlus className="w-4 h-4 text-blue-600 dark:text-blue-500" />
               <span>Provision User Account</span>
             </h3>
@@ -59243,11 +60033,11 @@ export default function UserWhitelisting() {
                 <select
                   value={role}
                   onChange={(e) => setRole(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs font-semibold"
                 >
-                  <option value="ROLE_DEPT_USER">Department User (Proposals & Needs)</option>
+                  <option value="ROLE_DEPT_USER">Department User (Proposals &amp; Needs)</option>
                   <option value="ROLE_SUPPLY_USER">Supply Officer (Annex 1 Master Inventory)</option>
-                  <option value="ROLE_MIS_ADMIN">MIS Admin (Full Governance & Compiler)</option>
+                  <option value="ROLE_MIS_ADMIN">MIS Admin (Full Governance &amp; Compiler)</option>
                 </select>
               </div>
 
@@ -59260,7 +60050,7 @@ export default function UserWhitelisting() {
                     <select
                       value={deptId}
                       onChange={(e) => setDeptId(e.target.value)}
-                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs font-semibold"
                       required
                     >
                       {departments.map((dept) => {
@@ -59284,17 +60074,17 @@ export default function UserWhitelisting() {
               <button
                 type="submit"
                 disabled={submitting || (role !== "ROLE_MIS_ADMIN" && departments.length === 0)}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-xs text-xs"
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-sm text-xs"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>{submitting ? "Provisioning..." : "Provision & Authorize User"}</span>
+                <span>{submitting ? "Provisioning..." : "Provision &amp; Authorize User"}</span>
               </button>
             </form>
           </div>
 
           {/* Department Management Panel */}
           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
-            <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5">
+            <h3 className="text-slate-900 dark:text-white font-bold text-xs tracking-wider uppercase border-b border-slate-200 dark:border-slate-800 pb-3 flex items-center gap-1.5 font-serif">
               <Landmark className="w-4 h-4 text-purple-600 dark:text-purple-400" />
               <span>Department Registry</span>
             </h3>
@@ -59305,13 +60095,13 @@ export default function UserWhitelisting() {
                 required
                 value={newDeptName}
                 onChange={(e) => setNewDeptName(e.target.value)}
-                placeholder="e.g. Planning & Management Service"
-                className="flex-1 p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs"
+                placeholder="e.g. Planning &amp; Management Service"
+                className="flex-1 p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs"
               />
               <button
                 type="submit"
                 disabled={creatingDept}
-                className="px-3 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold shrink-0 flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+                className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-xl font-bold shrink-0 flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>{creatingDept ? "..." : "Add"}</span>
@@ -59328,15 +60118,17 @@ export default function UserWhitelisting() {
                       <span className="font-semibold text-slate-700 dark:text-slate-300 truncate pr-2">{deptNameVal}</span>
                       <div className="flex gap-1 shrink-0">
                         <button
+                          type="button"
                           onClick={() => openEditDeptModal(dept)}
-                          className="p-1 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg transition-colors cursor-pointer"
+                          className="p-1.5 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg transition-colors cursor-pointer shadow-2xs"
                           title="Edit Department Name"
                         >
                           <Edit2 className="w-3 h-3" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleDeleteDepartment(deptIdVal, deptNameVal)}
-                          className="p-1 bg-white dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-955 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg transition-colors cursor-pointer"
+                          className="p-1.5 bg-white dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-955 border border-slate-300 dark:border-slate-800 text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg transition-colors cursor-pointer shadow-2xs"
                           title="Delete Department"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -59358,7 +60150,7 @@ export default function UserWhitelisting() {
         <div className="lg:col-span-2 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs h-fit">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
             <div>
-              <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider">
+              <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider font-serif">
                 Active User Accounts
               </h3>
               <span className="text-[10px] font-mono text-slate-500">
@@ -59375,6 +60167,15 @@ export default function UserWhitelisting() {
                 placeholder="Filter by email, role, or unit..."
                 className="w-full pl-8 pr-3 py-1.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-blue-500 text-xs placeholder-slate-400"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           </div>
 
@@ -59387,7 +60188,7 @@ export default function UserWhitelisting() {
             ) : filteredWhitelist.length > 0 ? (
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 text-[10px] uppercase font-bold">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 text-[10px] uppercase font-bold font-mono">
                     <th className="py-2.5 px-3">Email Address</th>
                     <th className="py-2.5 px-3">Role</th>
                     <th className="py-2.5 px-3">Assigned Department / Unit</th>
@@ -59437,19 +60238,21 @@ export default function UserWhitelisting() {
                         <td className="py-3 px-3 text-right">
                           <div className="flex justify-end gap-1.5">
                             <button
+                              type="button"
                               onClick={() => openEditUserModal(u)}
-                              className="p-1.5 bg-slate-100 dark:bg-slate-955 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg cursor-pointer transition-colors"
-                              title="Edit Credentials & Role"
+                              className="p-1.5 bg-slate-100 dark:bg-slate-955 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg cursor-pointer transition-colors shadow-2xs"
+                              title="Edit Credentials &amp; Role"
                             >
                               <Edit2 className="w-3.5 h-3.5" />
                             </button>
                             <button
+                              type="button"
                               onClick={() => handleDeleteUser(u.id, u.email)}
                               disabled={isSelf}
                               className={`p-1.5 border rounded-lg transition-colors ${
                                 isSelf 
                                   ? "opacity-30 border-slate-200 dark:border-slate-800 text-slate-400 cursor-not-allowed" 
-                                  : "bg-slate-100 dark:bg-slate-955 hover:bg-rose-100 dark:hover:bg-rose-955 border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+                                  : "bg-slate-100 dark:bg-slate-955 hover:bg-rose-100 dark:hover:bg-rose-955 border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer shadow-2xs"
                               }`}
                               title={isSelf ? "Self-deletion prohibited" : "Delete Account"}
                             >
@@ -59476,11 +60279,12 @@ export default function UserWhitelisting() {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-1.5">
+              <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-1.5 font-serif">
                 <Key className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                 <span>Edit Account Credentials</span>
               </h3>
               <button 
+                type="button"
                 onClick={() => setEditingUser(null)}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer"
               >
@@ -59528,11 +60332,11 @@ export default function UserWhitelisting() {
                 <select
                   value={editRole}
                   onChange={(e) => setEditRole(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs font-semibold"
                 >
-                  <option value="ROLE_DEPT_USER">Department User (Proposals & Needs)</option>
+                  <option value="ROLE_DEPT_USER">Department User (Proposals &amp; Needs)</option>
                   <option value="ROLE_SUPPLY_USER">Supply Officer (Annex 1 Master Inventory)</option>
-                  <option value="ROLE_MIS_ADMIN">MIS Admin (Full Governance & Compiler)</option>
+                  <option value="ROLE_MIS_ADMIN">MIS Admin (Full Governance &amp; Compiler)</option>
                 </select>
               </div>
 
@@ -59542,7 +60346,7 @@ export default function UserWhitelisting() {
                   <select
                     value={editDeptId}
                     onChange={(e) => setEditDeptId(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer focus:border-blue-500 text-xs font-semibold"
                     required
                   >
                     {departments.map((dept) => {
@@ -59561,7 +60365,7 @@ export default function UserWhitelisting() {
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-xs text-xs"
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-sm text-xs"
               >
                 <Save className="w-4 h-4" />
                 <span>{submitting ? "Updating..." : "Save Credential Updates"}</span>
@@ -59576,11 +60380,12 @@ export default function UserWhitelisting() {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-1.5">
+              <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-1.5 font-serif">
                 <Landmark className="w-4 h-4 text-purple-600 dark:text-purple-400" />
                 <span>Edit Department Name</span>
               </h3>
               <button 
+                type="button"
                 onClick={() => setEditingDept(null)}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-white font-bold cursor-pointer"
               >
@@ -59596,15 +60401,15 @@ export default function UserWhitelisting() {
                   required
                   value={editDeptName}
                   onChange={(e) => setEditDeptName(e.target.value)}
-                  placeholder="e.g. Planning & Management Service"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs"
+                  placeholder="e.g. Planning &amp; Management Service"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none focus:border-purple-500 text-xs font-semibold"
                 />
               </div>
 
               <button
                 type="submit"
                 disabled={creatingDept}
-                className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs text-xs"
+                className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm text-xs"
               >
                 <Save className="w-4 h-4" />
                 <span>{creatingDept ? "Updating..." : "Update Department"}</span>
@@ -62704,8 +63509,49 @@ import {
   Shield, 
   User, 
   Eye, 
-  EyeOff 
+  EyeOff,
+  Building,
+  Mail,
+  Lock,
+  X
 } from "lucide-react";
+
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Password rotation rejected by the authorization system.") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    return errData.detail.message || errData.detail.error || JSON.stringify(errData.detail);
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
 
 export default function ProfileSettings() {
   const { user } = useAuth();
@@ -62721,9 +63567,8 @@ export default function ProfileSettings() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
 
   const handleUpdatePassword = async (e) => {
     e.preventDefault();
@@ -62756,7 +63601,7 @@ export default function ProfileSettings() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Password rotation rejected by the authorization system.");
+        throw new Error(parseErrorMessage(errData, "Password rotation rejected by the authorization system."));
       }
 
       setSuccess("Account password rotated successfully.");
@@ -62770,79 +63615,126 @@ export default function ProfileSettings() {
     }
   };
 
+  const roleLabel = 
+    user?.role === "ROLE_MIS_ADMIN" 
+      ? "MIS Administrator (Full Governance)" 
+      : user?.role === "ROLE_SUPPLY_USER" 
+      ? "Supply & Property Officer (Annex 1 Custody)" 
+      : "Department Planner (Resource Proposals)";
+
+  const deptLabel = 
+    user?.department_name 
+      ? `${user.department_name} (ID: #${user.department_id})` 
+      : user?.department_id 
+      ? `Department ID: #${user.department_id}` 
+      : user?.role === "ROLE_MIS_ADMIN"
+      ? "MIS Governance Directorate / Global Administration"
+      : "Central Office / Unassigned";
+
   return (
-    <div className="space-y-6 max-w-lg mx-auto text-xs text-slate-800 dark:text-slate-100 select-none transition-colors duration-200 font-sans">
+    <div className="space-y-6 max-w-xl mx-auto text-xs text-slate-800 dark:text-slate-100 select-none transition-colors duration-200 font-sans">
+      
       {/* Account Info Card */}
-      <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-sm">
-        <h3 className="text-slate-900 dark:text-white font-bold text-sm uppercase tracking-wide flex items-center gap-1.5 border-b border-slate-200 dark:border-slate-850 pb-2">
+      <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-4 shadow-xs">
+        <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-3 font-serif">
           <User className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-          <span>User Profile Information</span>
+          <span>Institutional Account Profile</span>
         </h3>
         
-        <div className="space-y-3 font-mono">
-          <div className="flex justify-between border-b border-slate-100 dark:border-slate-850/60 pb-2">
-            <span className="text-slate-500">Authorized Email:</span>
-            <span className="text-slate-800 dark:text-slate-300 font-bold">{user?.email || "Unknown User"}</span>
+        <div className="space-y-3 font-mono text-xs">
+          <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800/80 pb-2.5">
+            <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1.5 font-sans">
+              <Mail className="w-3.5 h-3.5 text-slate-400" />
+              <span>Authorized Email:</span>
+            </span>
+            <span className="text-slate-900 dark:text-white font-bold">{user?.email || "user@agency.gov.ph"}</span>
           </div>
-          <div className="flex justify-between border-b border-slate-100 dark:border-slate-850/60 pb-2">
-            <span className="text-slate-500">System Role Scope:</span>
-            <span className="text-blue-600 dark:text-blue-400 font-bold uppercase tracking-wider text-[10px]">
-              {user?.role === "ROLE_MIS_ADMIN" 
-                ? "MIS Administrator" 
-                : user?.role === "ROLE_SUPPLY_USER" 
-                ? "Supply Officer" 
-                : "Department Planner"}
+
+          <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800/80 pb-2.5">
+            <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1.5 font-sans">
+              <Shield className="w-3.5 h-3.5 text-slate-400" />
+              <span>System Role Scope:</span>
+            </span>
+            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border ${
+              user?.role === "ROLE_MIS_ADMIN"
+                ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20"
+                : user?.role === "ROLE_SUPPLY_USER"
+                ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
+                : "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20"
+            }`}>
+              {roleLabel}
             </span>
           </div>
-          <div className="flex justify-between">
-            <span className="text-slate-500">Department Assignment:</span>
-            <span className="text-slate-800 dark:text-slate-300 font-bold">
-              {user?.department_name 
-                ? `${user.department_name} (ID: ${user.department_id})` 
-                : user?.department_id 
-                ? `ID Code: ${user.department_id}` 
-                : "Global Administration / Unassociated"}
+
+          <div className="flex items-center justify-between">
+            <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1.5 font-sans">
+              <Building className="w-3.5 h-3.5 text-slate-400" />
+              <span>Department Assignment:</span>
+            </span>
+            <span className="text-slate-900 dark:text-white font-bold text-right truncate max-w-[240px]" title={deptLabel}>
+              {deptLabel}
             </span>
           </div>
         </div>
       </div>
 
       {/* Security Credentials Card */}
-      <div className="bg-white dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-sm">
-        <h3 className="text-slate-900 dark:text-white font-bold text-sm uppercase tracking-wide flex items-center gap-1.5 border-b border-slate-200 dark:border-slate-850 pb-2">
+      <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-4 shadow-xs">
+        <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-3 font-serif">
           <Key className="w-4 h-4 text-amber-500" />
-          <span>Rotate Account Password</span>
+          <span>Rotate Security Password</span>
         </h3>
 
         {error && (
-          <div className="p-3 bg-rose-50 dark:bg-red-955/40 border border-rose-200 dark:border-red-900/50 text-rose-700 dark:text-red-300 rounded-lg flex items-center gap-2 shadow-xs animate-fadeIn">
-            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-red-400" />
-            <span>{error}</span>
+          <div className="p-3.5 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 rounded-xl flex items-center justify-between gap-2 shadow-xs animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
+              <span className="font-semibold whitespace-pre-wrap">{error}</span>
+            </div>
+            <button 
+              type="button"
+              onClick={() => setError(null)} 
+              className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         )}
 
         {success && (
-          <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50 text-emerald-700 dark:text-emerald-300 rounded-lg flex items-center gap-2 shadow-xs animate-fadeIn">
-            <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-            <span>{success}</span>
+          <div className="p-3.5 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 rounded-xl flex items-center justify-between gap-2 shadow-xs animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              <span className="font-semibold">{success}</span>
+            </div>
+            <button 
+              type="button"
+              onClick={() => setSuccess(null)} 
+              className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         )}
 
         <form onSubmit={handleUpdatePassword} className="space-y-4">
           <div className="space-y-1.5">
-            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">Current Password</label>
+            <label className="block text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+              Current Account Password
+            </label>
             <div className="relative">
               <input
                 type={showCurrentPassword ? "text" : "password"}
                 required
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
-                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-850 rounded-lg text-slate-900 dark:text-white font-mono tracking-widest outline-none focus:border-amber-500"
+                placeholder="Enter current password..."
+                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none focus:border-amber-500 transition-colors text-xs"
               />
               <button
                 type="button"
                 onClick={() => setShowCurrentPassword(!showCurrentPassword)}
-                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
                 title={showCurrentPassword ? "Hide password" : "Show password"}
               >
                 {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -62851,20 +63743,22 @@ export default function ProfileSettings() {
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">New Password</label>
+            <label className="block text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+              New Password (Min. 8 Characters)
+            </label>
             <div className="relative">
               <input
                 type={showNewPassword ? "text" : "password"}
                 required
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Minimum 8 characters"
-                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-850 rounded-lg text-slate-900 dark:text-white font-mono tracking-widest outline-none focus:border-amber-500 placeholder:text-slate-400"
+                placeholder="Minimum 8 characters..."
+                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none focus:border-amber-500 transition-colors text-xs placeholder:text-slate-400"
               />
               <button
                 type="button"
                 onClick={() => setShowNewPassword(!showNewPassword)}
-                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
                 title={showNewPassword ? "Hide password" : "Show password"}
               >
                 {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -62873,19 +63767,22 @@ export default function ProfileSettings() {
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400">Confirm New Password</label>
+            <label className="block text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+              Confirm New Password
+            </label>
             <div className="relative">
               <input
                 type={showConfirmPassword ? "text" : "password"}
                 required
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-850 rounded-lg text-slate-900 dark:text-white font-mono tracking-widest outline-none focus:border-amber-500"
+                placeholder="Re-type new password..."
+                className="w-full p-2.5 pr-10 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono outline-none focus:border-amber-500 transition-colors text-xs"
               />
               <button
                 type="button"
                 onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
                 title={showConfirmPassword ? "Hide password" : "Show password"}
               >
                 {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -62896,7 +63793,7 @@ export default function ProfileSettings() {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full p-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-lg font-bold tracking-wide transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+            className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-xl font-bold tracking-wide transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm text-xs"
           >
             {submitting ? (
               <>
@@ -62905,7 +63802,7 @@ export default function ProfileSettings() {
               </>
             ) : (
               <>
-                <Shield className="w-3.5 h-3.5" />
+                <Lock className="w-3.5 h-3.5" />
                 <span>Save New Credentials</span>
               </>
             )}
@@ -67201,7 +68098,7 @@ CORE SYSTEM FILE: ./frontend/src/views/shared/DocumentVault/DocumentVault.jsx
 =========================================
 
 // frontend/src/views/shared/DocumentVault/DocumentVault.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -67235,8 +68132,50 @@ import {
   Edit3 
 } from "lucide-react";
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-const API_BASE_URL = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+};
+
+const API_BASE_URL = getApiUrl();
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
 
 // Official 7-Stage Compilation Pipeline Phases (matching backend Celery tasks)
 const COMPILATION_STAGES = [
@@ -67262,7 +68201,15 @@ export default function DocumentVault() {
   const isAdmin = user?.role === "ROLE_MIS_ADMIN";
   const defaultAgency = import.meta.env.VITE_DEFAULT_AGENCY_NAME || import.meta.env.VITE_AGENCY_NAME || "National Government Agency";
   const agencyName = cycleAgencyName || user?.agency_name || defaultAgency;
-  const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Active Narrative & Document Data
   const [narrative, setNarrative] = useState(null);
@@ -67288,10 +68235,10 @@ export default function DocumentVault() {
   // Interactive Live Cover Page Generator Modal State
   const [isCoverPreviewOpen, setIsCoverPreviewOpen] = useState(false);
 
-  const addLog = (msg, type = "info") => {
+  const addLog = useCallback((msg, type = "info") => {
     const timeStr = new Date().toLocaleTimeString();
     setCompilationLogs(prev => [...prev, { time: timeStr, text: msg, type }]);
-  };
+  }, []);
 
   // Fetch active narrative to verify compilation status and existing document URLs independently
   const fetchVaultDetails = useCallback(async () => {
@@ -67304,14 +68251,17 @@ export default function DocumentVault() {
         data = await getNarrative(token, activeCycle);
       } catch {
         const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-          headers: { Authorization: `Bearer ${token}` }
+          headers: { 
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          }
         });
         if (res.ok) {
           data = await res.json();
         }
       }
 
-      if (data) {
+      if (data && isMountedRef.current) {
         setNarrative(data);
         if (data.final_pdf_vault_url) {
           setCompiledPdfUrl(data.final_pdf_vault_url);
@@ -67323,7 +68273,9 @@ export default function DocumentVault() {
     } catch (err) {
       console.warn("Could not load narrative metadata:", err);
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [activeCycle, token]);
 
@@ -67344,14 +68296,17 @@ export default function DocumentVault() {
           data = await getTaskStatus(token, taskId);
         } catch {
           const res = await fetch(`${API_BASE_URL}/api/admin/governance/task-status/${encodeURIComponent(taskId)}`, {
-            headers: { Authorization: `Bearer ${token}` }
+            headers: { 
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }
           });
           if (res.ok) {
             data = await res.json();
           }
         }
 
-        if (!data) return;
+        if (!data || !isMountedRef.current) return;
 
         if (data.state === "PROGRESS" || data.state === "PENDING") {
           const prog = data.progress_percent || 15;
@@ -67380,7 +68335,7 @@ export default function DocumentVault() {
           clearInterval(interval);
         } else if (data.state === "FAILURE") {
           setIsCompiling(false);
-          const failureMsg = data.error || "Compilation failed during document generation.";
+          const failureMsg = data.error || (data.result && data.result.error) || "Compilation failed during document generation.";
           setError(failureMsg);
           addLog(`ERROR: Compilation aborted: ${failureMsg}`, "error");
           clearInterval(interval);
@@ -67391,7 +68346,7 @@ export default function DocumentVault() {
     }, 1800);
 
     return () => clearInterval(interval);
-  }, [taskId, isCompiling, token, fetchVaultDetails, isAdmin]);
+  }, [taskId, isCompiling, token, fetchVaultDetails, isAdmin, addLog]);
 
   // Trigger Asynchronous Document Compilation (PDF or Word DOCX)
   const handleTriggerCompilation = async (format = "pdf") => {
@@ -67412,29 +68367,28 @@ export default function DocumentVault() {
       } catch (err) {
         const res = await fetch(`${API_BASE_URL}/api/admin/governance/generate-issp?issp_period=${encodeURIComponent(activeCycle)}&export_format=${encodeURIComponent(format)}`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}` }
+          headers: { 
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          }
         });
 
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          let detailMsg = errData.detail;
-          if (typeof detailMsg === "object" && detailMsg !== null && detailMsg.violations) {
-            detailMsg = `${detailMsg.error || "Validation Failure"}:\n• ${detailMsg.violations.join("\n• ")}`;
-          } else if (Array.isArray(detailMsg)) {
-            detailMsg = detailMsg.map(e => e.msg || JSON.stringify(e)).join(" | ");
-          }
-          throw new Error(detailMsg || err.message || "Failed to trigger document compilation.");
+          throw new Error(parseErrorMessage(errData, "Failed to trigger document compilation."));
         }
         resData = await res.json();
       }
 
-      if (resData?.task_id) {
+      if (resData?.task_id && isMountedRef.current) {
         setTaskId(resData.task_id);
         addLog(`QUEUED: Task registered with Worker ID ${resData.task_id} (Format: ${format.toUpperCase()})`, "info");
       }
     } catch (err) {
-      setIsCompiling(false);
-      setError(err.message || "Failed to initiate compilation.");
+      if (isMountedRef.current) {
+        setIsCompiling(false);
+        setError(err.message || "Failed to initiate compilation.");
+      }
     }
   };
 
@@ -67465,11 +68419,17 @@ export default function DocumentVault() {
       window.URL.revokeObjectURL(blobUrl);
       document.body.removeChild(link);
 
-      setSuccess("DBM OSPS/NEP-compliant CSV budget spreadsheet exported successfully.");
+      if (isMountedRef.current) {
+        setSuccess("DBM OSPS/NEP-compliant CSV budget spreadsheet exported successfully.");
+      }
     } catch (err) {
-      setError(err.message || "Failed to download DBM CSV export.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to download DBM CSV export.");
+      }
     } finally {
-      setExportingCsv(false);
+      if (isMountedRef.current) {
+        setExportingCsv(false);
+      }
     }
   };
 
@@ -67535,11 +68495,11 @@ export default function DocumentVault() {
 
     // Sanitize Signatory Names (Eliminate placeholder titles; ensure actual human names render)
     const rawCio = String(narrative?.cio_name || narrative?.signatory_prepared_by || "").trim();
-    const isGenericCio = !rawCio || ["chief information officer", "cio", "none", "null"].includes(rawCio.toLowerCase());
+    const isGenericCio = !rawCio || ["chief information officer", "cio", "none", "null", "undefined"].includes(rawCio.toLowerCase());
     const cioSignatory = isGenericCio ? "REY T. CORTEZ, MIT" : rawCio.toUpperCase();
 
     const rawHead = String(narrative?.head_of_agency_name || narrative?.signatory_approved_by || "").trim();
-    const isGenericHead = !rawHead || ["head of agency", "agency head", "college president", "president", "none", "null"].includes(rawHead.toLowerCase());
+    const isGenericHead = !rawHead || ["head of agency", "agency head", "college president", "president", "none", "null", "undefined"].includes(rawHead.toLowerCase());
     const headSignatory = isGenericHead ? "AMADO A. OLIVA JR, PhD." : rawHead.toUpperCase();
 
     const agencyHeadTitle = narrative?.agency_head_position || "Agency Head";
@@ -68344,7 +69304,7 @@ CORE SYSTEM FILE: ./frontend/src/views/supply/SupplyInventory.jsx
 =========================================
 
 // frontend/src/views/supply/SupplyInventory.jsx
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useLocation, Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { useCycle } from "../../context/CycleContext";
@@ -68385,7 +69345,50 @@ import {
   FileSpreadsheet
 } from "lucide-react";
 
-// Canonical DICT Annex 1 Standard Categories (Template Pages 1–3)
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
+// Canonical DICT Annex 1 Standard Categories (Template Pages 1–3) [4]
 const DEFAULT_EQUIPMENT_CATEGORIES = [
   "Servers",
   "Desktop",
@@ -68543,9 +69546,16 @@ export default function SupplyInventory() {
   const [reportUrlInput, setReportUrlInput] = useState("");
   const [uploadingReport, setUploadingReport] = useState(false);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || localStorage.getItem("access_token") || "";
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
@@ -68564,14 +69574,18 @@ export default function SupplyInventory() {
   // Auto-dismiss transient notifications
   useEffect(() => {
     if (success) {
-      const timer = setTimeout(() => setSuccess(null), 5000);
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
       return () => clearTimeout(timer);
     }
   }, [success]);
 
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => setError(null), 7000);
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 7000);
       return () => clearTimeout(timer);
     }
   }, [error]);
@@ -68594,9 +69608,12 @@ export default function SupplyInventory() {
     if (!token) return;
     try {
       const res = await fetch(`${apiUrl}/api/supply/categories`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
-      if (res.ok) {
+      if (res.ok && isMountedRef.current) {
         const data = await res.json();
         if (data.equipment_categories && Array.isArray(data.equipment_categories)) {
           setEquipmentCategories(data.equipment_categories);
@@ -68614,55 +69631,69 @@ export default function SupplyInventory() {
     if (!token) return;
     try {
       const res = await fetch(`${apiUrl}/api/supply/departments`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setDepartments(data);
-        if (data.length > 0 && !form.department_id) {
-          setForm(f => ({ ...f, department_id: String(data[0].department_id || data[0].id) }));
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
         }
+      });
+      if (res.ok && isMountedRef.current) {
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : [];
+        setDepartments(list);
+        setForm(f => {
+          if (list.length > 0 && !f.department_id) {
+            return { ...f, department_id: String(list[0].department_id || list[0].id) };
+          }
+          return f;
+        });
       }
     } catch (err) {
       console.error("Failed to fetch departments directory:", err);
     }
-  }, [apiUrl, token, form.department_id]);
+  }, [apiUrl, token]);
 
   const fetchInventory = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
     try {
+      const headers = { 
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      };
+
       const params = ["limit=10000"];
       if (activeCycle) params.push(`issp_period=${encodeURIComponent(activeCycle)}`);
       if (deptFilter) params.push(`dept_id=${encodeURIComponent(deptFilter)}`);
       const queryParams = `?${params.join("&")}`;
 
       const [invRes, propRes] = await Promise.all([
-        fetch(`${apiUrl}/api/supply/inventory${queryParams}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle || "2026-2028")}&limit=1000`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }).catch(() => null)
+        fetch(`${apiUrl}/api/supply/inventory${queryParams}`, { headers }),
+        fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle || "2026-2028")}&limit=1000`, { headers }).catch(() => null)
       ]);
 
       if (!invRes.ok) {
         const errData = await invRes.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to load baseline inventory records.");
+        throw new Error(parseErrorMessage(errData, "Failed to load baseline inventory records."));
       }
       
       const invData = await invRes.json();
-      setInventory(Array.isArray(invData) ? invData : []);
+      if (isMountedRef.current) {
+        setInventory(Array.isArray(invData) ? invData : []);
 
-      if (propRes && propRes.ok) {
-        const pJson = await propRes.json();
-        setProposals(Array.isArray(pJson) ? pJson : (pJson?.data || []));
+        if (propRes && propRes.ok) {
+          const pJson = await propRes.json();
+          setProposals(Array.isArray(pJson) ? pJson : (pJson?.data || []));
+        }
       }
     } catch (err) {
-      setError(err.message || "Network error loading inventory ledger.");
+      if (isMountedRef.current) {
+        setError(err.message || "Network error loading inventory ledger.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [apiUrl, token, activeCycle, deptFilter]);
 
@@ -68755,19 +69786,25 @@ export default function SupplyInventory() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to register baseline inventory item.");
+        throw new Error(parseErrorMessage(errData, "Failed to register baseline inventory item."));
       }
 
-      setSuccess(`Asset '${form.item_name}' successfully logged into Annex 1 for cycle FY ${activeCycle}.`);
-      setForm(prev => ({
-        ...initialFormState,
-        department_id: prev.department_id
-      }));
+      if (isMountedRef.current) {
+        setSuccess(`Asset '${form.item_name}' successfully logged into Annex 1 for cycle FY ${activeCycle}.`);
+        setForm(prev => ({
+          ...initialFormState,
+          department_id: prev.department_id
+        }));
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Failed to record asset.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to record asset.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -68849,16 +69886,22 @@ export default function SupplyInventory() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to update inventory record.");
+        throw new Error(parseErrorMessage(errData, "Failed to update inventory record."));
       }
 
-      setSuccess(`Inventory record for '${editForm.item_name}' updated.`);
-      setEditingItem(null);
+      if (isMountedRef.current) {
+        setSuccess(`Inventory record for '${editForm.item_name}' updated.`);
+        setEditingItem(null);
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Failed to update inventory.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update inventory.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -68869,17 +69912,24 @@ export default function SupplyInventory() {
     try {
       const res = await fetch(`${apiUrl}/api/supply/inventory/${id}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to delete inventory record.");
+        throw new Error(parseErrorMessage(errData, "Failed to delete inventory record."));
       }
       
-      setSuccess(`Asset record for '${name}' removed.`);
+      if (isMountedRef.current) {
+        setSuccess(`Asset record for '${name}' removed.`);
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Failed to delete record.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete record.");
+      }
     }
   };
 
@@ -68903,11 +69953,16 @@ export default function SupplyInventory() {
             unserviceable_report_url: reportUrlInput.trim()
           })
         });
-        if (!res.ok) throw new Error("Failed to attach IIRUP report URL.");
-        setSuccess(`IIRUP Inspection Report linked to '${activeReportAsset.item_name}'.`);
-        setActiveReportAsset(null);
-        setReportFile(null);
-        setReportUrlInput("");
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errData, "Failed to attach IIRUP report URL."));
+        }
+        if (isMountedRef.current) {
+          setSuccess(`IIRUP Inspection Report linked to '${activeReportAsset.item_name}'.`);
+          setActiveReportAsset(null);
+          setReportFile(null);
+          setReportUrlInput("");
+        }
         fetchInventory();
         return;
       }
@@ -68929,18 +69984,24 @@ export default function SupplyInventory() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to upload inspection report.");
+        throw new Error(parseErrorMessage(errData, "Failed to upload inspection report."));
       }
 
-      setSuccess(`IIRUP Inspection Report uploaded and linked to '${activeReportAsset.item_name}'.`);
-      setActiveReportAsset(null);
-      setReportFile(null);
-      setReportUrlInput("");
+      if (isMountedRef.current) {
+        setSuccess(`IIRUP Inspection Report uploaded and linked to '${activeReportAsset.item_name}'.`);
+        setActiveReportAsset(null);
+        setReportFile(null);
+        setReportUrlInput("");
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Upload failed.");
+      if (isMountedRef.current) {
+        setError(err.message || "Upload failed.");
+      }
     } finally {
-      setUploadingReport(false);
+      if (isMountedRef.current) {
+        setUploadingReport(false);
+      }
     }
   };
 
@@ -69374,7 +70435,7 @@ export default function SupplyInventory() {
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-start justify-between shadow-xs animate-fadeIn">
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
           <div className="flex items-center gap-2.5">
             <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
@@ -69956,7 +71017,7 @@ export default function SupplyInventory() {
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
                     <th className="p-3.5 w-1/3">ICT Resources</th>
                     <th className="p-3.5 w-1/4">Office Location</th>
                     <th className="p-3.5 text-center w-28">Operational</th>
@@ -70069,7 +71130,7 @@ export default function SupplyInventory() {
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
                     <th className="p-3.5 w-1/3">ICT Resources</th>
                     <th className="p-3.5 w-1/4">Office Location</th>
                     <th className="p-3.5 text-center w-36">Perpetual</th>
@@ -70409,7 +71470,7 @@ export default function SupplyInventory() {
                   type="file"
                   accept="application/pdf"
                   onChange={e => setReportFile(e.target.files[0])}
-                  className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
+                  className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
                 />
               </div>
 

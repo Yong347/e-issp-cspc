@@ -21,8 +21,33 @@
  * ==============================================================================
  */
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-export const API_BASE_URL = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+// Dynamically resolves API root: prioritizes current browser origin in production
+// (Azure App Service / live domains) to prevent Vite from hardcoding localhost:8000,
+// while preserving local development server behavior on port 5173 or 3000.
+const getBaseUrl = () => {
+  // 1. If running in browser and deployed (not on local Vite dev server ports):
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+
+  // 2. Local development fallback:
+  const envUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (envUrl && envUrl.trim() !== "") {
+    return envUrl.trim().endsWith("/") ? envUrl.trim().slice(0, -1) : envUrl.trim();
+  }
+
+  return "http://localhost:8000";
+};
+
+export const API_BASE_URL = getBaseUrl();
 
 /**
  * Builds standard authorization and content headers.

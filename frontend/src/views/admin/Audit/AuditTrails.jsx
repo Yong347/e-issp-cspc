@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { getAuditLogs, getDepartments } from "../../../api/admin";
+import { API_BASE_URL } from "../../../api/apiClient";
 import { 
   History, 
   RefreshCw, 
@@ -23,7 +24,7 @@ import {
   Lock, 
   Coins, 
   ChevronLeft, 
-  ChevronRight,
+  ChevronRight, 
   Download,
   FileSpreadsheet,
   CheckCircle2,
@@ -32,6 +33,29 @@ import {
   Building,
   Key
 } from "lucide-react";
+
+// Dynamic API URL resolver: prioritizes production origin on live hosts (e.g. Azure)
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  if (API_BASE_URL && API_BASE_URL.trim() !== "") {
+    return API_BASE_URL;
+  }
+  const raw = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (raw && raw.trim() !== "") {
+    return raw.trim().endsWith("/") ? raw.trim().slice(0, -1) : raw.trim();
+  }
+  return "http://localhost:8000";
+};
 
 export default function AuditTrails() {
   const { user } = useAuth();
@@ -59,9 +83,8 @@ export default function AuditTrails() {
   // Detailed Modal Inspection State
   const [selectedLog, setSelectedLog] = useState(null);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : "") || "";
 
   // Auto-dismiss transient notifications
   useEffect(() => {
@@ -364,7 +387,7 @@ export default function AuditTrails() {
         ...rows.map(r => r.map(f => `"${f}"`).join(","))
       ].join("\n");
 
-      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;

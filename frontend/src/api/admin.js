@@ -1,7 +1,22 @@
 // frontend/src/api/admin.js
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-export const API_BASE_URL = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+const getApiBaseUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+};
+
+export const API_BASE_URL = getApiBaseUrl();
 
 /**
  * Enhanced error parsing handler that formats Pydantic validation arrays,
@@ -495,7 +510,7 @@ export const createStakeholder = async (token, cycleOrPayload, maybePayload = nu
   let body = cycleOrPayload;
 
   if (typeof cycleOrPayload === "string" && maybePayload) {
-    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload)}/stakeholders`;
+    url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cyclePayload)}/stakeholders`;
     body = maybePayload;
   } else if (typeof cycleOrPayload === "object" && cycleOrPayload?.issp_period) {
     url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycleOrPayload.issp_period)}/stakeholders`;

@@ -1,5 +1,5 @@
 // frontend/src/views/admin/Dashboard/Dashboard.jsx
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -26,14 +26,64 @@ import {
 } from "lucide-react";
 import Modal from "../../../components/common/Modal";
 
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { activeCycle } = useCycle();
   
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const apiUrl = getApiUrl();
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Key Dashboard Statistics
   const [pendingCount, setPendingCount] = useState(0);
@@ -78,47 +128,53 @@ export default function AdminDashboard() {
   const [alertError, setAlertError] = useState(null);
   const [alertSuccess, setAlertSuccess] = useState(null);
 
-  const addSystemLog = (text, type = "") => {
+  const addSystemLog = useCallback((text, type = "") => {
     const now = new Date();
     const timeStr = now.toTimeString().split(" ")[0];
     setSystemLogs(prev => [{ time: timeStr, text, type }, ...prev.slice(0, 49)]);
-  };
+  }, []);
 
-  const getDeptName = (proposal) => {
+  const getDeptName = useCallback((proposal) => {
     if (proposal.target_office_automated) return proposal.target_office_automated;
     if (proposal.department?.name) return proposal.department.name;
     const deptObj = departments.find(d => (d.department_id || d.id) === proposal.department_id);
     return deptObj ? (deptObj.department_name || deptObj.name) : "Central Office";
-  };
+  }, [departments]);
 
   const fetchLiveProposals = useCallback(async () => {
+    if (!token) return;
     setLoading(true);
     try {
-      // 1. Fetch Department Roster
-      const deptRes = await fetch(`${apiUrl}/api/admin/departments`, {
-        headers: { Authorization: `Bearer ${token}` }
-      }).catch(() => null);
+      const headers = { 
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      };
 
+      // 1. Fetch Department Roster
+      const deptRes = await fetch(`${apiUrl}/api/admin/departments`, { headers }).catch(() => null);
       if (deptRes && deptRes.ok) {
         const deptData = await deptRes.json();
-        setDepartments(Array.isArray(deptData) ? deptData : []);
+        if (isMountedRef.current) {
+          setDepartments(Array.isArray(deptData) ? deptData : []);
+        }
       }
 
       // 2. Fetch Proposals Queue for active cycle
-      const response = await fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) throw new Error("Failed to fetch database queue.");
+      const response = await fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle)}`, { headers });
+      if (!response.ok) {
+        const errPayload = await response.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to fetch database queue."));
+      }
       
       const payload = await response.json();
       const itemsList = Array.isArray(payload) ? payload : (payload.data || []);
-      setProposals(itemsList);
+      if (isMountedRef.current) {
+        setProposals(itemsList);
+      }
 
       // 3. Fetch Master Dashboard Metrics
-      const metricsResponse = await fetch(`${apiUrl}/api/admin/dashboard-metrics`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (metricsResponse.ok) {
+      const metricsResponse = await fetch(`${apiUrl}/api/admin/dashboard-metrics`, { headers });
+      if (metricsResponse.ok && isMountedRef.current) {
         const metricsData = await metricsResponse.json();
         setBudgetMetrics({
           global_ceiling: metricsData.global_ceiling || 200000000.00,
@@ -126,17 +182,14 @@ export default function AdminDashboard() {
         });
         setPendingCount(metricsData.pending_count ?? itemsList.filter(p => p.status === "Submitted").length);
         setApprovedCount(metricsData.approved_count ?? itemsList.filter(p => p.status === "Approved").length);
-      } else {
+      } else if (isMountedRef.current) {
         setPendingCount(itemsList.filter(p => p.status === "Submitted").length);
         setApprovedCount(itemsList.filter(p => p.status === "Approved").length);
       }
 
       // 4. Fetch Live COA Audit Logs
-      const auditRes = await fetch(`${apiUrl}/api/admin/audit-logs?limit=15`, {
-        headers: { Authorization: `Bearer ${token}` }
-      }).catch(() => null);
-
-      if (auditRes && auditRes.ok) {
+      const auditRes = await fetch(`${apiUrl}/api/admin/audit-logs?limit=15`, { headers }).catch(() => null);
+      if (auditRes && auditRes.ok && isMountedRef.current) {
         const auditData = await auditRes.json();
         if (Array.isArray(auditData)) {
           setAuditLogs(auditData);
@@ -144,11 +197,8 @@ export default function AdminDashboard() {
       }
 
       // 5. Fetch Active Master Narrative to hydrate pre-compiled vault URLs independently
-      const narrRes = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      }).catch(() => null);
-
-      if (narrRes && narrRes.ok) {
+      const narrRes = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, { headers }).catch(() => null);
+      if (narrRes && narrRes.ok && isMountedRef.current) {
         const narrData = await narrRes.json();
         if (narrData.final_pdf_vault_url) {
           setPdfDownloadUrl(narrData.final_pdf_vault_url);
@@ -158,11 +208,15 @@ export default function AdminDashboard() {
         }
       }
     } catch (err) {
-      addSystemLog(`ERROR: Database connection failed. ${err.message}`, "text-rose-400");
+      if (isMountedRef.current) {
+        addSystemLog(`ERROR: Database connection failed. ${err.message}`, "text-rose-400");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
-  }, [apiUrl, token, activeCycle]);
+  }, [apiUrl, token, activeCycle, addSystemLog]);
 
   useEffect(() => {
     if (token) {
@@ -179,32 +233,37 @@ export default function AdminDashboard() {
     try {
       const res = await fetch(`${apiUrl}/api/admin/governance/verify-compiler-sync?module=parity&issp_period=${encodeURIComponent(activeCycle)}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        let errMsg = err.detail || "Compiler sync verification failed.";
-        if (typeof errMsg === "object" && errMsg !== null && errMsg.violations) {
-          errMsg = `${errMsg.error || "Validation Failure"}: ${errMsg.violations.join(" | ")}`;
-        }
-        throw new Error(errMsg);
+        throw new Error(parseErrorMessage(err, "Compiler sync verification failed."));
       }
 
       const data = await res.json();
-      setCompilerAudit(data);
+      if (isMountedRef.current) {
+        setCompilerAudit(data);
+      }
 
       if (data.compiler_ready) {
         addSystemLog("SUCCESS: Singularity Graph verified. 4-Way Parity confirmed across all cycle tables.", "text-emerald-400");
         setAlertSuccess("Compiler sync verified: Four-way financial parity is balanced and ready for compilation.");
       } else {
-        addSystemLog(`WARNING: Parity or linkage disconnect detected: ${data.warnings?.join(" | ")}`, "text-amber-400");
+        addSystemLog(`WARNING: Parity or linkage disconnect detected: ${(data.warnings || []).join(" | ")}`, "text-amber-400");
       }
     } catch (err) {
       addSystemLog(`VERIFY FAILED: ${err.message}`, "text-rose-400");
-      setAlertError(`Compiler verification failure: ${err.message}`);
+      if (isMountedRef.current) {
+        setAlertError(`Compiler verification failure: ${err.message}`);
+      }
     } finally {
-      setIsVerifying(false);
+      if (isMountedRef.current) {
+        setIsVerifying(false);
+      }
     }
   };
 
@@ -213,22 +272,29 @@ export default function AdminDashboard() {
     try {
       const res = await fetch(`${apiUrl}/api/admin/proposals/${id}/approve`, {
         method: "PUT",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Approval transaction failed.");
+        throw new Error(parseErrorMessage(errData, "Approval transaction failed."));
       }
       
-      setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Approved" } : p));
-      setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
-      setApprovedCount(prev => prev + 1);
+      if (isMountedRef.current) {
+        setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Approved" } : p));
+        setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
+        setApprovedCount(prev => prev + 1);
+        setAlertSuccess(`"${itemName}" approved successfully.`);
+      }
       
       addSystemLog(`APPROVED: "${itemName}" approved.`, "text-emerald-400");
-      setAlertSuccess(`"${itemName}" approved successfully.`);
     } catch (err) {
       addSystemLog(`ERROR: Approval failed - ${err.message}`, "text-rose-400");
-      setAlertError(`Approval failed: ${err.message}`);
+      if (isMountedRef.current) {
+        setAlertError(`Approval failed: ${err.message}`);
+      }
     }
   };
 
@@ -243,11 +309,14 @@ export default function AdminDashboard() {
     try {
       const returnRes = await fetch(`${apiUrl}/api/admin/proposals/${id}/return`, {
         method: "PUT",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!returnRes.ok) {
         const errData = await returnRes.json().catch(() => ({}));
-        throw new Error(errData.detail || "Return state transition failed.");
+        throw new Error(parseErrorMessage(errData, "Return state transition failed."));
       }
 
       await fetch(`${apiUrl}/api/dept/proposals/${id}/comments`, {
@@ -263,17 +332,23 @@ export default function AdminDashboard() {
         })
       });
 
-      setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Returned" } : p));
-      setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
+      if (isMountedRef.current) {
+        setProposals(prev => prev.map(p => p.id === id ? { ...p, status: "Returned" } : p));
+        setPendingCount(prev => (prev > 0 ? prev - 1 : 0));
+        setReturnModalItem(null);
+        setReturnRemark("");
+        setAlertSuccess(`"${itemName}" returned to department with instructions.`);
+      }
       
       addSystemLog(`RETURNED: "${itemName}" returned to department with instructions.`, "text-amber-400");
-      setReturnModalItem(null);
-      setReturnRemark("");
-      setAlertSuccess(`"${itemName}" returned to department.`);
     } catch (err) {
-      setAlertError(`Return execution failed: ${err.message}`);
+      if (isMountedRef.current) {
+        setAlertError(`Return execution failed: ${err.message}`);
+      }
     } finally {
-      setIsSubmittingReturn(false);
+      if (isMountedRef.current) {
+        setIsSubmittingReturn(false);
+      }
     }
   };
 
@@ -283,23 +358,20 @@ export default function AdminDashboard() {
     setCompiledFormat(exportFormat);
     setGenerationProgress(15);
     const formatLabel = exportFormat === "docx" ? "Word (.docx)" : "PDF";
-    setGenerationStatusMsg(`Queuing background task (${formatLabel}) & verifying admin cryptographic token...`);
+    setGenerationStatusMsg(`Queuing background task (${formatLabel}) & verifying cryptographic token...`);
     addSystemLog(`INIT: Dispatching document trigger payload (${formatLabel}) to background compilation workers...`, "text-blue-400");
 
     try {
       const response = await fetch(`${apiUrl}/api/admin/governance/generate-issp?issp_period=${encodeURIComponent(activeCycle)}&export_format=${encodeURIComponent(exportFormat)}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        let detailMsg = errData.detail;
-        if (typeof detailMsg === "object" && detailMsg !== null && detailMsg.violations) {
-          detailMsg = `${detailMsg.error || "Validation Failure"}:\n• ${detailMsg.violations.join("\n• ")}`;
-        } else if (Array.isArray(detailMsg)) {
-          detailMsg = detailMsg.map(e => e.msg || JSON.stringify(e)).join(" | ");
-        }
-        throw new Error(detailMsg || "Compilation queue registration failed.");
+        throw new Error(parseErrorMessage(errData, "Compilation queue registration failed."));
       }
       const data = await response.json();
       
@@ -309,17 +381,26 @@ export default function AdminDashboard() {
       }
     } catch (err) {
       addSystemLog(`ERROR: Task dispatch failed: ${err.message}`, "text-rose-400");
-      setAlertError(`Document compilation failed: ${err.message}`);
-      setIsGenerating(false);
+      if (isMountedRef.current) {
+        setAlertError(`Document compilation failed: ${err.message}`);
+        setIsGenerating(false);
+      }
     }
   };
 
   const pollTaskStatus = async (taskId, exportFormat = "pdf") => {
+    if (!isMountedRef.current) return;
+
     try {
       const res = await fetch(`${apiUrl}/api/admin/governance/task-status/${encodeURIComponent(taskId)}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       const data = await res.json();
+
+      if (!isMountedRef.current) return;
 
       if (data.state === "PROGRESS" || data.state === "PENDING") {
         const prog = data.progress_percent || (data.meta && data.meta.progress) || 35;
@@ -352,9 +433,10 @@ export default function AdminDashboard() {
         setAlertError(`Document generation failed: ${errMsg}`);
       }
     } catch (e) {
-      console.error("Task polling exception:", e);
-      setIsGenerating(false);
-      setAlertError(`Polling error: ${e.message}`);
+      if (isMountedRef.current) {
+        setIsGenerating(false);
+        setAlertError(`Polling error: ${e.message}`);
+      }
     }
   };
 

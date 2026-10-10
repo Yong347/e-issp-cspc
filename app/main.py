@@ -5,6 +5,7 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — FASTAPI APPLICATION CORE & LIFESPAN
 =============================================================================
 Core Capabilities:
 - Application Bootstrapping, Dynamic Lifespan Context & Diagnostics
+- Automated Default User & Metadata Bootstrapping on Fresh Deployments
 - Dialect-Agnostic Schema Alignment & Native Operator Cleaning (Postgres/SQLite)
 - Resilience Patching for Cryptographic Decryption & JSON Serialization
 - CORS Security Middleware & Structured JSON Error Handlers
@@ -20,6 +21,7 @@ import time
 import json
 import enum
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status, HTTPException
@@ -1214,6 +1216,7 @@ def align_database_schemas(engine):
                     VALUES 
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'National Prioritization (PDP 2023-2028)', {bool_false}, {bool_true}, 1),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Resource Optimization (GovNet, GovCloud)', {bool_false}, {bool_true}, 2),
+                        ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Resource Optimization (GovNet, GovCloud)', {bool_false}, {bool_true}, 2),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'PeGIF Standardized APIs & Interoperability', {bool_true}, {bool_true}, 3),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Cross-Agency Collaboration (JMC / MOA)', {bool_false}, {bool_true}, 4),
                         ('HARMONIZATION_FRAMEWORK', 'Harmonization', 'Scalability and Sustainability (SPAR / PREXC)', {bool_true}, {bool_true}, 5);
@@ -1240,6 +1243,7 @@ async def lifespan(app: FastAPI):
     """
     Handles application startup and shutdown procedures safely.
     Defensively verifies schemas, purges legacy tables, patches runtime enums,
+    auto-bootstraps fresh databases with required users and metadata,
     and automatically executes cycle expiration / rollover checks.
     """
     agency_label = getattr(settings, "DEFAULT_AGENCY_NAME", "INSTITUTIONAL")
@@ -1247,7 +1251,6 @@ async def lifespan(app: FastAPI):
     logger.info(f"INITIALIZING {agency_label.upper()} E-ISSP COMPLIANCE ENGINE (DICT v.2026)")
     logger.info("=" * 70)
     
-    # 0. Defensively patch models listener globals
     # 1. Verify and compile database schema structures
     try:
         logger.info("Verifying and registering database schema metadata...")
@@ -1268,7 +1271,38 @@ async def lifespan(app: FastAPI):
     except Exception as enum_err:
         logger.error(f"Runtime enum column patching warning: {str(enum_err)}")
 
-    # 4. Automated Lifecycle Rollover Evaluation on Startup
+    # 4. Automated Default Accounts Bootstrapping on Startup (If Database is Fresh/Empty)
+    try:
+        with SessionLocal() as db:
+            from app.database.models import User
+            if db.query(User).count() == 0:
+                logger.info("Fresh database detected (0 users). Auto-bootstrapping default accounts & metadata...")
+                try:
+                    from seed import bootstrap_metadata, onboard_user
+                except ImportError:
+                    root_dir = Path(__file__).resolve().parent.parent
+                    if str(root_dir) not in sys.path:
+                        sys.path.insert(0, str(root_dir))
+                    from seed import bootstrap_metadata, onboard_user
+
+                dept_instances = bootstrap_metadata(db)
+                seed_pwd = getattr(settings, "DEFAULT_SEED_PASSWORD", None) or "admin123"
+                allowed = getattr(settings, "ALLOWED_EMAIL_DOMAINS", ["*"])
+                seed_domain = "cspc.edu.ph"
+                for d in allowed:
+                    if d and d != "*":
+                        seed_domain = d.strip().lower()
+                        break
+
+                onboard_user(db, f"mis@{seed_domain}", seed_pwd, "mis_admin", None, dept_instances)
+                onboard_user(db, f"planner@{seed_domain}", seed_pwd, "dept_user", "Public Frontline Services and Operations Division", dept_instances)
+                onboard_user(db, f"supply@{seed_domain}", seed_pwd, "supply_user", "Procurement and Property Management Office", dept_instances)
+                db.commit()
+                logger.info(f"Default accounts bootstrapped successfully for domain: @{seed_domain}")
+    except Exception as seed_err:
+        logger.warning(f"Auto-seed during startup note: {str(seed_err)}")
+
+    # 5. Automated Lifecycle Rollover Evaluation on Startup
     try:
         with SessionLocal() as db:
             from app.services.lifecycle_service import ISSPLifecycleEngine
@@ -1277,7 +1311,7 @@ async def lifespan(app: FastAPI):
     except Exception as lc_err:
         logger.warning(f"Lifecycle startup check note: {str(lc_err)}")
 
-    # 5. Scan and Log Registered Routing Tables
+    # 6. Scan and Log Registered Routing Tables
     logger.info("Scanning active API routing tables...")
     routes_registered = []
     for route in app.routes:

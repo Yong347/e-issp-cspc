@@ -46,6 +46,49 @@ const isTestArtwork = (urlOrName) => {
   return TEST_ARTWORK_BLACKLIST.some(keyword => lower.includes(keyword));
 };
 
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
 export default function DiagramVault() {
   const { user } = useAuth();
   const { activeCycle, fetchActiveCycle } = useCycle();
@@ -75,9 +118,8 @@ export default function DiagramVault() {
     system_architecture: null
   });
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
 
   // Auto-dismiss transient alerts
   useEffect(() => {
@@ -147,7 +189,10 @@ export default function DiagramVault() {
     setError(null);
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (res.ok) {
         const data = await res.json();
@@ -169,7 +214,7 @@ export default function DiagramVault() {
         });
       } else {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to retrieve registered diagram filepaths.");
+        throw new Error(parseErrorMessage(errData, "Failed to retrieve registered diagram filepaths."));
       }
     } catch (e) {
       setError(e.message);
@@ -211,7 +256,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to update schematic title in database.");
+        throw new Error(parseErrorMessage(errData, "Failed to update schematic title in database."));
       }
 
       setCustomTitles(updatedCustomTitles);
@@ -251,7 +296,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to reset schematic title.");
+        throw new Error(parseErrorMessage(errData, "Failed to reset schematic title."));
       }
 
       setCustomTitles(updatedCustomTitles);
@@ -307,7 +352,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to upload diagram asset.");
+        throw new Error(parseErrorMessage(errData, "Failed to upload diagram asset."));
       }
 
       const resData = await res.json();
@@ -356,7 +401,7 @@ export default function DiagramVault() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to clear diagram asset.");
+        throw new Error(parseErrorMessage(errData, "Failed to clear diagram asset."));
       }
 
       setSuccess(`Graphic asset for '${displayTitle}' removed.`);
@@ -399,7 +444,11 @@ export default function DiagramVault() {
         body: JSON.stringify(updates)
       });
 
-      if (!res.ok) throw new Error("Failed to purge unverified test artworks.");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errData, "Failed to purge unverified test artworks."));
+      }
+
       setSuccess("All unverified test artworks purged from database.");
       await fetchVaultData();
       if (fetchActiveCycle) fetchActiveCycle();

@@ -1,5 +1,5 @@
 // frontend/src/views/admin/Narrative/StrategicConcernsManager.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -86,6 +86,14 @@ export default function StrategicConcernsManager() {
   const { user } = useAuth();
   const { activeCycle } = useCycle();
 
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // Core Data States
   const [concerns, setConcerns] = useState([]);
   const [outcomes, setOutcomes] = useState([]);
@@ -123,7 +131,37 @@ export default function StrategicConcernsManager() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard navigation: Escape key cancels edit/aggregation mode
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && (editId || form.source_needs_assessment_id)) {
+        handleCancelEdit();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editId, form.source_needs_assessment_id]);
 
   // Load All Relational Artifacts
   const loadAllData = useCallback(async () => {
@@ -133,47 +171,64 @@ export default function StrategicConcernsManager() {
     try {
       // 1. Fetch Strategic Concerns (Part II.A)
       const concernsData = await getStrategicConcerns(token, activeCycle);
-      setConcerns(Array.isArray(concernsData) ? concernsData : []);
+      if (isMountedRef.current) {
+        setConcerns(Array.isArray(concernsData) ? concernsData : []);
+      }
 
       // 2. Fetch Organizational Outcomes (Part I.A.4 Link)
       const outData = await getOutcomes(token, activeCycle).catch(() => []);
       const outList = Array.isArray(outData) ? outData : [];
-      setOutcomes(outList);
-
-      setForm(prev => {
-        if (!prev.outcome_id && outList.length > 0) {
-          return {
-            ...prev,
-            outcome_id: String(outList[0].id),
-            mfo: outList[0].outcome_name || outList[0].program_name || ""
-          };
-        }
-        return prev;
-      });
+      if (isMountedRef.current) {
+        setOutcomes(outList);
+        setForm(prev => {
+          if (!prev.outcome_id && outList.length > 0) {
+            return {
+              ...prev,
+              outcome_id: String(outList[0].id),
+              mfo: outList[0].outcome_name || outList[0].program_name || ""
+            };
+          }
+          return prev;
+        });
+      }
 
       // 3. Fetch Downstream Information Systems (Part II.C & III.D)
       const sysData = await getInformationSystems(token, activeCycle).catch(() => []);
-      setSystems(Array.isArray(sysData) ? sysData : []);
+      if (isMountedRef.current) {
+        setSystems(Array.isArray(sysData) ? sysData : []);
+      }
 
       // 4. Fetch ICT Projects (Part III.E)
       const projData = await getIctProjects(token, activeCycle).catch(() => []);
-      setProjects(Array.isArray(projData) ? projData : []);
+      if (isMountedRef.current) {
+        setProjects(Array.isArray(projData) ? projData : []);
+      }
 
       // 5. Fetch Hardware Proposals (Part IV.A)
       const propData = await getProposalsQueue(token, { issp_period: activeCycle, limit: 1000 }).catch(() => []);
-      setProposals(Array.isArray(propData) ? propData : (propData?.data || []));
+      if (isMountedRef.current) {
+        setProposals(Array.isArray(propData) ? propData : (propData?.data || []));
+      }
 
       // 6. Fetch Network Infrastructures (Parts II.B.1 & III.A.1)
       const netData = await getNetworkInfrastructures(token, activeCycle).catch(() => []);
-      setNetworkInfrastructures(Array.isArray(netData) ? netData : []);
+      if (isMountedRef.current) {
+        setNetworkInfrastructures(Array.isArray(netData) ? netData : []);
+      }
 
       // 7. Fetch Department Needs Assessments (Section 8.0 Intake Pool)
       const naData = await getAllNeedsAssessments(token).catch(() => []);
-      setNeedsAssessments(Array.isArray(naData) ? naData : []);
+      if (isMountedRef.current) {
+        setNeedsAssessments(Array.isArray(naData) ? naData : []);
+      }
     } catch (err) {
-      setError(err.message || "Failed to load strategic concerns and verification dependencies.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to load strategic concerns and verification dependencies.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [activeCycle, token]);
 
@@ -350,7 +405,9 @@ export default function StrategicConcernsManager() {
         };
 
         await aggregateNeedsToStrategicConcern(token, payload, activeCycle);
-        setSuccess(`Department Needs Assessment aggregated into Strategic Concern '${form.critical_system}'.`);
+        if (isMountedRef.current) {
+          setSuccess(`Department Needs Assessment aggregated into Strategic Concern '${form.critical_system}'.`);
+        }
       } else if (editId) {
         await updateStrategicConcern(token, editId, {
           outcome_id: form.outcome_id ? parseInt(form.outcome_id, 10) : null,
@@ -360,7 +417,9 @@ export default function StrategicConcernsManager() {
           intended_use: form.intended_use.trim(),
           order_index: parseInt(form.order_index, 10) || 1
         });
-        setSuccess("Strategic concern updated successfully.");
+        if (isMountedRef.current) {
+          setSuccess("Strategic concern updated successfully.");
+        }
       } else {
         await createStrategicConcern(token, activeCycle, {
           outcome_id: form.outcome_id ? parseInt(form.outcome_id, 10) : null,
@@ -370,24 +429,36 @@ export default function StrategicConcernsManager() {
           intended_use: form.intended_use.trim(),
           order_index: parseInt(form.order_index, 10) || 1
         });
-        setSuccess("Strategic concern successfully registered.");
+        if (isMountedRef.current) {
+          setSuccess("Strategic concern successfully registered.");
+        }
       }
 
-      setForm({
-        outcome_id: outcomes.length > 0 ? String(outcomes[0].id) : "",
-        mfo: outcomes.length > 0 ? (outcomes[0].outcome_name || outcomes[0].program_name) : "",
-        critical_system: "",
-        problems: "",
-        intended_use: "",
-        order_index: concerns.length + 2,
-        source_needs_assessment_id: null
-      });
-      setEditId(null);
+      if (isMountedRef.current) {
+        setForm({
+          outcome_id: outcomes.length > 0 ? String(outcomes[0].id) : "",
+          mfo: outcomes.length > 0 ? (outcomes[0].outcome_name || outcomes[0].program_name) : "",
+          critical_system: "",
+          problems: "",
+          intended_use: "",
+          order_index: concerns.length + 2,
+          source_needs_assessment_id: null
+        });
+        setEditId(null);
+      }
       loadAllData();
     } catch (err) {
-      setError(err.message || "Failed to persist strategic concern.");
+      if (isMountedRef.current) {
+        let msg = err.message || "Failed to persist strategic concern.";
+        if (err.violations && Array.isArray(err.violations) && err.violations.length > 0) {
+          msg = `${msg}\n• ${err.violations.join("\n• ")}`;
+        }
+        setError(msg);
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -427,10 +498,14 @@ export default function StrategicConcernsManager() {
     setSuccess(null);
     try {
       await deleteStrategicConcern(token, id);
-      setSuccess("Strategic concern purged from registry.");
+      if (isMountedRef.current) {
+        setSuccess("Strategic concern purged from registry.");
+      }
       loadAllData();
     } catch (err) {
-      setError(err.message);
+      if (isMountedRef.current) {
+        setError(err.message || "Deletion failed.");
+      }
     }
   };
 
@@ -512,10 +587,11 @@ export default function StrategicConcernsManager() {
             type="button"
             onClick={loadAllData}
             disabled={loading}
-            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 font-bold shadow-xs cursor-pointer text-xs"
+            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 font-bold shadow-xs cursor-pointer text-xs disabled:opacity-50"
             title="Refresh Strategic Concerns Ledger"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>Sync</span>
           </button>
         </div>
       </div>
@@ -524,9 +600,9 @@ export default function StrategicConcernsManager() {
         <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center justify-between gap-2.5 animate-fadeIn shadow-xs">
           <div className="flex items-center gap-2.5">
             <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
-            <span>{error}</span>
+            <span className="whitespace-pre-wrap leading-relaxed">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -538,7 +614,7 @@ export default function StrategicConcernsManager() {
             <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
           </div>
-          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -627,7 +703,7 @@ export default function StrategicConcernsManager() {
           {/* Left Column: Form Panel */}
           <form onSubmit={handleSubmit} className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-4 h-fit shadow-xs">
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
+              <h3 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider flex items-center gap-1.5 font-serif">
                 {form.source_needs_assessment_id ? (
                   <Sparkles className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 ) : editId ? (

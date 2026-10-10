@@ -1,5 +1,5 @@
 ﻿// frontend/src/views/admin/Projects/InternalProjectsManager.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -58,6 +58,49 @@ import {
   Tag
 } from "lucide-react";
 
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
 // Default Canonical Harmonization Framework Criteria (DICT ISSP Guidelines v.2026)
 const CANONICAL_HARMONIZATION_CRITERIA = [
   { id: 1, name: "National Prioritization (PDP 2023-2028)", is_mandatory: false, description: "Alignment with National Development Goals" },
@@ -71,6 +114,14 @@ export default function InternalProjectsManager() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
   const navigate = useNavigate();
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Dynamic institutional default unit
   const defaultImplementingUnit = 
@@ -154,7 +205,8 @@ export default function InternalProjectsManager() {
   };
   const [form, setForm] = useState(initialFormState);
 
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const apiUrl = getApiUrl();
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
@@ -177,6 +229,33 @@ export default function InternalProjectsManager() {
     }
   }, [activeCycle]);
 
+  // Auto-dismiss temporary alerts
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Modal escape key handler
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (isModalOpen) setIsModalOpen(false);
+        if (linkingProject) setLinkingProject(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isModalOpen, linkingProject]);
+
   // Data Fetching Pipeline
   const fetchAllData = useCallback(async () => {
     if (!token || !activeCycle) return;
@@ -184,13 +263,27 @@ export default function InternalProjectsManager() {
     setError(null);
     try {
       const [projectsData, systemsData, policyData, metricsData, harmData, categoriesData] = await Promise.all([
-        getIctProjects(token, activeCycle).catch(() => []),
+        getIctProjects(token, activeCycle).catch(async () => {
+          const res = await fetch(`${apiUrl}/api/admin/ict-projects?issp_period=${encodeURIComponent(activeCycle)}`, {
+            headers: { 
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }
+          });
+          if (res.ok) {
+            const raw = await res.json();
+            return Array.isArray(raw) ? raw : (raw?.data || []);
+          }
+          return [];
+        }),
         getInformationSystems(token, activeCycle).catch(() => []),
         getPolicySettings(token).catch(() => null),
         getPerformanceMetrics(token, activeCycle).catch(() => []),
         getHarmonizationCriteria(token).catch(() => null),
         getStrategicCategories(token).catch(() => [])
       ]);
+
+      if (!isMountedRef.current) return;
 
       setProjects(Array.isArray(projectsData) ? projectsData : (projectsData?.data || []));
       setSystems(Array.isArray(systemsData) ? systemsData : (systemsData?.data || []));
@@ -205,11 +298,15 @@ export default function InternalProjectsManager() {
         setAvailableCriteria(harmData);
       }
     } catch (err) {
-      setError(err.message || "Failed to load project portfolio.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to load project portfolio.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
-  }, [activeCycle, token]);
+  }, [activeCycle, token, apiUrl]);
 
   useEffect(() => {
     fetchAllData();
@@ -265,9 +362,13 @@ export default function InternalProjectsManager() {
           seenIds.add(String(lp.id));
         }
       });
-      setAllAvailableProposals(mergedList);
+      if (isMountedRef.current) {
+        setAllAvailableProposals(mergedList);
+      }
     } catch {
-      setAllAvailableProposals(proj.linked_proposals || []);
+      if (isMountedRef.current) {
+        setAllAvailableProposals(proj.linked_proposals || []);
+      }
     }
   };
 
@@ -303,7 +404,9 @@ export default function InternalProjectsManager() {
     } catch (err) {
       setError(err.message || "Failed to link items to project.");
     } finally {
-      setSavingLinks(false);
+      if (isMountedRef.current) {
+        setSavingLinks(false);
+      }
     }
   };
 
@@ -627,7 +730,9 @@ export default function InternalProjectsManager() {
     } catch (err) {
       setError(err.message || "Failed to persist ICT project.");
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -1515,7 +1620,7 @@ export default function InternalProjectsManager() {
                         {proj.harmonizes_national_priority && <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">National Priority</span>}
                         {proj.harmonizes_resource_optimization && <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">Resource Optimization</span>}
                         {proj.harmonizes_pegif && <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 font-bold">PeGIF / APIs</span>}
-                        {proj.harmonizes_scalability && <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20 font-bold">SPAR / PREXC</span>}
+                        {proj.harmonizes_scalability && <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20 font-bold">SPAR / PREXC</span>}
                       </>
                     )}
                   </div>

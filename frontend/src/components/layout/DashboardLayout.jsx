@@ -5,6 +5,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useCycle } from "../../context/CycleContext";
 import { useNotifications } from "../../context/NotificationContext";
 import { useTheme } from "../../context/ThemeContext";
+import { API_BASE_URL } from "../../api/apiClient";
 import { 
   Search, Bell, Mail, CheckCircle2, Sun, Moon, 
   LayoutDashboard, FolderKanban, Database, 
@@ -92,11 +93,9 @@ export default function DashboardLayout() {
 
   useEffect(() => {
     if (userRole === "ROLE_DEPT_USER") {
-      const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-      const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
       const authToken = user?.token || localStorage.getItem("access_token") || "";
 
-      fetch(`${apiUrl}/api/dept/budget-summary`, {
+      fetch(`${API_BASE_URL}/api/dept/budget-summary`, {
         headers: { Authorization: `Bearer ${authToken}` }
       })
       .then(res => res.ok ? res.json() : null)

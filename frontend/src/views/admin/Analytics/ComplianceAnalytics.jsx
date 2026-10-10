@@ -36,8 +36,24 @@ export default function ComplianceAnalytics() {
   const [filterStatus, setFilterStatus] = useState("all"); // 'all' | 'flagged' | 'compliant'
   const [sortBy, setSortBy] = useState("ratio-desc"); // 'ratio-desc' | 'canvas-desc' | 'proposals-desc' | 'name-asc'
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  // Dynamic self-resolving API URL for production Azure & local development
+  const getApiUrl = () => {
+    if (typeof window !== "undefined" && window.location?.origin) {
+      const { hostname, origin, port } = window.location;
+      if (
+        port !== "5173" &&
+        port !== "3000" &&
+        hostname !== "localhost" &&
+        hostname !== "127.0.0.1"
+      ) {
+        return origin;
+      }
+    }
+    const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+    return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  };
+  const apiUrl = getApiUrl();
+
   const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
 
   const fetchAnalytics = useCallback(async () => {

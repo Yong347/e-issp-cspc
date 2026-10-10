@@ -1,5 +1,5 @@
 // frontend/src/views/shared/DocumentVault/DocumentVault.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -33,8 +33,50 @@ import {
   Edit3 
 } from "lucide-react";
 
-const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-const API_BASE_URL = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+};
+
+const API_BASE_URL = getApiUrl();
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
 
 // Official 7-Stage Compilation Pipeline Phases (matching backend Celery tasks)
 const COMPILATION_STAGES = [
@@ -60,7 +102,15 @@ export default function DocumentVault() {
   const isAdmin = user?.role === "ROLE_MIS_ADMIN";
   const defaultAgency = import.meta.env.VITE_DEFAULT_AGENCY_NAME || import.meta.env.VITE_AGENCY_NAME || "National Government Agency";
   const agencyName = cycleAgencyName || user?.agency_name || defaultAgency;
-  const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Active Narrative & Document Data
   const [narrative, setNarrative] = useState(null);
@@ -86,10 +136,10 @@ export default function DocumentVault() {
   // Interactive Live Cover Page Generator Modal State
   const [isCoverPreviewOpen, setIsCoverPreviewOpen] = useState(false);
 
-  const addLog = (msg, type = "info") => {
+  const addLog = useCallback((msg, type = "info") => {
     const timeStr = new Date().toLocaleTimeString();
     setCompilationLogs(prev => [...prev, { time: timeStr, text: msg, type }]);
-  };
+  }, []);
 
   // Fetch active narrative to verify compilation status and existing document URLs independently
   const fetchVaultDetails = useCallback(async () => {
@@ -102,14 +152,17 @@ export default function DocumentVault() {
         data = await getNarrative(token, activeCycle);
       } catch {
         const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-          headers: { Authorization: `Bearer ${token}` }
+          headers: { 
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          }
         });
         if (res.ok) {
           data = await res.json();
         }
       }
 
-      if (data) {
+      if (data && isMountedRef.current) {
         setNarrative(data);
         if (data.final_pdf_vault_url) {
           setCompiledPdfUrl(data.final_pdf_vault_url);
@@ -121,7 +174,9 @@ export default function DocumentVault() {
     } catch (err) {
       console.warn("Could not load narrative metadata:", err);
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [activeCycle, token]);
 
@@ -142,14 +197,17 @@ export default function DocumentVault() {
           data = await getTaskStatus(token, taskId);
         } catch {
           const res = await fetch(`${API_BASE_URL}/api/admin/governance/task-status/${encodeURIComponent(taskId)}`, {
-            headers: { Authorization: `Bearer ${token}` }
+            headers: { 
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }
           });
           if (res.ok) {
             data = await res.json();
           }
         }
 
-        if (!data) return;
+        if (!data || !isMountedRef.current) return;
 
         if (data.state === "PROGRESS" || data.state === "PENDING") {
           const prog = data.progress_percent || 15;
@@ -178,7 +236,7 @@ export default function DocumentVault() {
           clearInterval(interval);
         } else if (data.state === "FAILURE") {
           setIsCompiling(false);
-          const failureMsg = data.error || "Compilation failed during document generation.";
+          const failureMsg = data.error || (data.result && data.result.error) || "Compilation failed during document generation.";
           setError(failureMsg);
           addLog(`ERROR: Compilation aborted: ${failureMsg}`, "error");
           clearInterval(interval);
@@ -189,7 +247,7 @@ export default function DocumentVault() {
     }, 1800);
 
     return () => clearInterval(interval);
-  }, [taskId, isCompiling, token, fetchVaultDetails, isAdmin]);
+  }, [taskId, isCompiling, token, fetchVaultDetails, isAdmin, addLog]);
 
   // Trigger Asynchronous Document Compilation (PDF or Word DOCX)
   const handleTriggerCompilation = async (format = "pdf") => {
@@ -210,29 +268,28 @@ export default function DocumentVault() {
       } catch (err) {
         const res = await fetch(`${API_BASE_URL}/api/admin/governance/generate-issp?issp_period=${encodeURIComponent(activeCycle)}&export_format=${encodeURIComponent(format)}`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}` }
+          headers: { 
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          }
         });
 
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          let detailMsg = errData.detail;
-          if (typeof detailMsg === "object" && detailMsg !== null && detailMsg.violations) {
-            detailMsg = `${detailMsg.error || "Validation Failure"}:\n• ${detailMsg.violations.join("\n• ")}`;
-          } else if (Array.isArray(detailMsg)) {
-            detailMsg = detailMsg.map(e => e.msg || JSON.stringify(e)).join(" | ");
-          }
-          throw new Error(detailMsg || err.message || "Failed to trigger document compilation.");
+          throw new Error(parseErrorMessage(errData, "Failed to trigger document compilation."));
         }
         resData = await res.json();
       }
 
-      if (resData?.task_id) {
+      if (resData?.task_id && isMountedRef.current) {
         setTaskId(resData.task_id);
         addLog(`QUEUED: Task registered with Worker ID ${resData.task_id} (Format: ${format.toUpperCase()})`, "info");
       }
     } catch (err) {
-      setIsCompiling(false);
-      setError(err.message || "Failed to initiate compilation.");
+      if (isMountedRef.current) {
+        setIsCompiling(false);
+        setError(err.message || "Failed to initiate compilation.");
+      }
     }
   };
 
@@ -263,11 +320,17 @@ export default function DocumentVault() {
       window.URL.revokeObjectURL(blobUrl);
       document.body.removeChild(link);
 
-      setSuccess("DBM OSPS/NEP-compliant CSV budget spreadsheet exported successfully.");
+      if (isMountedRef.current) {
+        setSuccess("DBM OSPS/NEP-compliant CSV budget spreadsheet exported successfully.");
+      }
     } catch (err) {
-      setError(err.message || "Failed to download DBM CSV export.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to download DBM CSV export.");
+      }
     } finally {
-      setExportingCsv(false);
+      if (isMountedRef.current) {
+        setExportingCsv(false);
+      }
     }
   };
 
@@ -333,11 +396,11 @@ export default function DocumentVault() {
 
     // Sanitize Signatory Names (Eliminate placeholder titles; ensure actual human names render)
     const rawCio = String(narrative?.cio_name || narrative?.signatory_prepared_by || "").trim();
-    const isGenericCio = !rawCio || ["chief information officer", "cio", "none", "null"].includes(rawCio.toLowerCase());
+    const isGenericCio = !rawCio || ["chief information officer", "cio", "none", "null", "undefined"].includes(rawCio.toLowerCase());
     const cioSignatory = isGenericCio ? "REY T. CORTEZ, MIT" : rawCio.toUpperCase();
 
     const rawHead = String(narrative?.head_of_agency_name || narrative?.signatory_approved_by || "").trim();
-    const isGenericHead = !rawHead || ["head of agency", "agency head", "college president", "president", "none", "null"].includes(rawHead.toLowerCase());
+    const isGenericHead = !rawHead || ["head of agency", "agency head", "college president", "president", "none", "null", "undefined"].includes(rawHead.toLowerCase());
     const headSignatory = isGenericHead ? "AMADO A. OLIVA JR, PhD." : rawHead.toUpperCase();
 
     const agencyHeadTitle = narrative?.agency_head_position || "Agency Head";

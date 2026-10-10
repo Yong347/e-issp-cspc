@@ -1,6 +1,32 @@
 // frontend/src/api/auth.js
 
-const rawRoot = import.meta.env?.VITE_API_URL || (typeof window !== "undefined" && window.location.hostname !== "localhost" ? window.location.origin : "http://localhost:8000");export const API_ROOT = rawRoot.endsWith("/") ? rawRoot.slice(0, -1) : rawRoot;
+/**
+ * Dynamically resolves the API root:
+ * In deployed/production browser environments (not running on local Vite dev server ports),
+ * it uses window.location.origin so requests hit the live server instead of localhost:8000.
+ */
+const getApiRoot = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+
+  const rawRoot = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL;
+  if (rawRoot && rawRoot.trim() !== "") {
+    return rawRoot.trim().endsWith("/") ? rawRoot.trim().slice(0, -1) : rawRoot.trim();
+  }
+
+  return "http://localhost:8000";
+};
+
+export const API_ROOT = getApiRoot();
 const BASE_URL = `${API_ROOT}/api/auth`;
 
 /**

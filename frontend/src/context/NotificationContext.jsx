@@ -29,12 +29,24 @@ export function NotificationProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // Resolve API Base URL without trailing slash
-  const rawUrl = 
-    import.meta.env?.VITE_API_URL || 
-    import.meta.env?.VITE_API_BASE_URL || 
-    "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+  // Dynamically resolves API root: uses window.location.origin in production
+  // to prevent Vite from hardcoding localhost:8000, while preserving local development.
+  const getApiUrl = () => {
+    if (typeof window !== "undefined" && window.location?.origin) {
+      const { hostname, origin, port } = window.location;
+      if (
+        port !== "5173" &&
+        port !== "3000" &&
+        hostname !== "localhost" &&
+        hostname !== "127.0.0.1"
+      ) {
+        return origin;
+      }
+    }
+    const raw = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+    return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+  };
+  const apiUrl = getApiUrl();
 
   // Resolve Active Authentication Token & Role strictly from active authenticated session
   const authToken = user?.token || token || null;

@@ -1,5 +1,5 @@
 // frontend/src/views/admin/Narrative/NarrativeManager.jsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
@@ -50,6 +50,49 @@ import {
   ArrowRight,
   CheckSquare
 } from "lucide-react";
+
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
 
 // Presets for Standard Public-Sector Stakeholder Groups
 const STAKEHOLDER_PRESETS = [
@@ -109,6 +152,14 @@ export default function NarrativeManager() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { activeCycle, fetchActiveCycle } = useCycle();
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Dynamic Institutional Fallbacks
   const defaultAgencyName = import.meta.env?.VITE_DEFAULT_AGENCY_NAME || import.meta.env?.VITE_AGENCY_NAME || user?.agency_name || "National Government Agency";
@@ -230,9 +281,27 @@ export default function NarrativeManager() {
   const [drBia, setDrBia] = useState([]);
   const [drMetrics, setDrMetrics] = useState([]);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token")) : "");
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
 
   useEffect(() => {
     if (activeCycle) {
@@ -337,15 +406,20 @@ export default function NarrativeManager() {
   };
 
   const fetchCycleData = useCallback(async () => {
-    if (!activeCycle) return;
+    if (!activeCycle || !token) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (res.ok) {
         const data = await res.json();
+        if (!isMountedRef.current) return;
+
         setAgencyName(data.agency_name || defaultAgencyName);
         setWebsiteUrl(data.agency_website_url || defaultWebsiteUrl);
         setIsAmendment(Boolean(data.is_amendment));
@@ -402,72 +476,104 @@ export default function NarrativeManager() {
     } catch (e) {
       console.warn("Initializing cycle metadata:", e);
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
     }
   }, [activeCycle, apiUrl, token, defaultAgencyName, defaultWebsiteUrl, defaultAgencyHeadTitle]);
 
   const fetchHumanCapitals = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setHumanCapitals(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setHumanCapitals(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchStakeholders = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setStakeholders(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setStakeholders(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchNetworkAndCyber = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
+      const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
       const [netRes, cyberRes] = await Promise.all([
-        fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${apiUrl}/api/admin/cybersecurity-controls?issp_period=${encodeURIComponent(activeCycle)}`, { headers: { Authorization: `Bearer ${token}` } })
+        fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, { headers }),
+        fetch(`${apiUrl}/api/admin/cybersecurity-controls?issp_period=${encodeURIComponent(activeCycle)}`, { headers })
       ]);
-      if (netRes.ok) setNetworkInfraList(await netRes.json());
-      if (cyberRes.ok) setCyberControlsList(await cyberRes.json());
+      if (netRes.ok) {
+        const netData = await netRes.json();
+        if (isMountedRef.current) setNetworkInfraList(Array.isArray(netData) ? netData : []);
+      }
+      if (cyberRes.ok) {
+        const cyberData = await cyberRes.json();
+        if (isMountedRef.current) setCyberControlsList(Array.isArray(cyberData) ? cyberData : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchEgovChecklists = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/egov-checklists`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setEgovChecklists(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setEgovChecklists(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchDrTeams = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-teams`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setDrTeam(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setDrTeam(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchDrBias = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-bias`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setDrBia(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setDrBia(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
   const fetchDrMetrics = useCallback(async () => {
+    if (!activeCycle || !token) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/dr-metrics`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       });
-      if (res.ok) setDrMetrics(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        if (isMountedRef.current) setDrMetrics(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   }, [activeCycle, apiUrl, token]);
 
@@ -545,14 +651,18 @@ export default function NarrativeManager() {
 
     try {
       await updateNarrative(token, activeCycle, payload);
-      setSuccess("Primary narrative, statutory mandates, Signatories, and DRBCP compliance sections saved successfully as structured plain text.");
+      if (isMountedRef.current) {
+        setSuccess("Primary narrative, statutory mandates, Signatories, and DRBCP compliance sections saved successfully as structured plain text.");
+      }
       fetchCycleData();
       return true;
     } catch (err) {
-      setError(err.message || "Failed to save parameters.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to save parameters.");
+      }
       throw err;
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -580,12 +690,14 @@ export default function NarrativeManager() {
 
     try {
       await activateCycle(token, targetCycle);
-      setSuccess(`Planning cycle updated and activated to: FY ${targetCycle} (${span}-Year Horizon)`);
+      if (isMountedRef.current) {
+        setSuccess(`Planning cycle updated and activated to: FY ${targetCycle} (${span}-Year Horizon)`);
+      }
       await fetchActiveCycle();
     } catch (err) {
-      setError(err.message);
+      if (isMountedRef.current) setError(err.message);
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -600,12 +712,14 @@ export default function NarrativeManager() {
 
     try {
       await resetCycle(token, activeCycle);
-      setSuccess("Active cycle successfully reset. Clean state established.");
+      if (isMountedRef.current) {
+        setSuccess("Active cycle successfully reset. Clean state established.");
+      }
       await fetchActiveCycle();
     } catch (err) {
-      setError(err.message);
+      if (isMountedRef.current) setError(err.message);
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -618,18 +732,22 @@ export default function NarrativeManager() {
     setSubmitting(true);
     try {
       const res = await evaluateLifecycleRollover(token, force);
-      setRolloverModal({
-        isOpen: true,
-        data: res,
-        currentYear: new Date().getFullYear(),
-        activeCycle
-      });
+      if (isMountedRef.current) {
+        setRolloverModal({
+          isOpen: true,
+          data: res,
+          currentYear: new Date().getFullYear(),
+          activeCycle
+        });
+      }
       if (fetchActiveCycle) fetchActiveCycle();
       loadAllData();
     } catch (err) {
-      setError(err.message || "Failed to execute lifecycle rollover evaluation.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to execute lifecycle rollover evaluation.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) setSubmitting(false);
     }
   };
 
@@ -684,32 +802,52 @@ export default function NarrativeManager() {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(hcForm)
         });
-        if (!res.ok) throw new Error("Failed to update human capital matrix entry.");
-        setSuccess("Staffing matrix row updated.");
-        handleCancelEditHc();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to update human capital matrix entry."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Staffing matrix row updated.");
+          handleCancelEditHc();
+        }
       } else {
         const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/human-capitals`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(hcForm)
         });
-        if (!res.ok) throw new Error("Failed to record human capital matrix entry.");
-        setSuccess("Staffing matrix row added.");
-        setHcForm({ employment_status: "Plantilla (Filled)", is_proposed: false, it_positions_count: 0, non_it_positions_count: 0, male_count: 0, female_count: 0 });
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to record human capital matrix entry."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Staffing matrix row added.");
+          setHcForm({ employment_status: "Plantilla (Filled)", is_proposed: false, it_positions_count: 0, non_it_positions_count: 0, male_count: 0, female_count: 0 });
+        }
       }
       fetchHumanCapitals();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    } finally { 
+      if (isMountedRef.current) setSubmitting(false); 
+    }
   };
 
   const handleDeleteHumanCapital = async (id) => {
     if (!window.confirm("Permanently delete this staffing matrix entry?")) return;
     try {
-      await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(id)}`, {
+      const res = await fetch(`${apiUrl}/api/admin/human-capitals/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to delete staffing entry."));
+      }
       fetchHumanCapitals();
-    } catch (err) { setError(err.message); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    }
   };
 
   // --- TAB 6: STAKEHOLDER ANALYSIS HANDLERS ---
@@ -761,32 +899,52 @@ export default function NarrativeManager() {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(shForm)
         });
-        if (!res.ok) throw new Error("Failed to update stakeholder analysis.");
-        setSuccess("Stakeholder analysis updated successfully.");
-        handleCancelEditStakeholder();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to update stakeholder analysis."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Stakeholder analysis updated successfully.");
+          handleCancelEditStakeholder();
+        }
       } else {
         const res = await fetch(`${apiUrl}/api/admin/narratives/${encodeURIComponent(activeCycle)}/stakeholders`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(shForm)
         });
-        if (!res.ok) throw new Error("Failed to record stakeholder analysis.");
-        setSuccess("Stakeholder analysis recorded successfully.");
-        setShForm({ stakeholder_group: "", transaction_processed_incoming: "", transaction_processed_outgoing: "", complexity_incoming: "Simple", complexity_outgoing: "Simple" });
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to record stakeholder analysis."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Stakeholder analysis recorded successfully.");
+          setShForm({ stakeholder_group: "", transaction_processed_incoming: "", transaction_processed_outgoing: "", complexity_incoming: "Simple", complexity_outgoing: "Simple" });
+        }
       }
       fetchStakeholders();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    } finally { 
+      if (isMountedRef.current) setSubmitting(false); 
+    }
   };
 
   const handleDeleteStakeholder = async (id, groupName) => {
     if (!window.confirm(`Permanently delete stakeholder group '${groupName}'?`)) return;
     try {
-      await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(id)}`, {
+      const res = await fetch(`${apiUrl}/api/admin/stakeholders/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to delete stakeholder record."));
+      }
       fetchStakeholders();
-    } catch (err) { setError(err.message); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    }
   };
 
   // --- TAB 7: NETWORK INFRASTRUCTURE HANDLERS ---
@@ -830,32 +988,52 @@ export default function NarrativeManager() {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(netForm)
         });
-        if (!res.ok) throw new Error("Failed to update network infrastructure.");
-        setSuccess("Network profile updated.");
-        handleCancelEditNet();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to update network infrastructure."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Network profile updated.");
+          handleCancelEditNet();
+        }
       } else {
         const res = await fetch(`${apiUrl}/api/admin/network-infrastructures?issp_period=${encodeURIComponent(activeCycle)}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(netForm)
         });
-        if (!res.ok) throw new Error("Failed to register network infrastructure.");
-        setSuccess("Network infrastructure profile saved.");
-        handleCancelEditNet();
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errPayload, "Failed to register network infrastructure."));
+        }
+        if (isMountedRef.current) {
+          setSuccess("Network infrastructure profile saved.");
+          handleCancelEditNet();
+        }
       }
       fetchNetworkAndCyber();
-    } catch (err) { setError(err.message); } finally { setSubmitting(false); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    } finally { 
+      if (isMountedRef.current) setSubmitting(false); 
+    }
   };
 
   const handleDeleteNetworkInfra = async (id) => {
     if (!window.confirm("Delete this network infrastructure profile?")) return;
     try {
-      await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(id)}`, {
+      const res = await fetch(`${apiUrl}/api/admin/network-infrastructures/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(parseErrorMessage(errPayload, "Failed to delete network profile."));
+      }
       fetchNetworkAndCyber();
-    } catch (err) { setError(err.message); }
+    } catch (err) { 
+      if (isMountedRef.current) setError(err.message); 
+    }
   };
 
   const calculatedSpan = (parseInt(endYear, 10) || 2030) - (parseInt(startYear, 10) || 2028) + 1;
@@ -901,7 +1079,7 @@ export default function NarrativeManager() {
       {error && (
         <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
           <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>{error}</span>
+          <span className="whitespace-pre-wrap leading-relaxed">{error}</span>
         </div>
       )}
 

@@ -46,9 +46,30 @@ const STANDARD_ICT_PRESETS = [
   { title: "Technical Support Specialist", status: "Outsourced (JO / COS / HTC)" }
 ];
 
+/**
+ * Normalizes error messages from API or Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const extractErrorMessage = (err, fallbackMsg = "Operation failed") => {
+  if (!err) return fallbackMsg;
+  if (typeof err === "string") return err;
+  if (err.message && typeof err.message === "string") return err.message;
+  if (err.detail) {
+    if (typeof err.detail === "string") return err.detail;
+    if (Array.isArray(err.detail)) {
+      return err.detail
+        .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+        .join(" | ");
+    }
+    return JSON.stringify(err.detail);
+  }
+  return fallbackMsg;
+};
+
 export default function StaffPositionsManager() {
   const { user } = useAuth();
   const { activeCycle } = useCycle();
+  
   const [positions, setPositions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -73,7 +94,33 @@ export default function StaffPositionsManager() {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(initialFormState);
 
-  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "") || "";
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 7000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard Escape listener to cancel inline edit mode
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && editingId !== null) {
+        handleCancelEdit();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editingId]);
 
   const fetchPositions = useCallback(async () => {
     if (!activeCycle || !token) return;
@@ -83,7 +130,7 @@ export default function StaffPositionsManager() {
       const data = await getStaffPositions(token, activeCycle);
       setPositions(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err.message || "Failed to load proposed ICT staff positions.");
+      setError(extractErrorMessage(err, "Failed to load proposed ICT staff positions."));
     } finally {
       setLoading(false);
     }
@@ -124,18 +171,20 @@ export default function StaffPositionsManager() {
       setForm(initialFormState);
       fetchPositions();
     } catch (err) {
-      setError(err.message || "Failed to register proposed ICT staff position.");
+      setError(extractErrorMessage(err, "Failed to register proposed ICT staff position."));
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleStartEdit = (pos) => {
+    setError(null);
+    setSuccess(null);
     setEditingId(pos.id);
     setEditForm({
-      position_title: pos.position_title,
-      status: pos.status,
-      count: pos.count
+      position_title: pos.position_title || "",
+      status: pos.status || "Plantilla (Permanent)",
+      count: pos.count || 1
     });
   };
 
@@ -173,7 +222,7 @@ export default function StaffPositionsManager() {
       setEditingId(null);
       fetchPositions();
     } catch (err) {
-      setError(err.message || "Failed to update proposed ICT staff position.");
+      setError(extractErrorMessage(err, "Failed to update proposed ICT staff position."));
     } finally {
       setSubmitting(false);
     }
@@ -189,7 +238,7 @@ export default function StaffPositionsManager() {
       if (editingId === id) handleCancelEdit();
       fetchPositions();
     } catch (err) {
-      setError(err.message || "Failed to delete proposed staff position.");
+      setError(extractErrorMessage(err, "Failed to delete proposed staff position."));
     }
   };
 
@@ -234,7 +283,7 @@ export default function StaffPositionsManager() {
   const filteredPositions = useMemo(() => {
     return positions.filter(pos => {
       const matchesSearch = !searchTerm.trim() || 
-        pos.position_title.toLowerCase().includes(searchTerm.toLowerCase());
+        (pos.position_title || "").toLowerCase().includes(searchTerm.toLowerCase());
       
       const matchesStatus = statusFilter === "ALL" || pos.status === statusFilter;
       return matchesSearch && matchesStatus;
@@ -289,9 +338,10 @@ export default function StaffPositionsManager() {
           />
 
           <button
+            type="button"
             onClick={fetchPositions}
             disabled={loading}
-            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
+            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-300 dark:border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 font-bold shadow-xs text-xs"
             title="Refresh positions list"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -355,9 +405,13 @@ export default function StaffPositionsManager() {
         <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
           <div className="flex items-center gap-2.5">
             <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
-            <span>{error}</span>
+            <span className="whitespace-pre-wrap">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button 
+            type="button"
+            onClick={() => setError(null)} 
+            className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -369,7 +423,11 @@ export default function StaffPositionsManager() {
             <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
           </div>
-          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button 
+            type="button"
+            onClick={() => setSuccess(null)} 
+            className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -458,7 +516,7 @@ export default function StaffPositionsManager() {
           <div className="p-3 bg-blue-50 dark:bg-blue-955/20 border border-blue-200 dark:border-blue-900/40 rounded-xl text-[10px] text-blue-800 dark:text-blue-300 leading-relaxed flex items-start gap-2">
             <Info className="w-4 h-4 shrink-0 mt-0.5 text-blue-600 dark:text-blue-400" />
             <span>
-              <strong>DICT Template Page 19:</strong> These positions populate the <em>Part III.C Proposed ICT Human Capital</em> table, validating technical staffing feasibility for in-house developed systems.
+              <strong>DICT Template Page 19:</strong> These positions populate the <em>Part III.C Proposed ICT Human Capital</em> table, validating technical staffing feasibility for in-house developed systems [5].
             </span>
           </div>
 
@@ -496,6 +554,15 @@ export default function StaffPositionsManager() {
                     onChange={e => setSearchTerm(e.target.value)}
                     className="pl-8 pr-2.5 py-1.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-xs outline-none text-slate-900 dark:text-white focus:border-blue-500 w-40 sm:w-48"
                   />
+                  {searchTerm && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchTerm("")}
+                      className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
 
                 <select
@@ -599,6 +666,7 @@ export default function StaffPositionsManager() {
                             <td className="py-3 px-3 text-right">
                               <div className="flex justify-end gap-1.5">
                                 <button
+                                  type="button"
                                   onClick={() => handleStartEdit(pos)}
                                   className="p-1.5 hover:text-blue-600 dark:hover:text-blue-400 text-slate-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                                   title="Edit properties"
@@ -606,6 +674,7 @@ export default function StaffPositionsManager() {
                                   <Edit3 className="w-3.5 h-3.5" />
                                 </button>
                                 <button
+                                  type="button"
                                   onClick={() => handleDelete(pos.id, pos.position_title)}
                                   className="p-1.5 hover:text-rose-600 dark:hover:text-rose-400 text-slate-400 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-955/40 transition-colors cursor-pointer"
                                   title="Purge staff position record"

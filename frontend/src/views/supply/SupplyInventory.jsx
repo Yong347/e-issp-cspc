@@ -1,5 +1,5 @@
 // frontend/src/views/supply/SupplyInventory.jsx
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useLocation, Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { useCycle } from "../../context/CycleContext";
@@ -40,7 +40,50 @@ import {
   FileSpreadsheet
 } from "lucide-react";
 
-// Canonical DICT Annex 1 Standard Categories (Template Pages 1–3)
+// Dynamic API URL resolver: automatically uses current browser origin in production
+// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
+const getApiUrl = () => {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const { hostname, origin, port } = window.location;
+    if (
+      port !== "5173" &&
+      port !== "3000" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1"
+    ) {
+      return origin;
+    }
+  }
+  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+  return rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
+};
+
+/**
+ * Normalizes error messages from FastAPI / Pydantic validation envelopes
+ * without rendering unhelpful "[object Object]" text.
+ */
+const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
+  if (!errData) return fallbackMsg;
+  if (typeof errData.detail === "string") return errData.detail;
+  if (Array.isArray(errData.detail)) {
+    return errData.detail
+      .map(e => (e.loc ? `[${e.loc.filter(p => p !== "body").join(" -> ")}]: ` : "") + (e.msg || JSON.stringify(e)))
+      .join(" | ");
+  }
+  if (typeof errData.detail === "object" && errData.detail !== null) {
+    if (Array.isArray(errData.detail.violations)) {
+      return `${errData.detail.error || "Integrity Violation"}:\n• ${errData.detail.violations.join("\n• ")}`;
+    }
+    return JSON.stringify(errData.detail);
+  }
+  if (Array.isArray(errData.violations)) {
+    return `${errData.error || "Integrity Violation"}:\n• ${errData.violations.join("\n• ")}`;
+  }
+  if (errData.message) return errData.message;
+  return fallbackMsg;
+};
+
+// Canonical DICT Annex 1 Standard Categories (Template Pages 1–3) [4]
 const DEFAULT_EQUIPMENT_CATEGORIES = [
   "Servers",
   "Desktop",
@@ -198,9 +241,16 @@ export default function SupplyInventory() {
   const [reportUrlInput, setReportUrlInput] = useState("");
   const [uploadingReport, setUploadingReport] = useState(false);
 
-  const rawUrl = import.meta.env?.VITE_API_URL || import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
-  const apiUrl = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
-  const token = user?.token || user?.accessToken || localStorage.getItem("access_token") || "";
+  const apiUrl = getApiUrl();
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
@@ -219,14 +269,18 @@ export default function SupplyInventory() {
   // Auto-dismiss transient notifications
   useEffect(() => {
     if (success) {
-      const timer = setTimeout(() => setSuccess(null), 5000);
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
       return () => clearTimeout(timer);
     }
   }, [success]);
 
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => setError(null), 7000);
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 7000);
       return () => clearTimeout(timer);
     }
   }, [error]);
@@ -249,9 +303,12 @@ export default function SupplyInventory() {
     if (!token) return;
     try {
       const res = await fetch(`${apiUrl}/api/supply/categories`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
-      if (res.ok) {
+      if (res.ok && isMountedRef.current) {
         const data = await res.json();
         if (data.equipment_categories && Array.isArray(data.equipment_categories)) {
           setEquipmentCategories(data.equipment_categories);
@@ -269,55 +326,69 @@ export default function SupplyInventory() {
     if (!token) return;
     try {
       const res = await fetch(`${apiUrl}/api/supply/departments`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setDepartments(data);
-        if (data.length > 0 && !form.department_id) {
-          setForm(f => ({ ...f, department_id: String(data[0].department_id || data[0].id) }));
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
         }
+      });
+      if (res.ok && isMountedRef.current) {
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : [];
+        setDepartments(list);
+        setForm(f => {
+          if (list.length > 0 && !f.department_id) {
+            return { ...f, department_id: String(list[0].department_id || list[0].id) };
+          }
+          return f;
+        });
       }
     } catch (err) {
       console.error("Failed to fetch departments directory:", err);
     }
-  }, [apiUrl, token, form.department_id]);
+  }, [apiUrl, token]);
 
   const fetchInventory = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError(null);
     try {
+      const headers = { 
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      };
+
       const params = ["limit=10000"];
       if (activeCycle) params.push(`issp_period=${encodeURIComponent(activeCycle)}`);
       if (deptFilter) params.push(`dept_id=${encodeURIComponent(deptFilter)}`);
       const queryParams = `?${params.join("&")}`;
 
       const [invRes, propRes] = await Promise.all([
-        fetch(`${apiUrl}/api/supply/inventory${queryParams}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle || "2026-2028")}&limit=1000`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }).catch(() => null)
+        fetch(`${apiUrl}/api/supply/inventory${queryParams}`, { headers }),
+        fetch(`${apiUrl}/api/admin/proposals?issp_period=${encodeURIComponent(activeCycle || "2026-2028")}&limit=1000`, { headers }).catch(() => null)
       ]);
 
       if (!invRes.ok) {
         const errData = await invRes.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to load baseline inventory records.");
+        throw new Error(parseErrorMessage(errData, "Failed to load baseline inventory records."));
       }
       
       const invData = await invRes.json();
-      setInventory(Array.isArray(invData) ? invData : []);
+      if (isMountedRef.current) {
+        setInventory(Array.isArray(invData) ? invData : []);
 
-      if (propRes && propRes.ok) {
-        const pJson = await propRes.json();
-        setProposals(Array.isArray(pJson) ? pJson : (pJson?.data || []));
+        if (propRes && propRes.ok) {
+          const pJson = await propRes.json();
+          setProposals(Array.isArray(pJson) ? pJson : (pJson?.data || []));
+        }
       }
     } catch (err) {
-      setError(err.message || "Network error loading inventory ledger.");
+      if (isMountedRef.current) {
+        setError(err.message || "Network error loading inventory ledger.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [apiUrl, token, activeCycle, deptFilter]);
 
@@ -410,19 +481,25 @@ export default function SupplyInventory() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to register baseline inventory item.");
+        throw new Error(parseErrorMessage(errData, "Failed to register baseline inventory item."));
       }
 
-      setSuccess(`Asset '${form.item_name}' successfully logged into Annex 1 for cycle FY ${activeCycle}.`);
-      setForm(prev => ({
-        ...initialFormState,
-        department_id: prev.department_id
-      }));
+      if (isMountedRef.current) {
+        setSuccess(`Asset '${form.item_name}' successfully logged into Annex 1 for cycle FY ${activeCycle}.`);
+        setForm(prev => ({
+          ...initialFormState,
+          department_id: prev.department_id
+        }));
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Failed to record asset.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to record asset.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -504,16 +581,22 @@ export default function SupplyInventory() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to update inventory record.");
+        throw new Error(parseErrorMessage(errData, "Failed to update inventory record."));
       }
 
-      setSuccess(`Inventory record for '${editForm.item_name}' updated.`);
-      setEditingItem(null);
+      if (isMountedRef.current) {
+        setSuccess(`Inventory record for '${editForm.item_name}' updated.`);
+        setEditingItem(null);
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Failed to update inventory.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update inventory.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -524,17 +607,24 @@ export default function SupplyInventory() {
     try {
       const res = await fetch(`${apiUrl}/api/supply/inventory/${id}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to delete inventory record.");
+        throw new Error(parseErrorMessage(errData, "Failed to delete inventory record."));
       }
       
-      setSuccess(`Asset record for '${name}' removed.`);
+      if (isMountedRef.current) {
+        setSuccess(`Asset record for '${name}' removed.`);
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Failed to delete record.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete record.");
+      }
     }
   };
 
@@ -558,11 +648,16 @@ export default function SupplyInventory() {
             unserviceable_report_url: reportUrlInput.trim()
           })
         });
-        if (!res.ok) throw new Error("Failed to attach IIRUP report URL.");
-        setSuccess(`IIRUP Inspection Report linked to '${activeReportAsset.item_name}'.`);
-        setActiveReportAsset(null);
-        setReportFile(null);
-        setReportUrlInput("");
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(parseErrorMessage(errData, "Failed to attach IIRUP report URL."));
+        }
+        if (isMountedRef.current) {
+          setSuccess(`IIRUP Inspection Report linked to '${activeReportAsset.item_name}'.`);
+          setActiveReportAsset(null);
+          setReportFile(null);
+          setReportUrlInput("");
+        }
         fetchInventory();
         return;
       }
@@ -584,18 +679,24 @@ export default function SupplyInventory() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to upload inspection report.");
+        throw new Error(parseErrorMessage(errData, "Failed to upload inspection report."));
       }
 
-      setSuccess(`IIRUP Inspection Report uploaded and linked to '${activeReportAsset.item_name}'.`);
-      setActiveReportAsset(null);
-      setReportFile(null);
-      setReportUrlInput("");
+      if (isMountedRef.current) {
+        setSuccess(`IIRUP Inspection Report uploaded and linked to '${activeReportAsset.item_name}'.`);
+        setActiveReportAsset(null);
+        setReportFile(null);
+        setReportUrlInput("");
+      }
       fetchInventory();
     } catch (err) {
-      setError(err.message || "Upload failed.");
+      if (isMountedRef.current) {
+        setError(err.message || "Upload failed.");
+      }
     } finally {
-      setUploadingReport(false);
+      if (isMountedRef.current) {
+        setUploadingReport(false);
+      }
     }
   };
 
@@ -1029,7 +1130,7 @@ export default function SupplyInventory() {
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-start justify-between shadow-xs animate-fadeIn">
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
           <div className="flex items-center gap-2.5">
             <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
@@ -1611,7 +1712,7 @@ export default function SupplyInventory() {
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
                     <th className="p-3.5 w-1/3">ICT Resources</th>
                     <th className="p-3.5 w-1/4">Office Location</th>
                     <th className="p-3.5 text-center w-28">Operational</th>
@@ -1724,7 +1825,7 @@ export default function SupplyInventory() {
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-955 text-slate-500 dark:text-slate-400 uppercase font-bold text-[10px] font-mono">
                     <th className="p-3.5 w-1/3">ICT Resources</th>
                     <th className="p-3.5 w-1/4">Office Location</th>
                     <th className="p-3.5 text-center w-36">Perpetual</th>
@@ -2064,7 +2165,7 @@ export default function SupplyInventory() {
                   type="file"
                   accept="application/pdf"
                   onChange={e => setReportFile(e.target.files[0])}
-                  className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1.5 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
+                  className="w-full text-slate-600 dark:text-slate-400 text-xs file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-blue-600 file:text-white file:cursor-pointer"
                 />
               </div>
 
