@@ -887,7 +887,7 @@ def align_database_schemas(engine):
                         ELSE 0 
                     END,
                     is_operations = CASE 
-                        WHEN LOWER(classification) LIKE '%operations%' 
+                        WHEN (LOWER(classification) LIKE '%operations%' AND LOWER(classification) NOT LIKE '%support%') 
                           OR is_frontline_service = 1 
                           OR is_non_frontline_service = 1 THEN 1 
                         ELSE 0 
@@ -900,6 +900,13 @@ def align_database_schemas(engine):
                         WHEN LOWER(classification) LIKE '%non-frontline%' THEN 1 
                         ELSE 0 
                     END;
+
+                -- Auto-heal: Clear erroneous is_operations flag for pure Support to Operations systems
+                UPDATE information_systems
+                SET is_operations = 0
+                WHERE is_support_to_operations = 1 
+                  AND is_frontline_service = 0 
+                  AND is_non_frontline_service = 0;
             """))
 
             safe_exec(conn, text("""

@@ -596,7 +596,7 @@ class InformationSystemCreate(BaseModel):
                 self.is_support_to_operations = True
             if "general administrative" in class_str or "administrative" in class_str:
                 self.is_general_administrative = True
-            if "operations" in class_str or "frontline" in class_str:
+            if ("operations" in class_str and "support" not in class_str) or "frontline" in class_str:
                 self.is_operations = True
             if "frontline" in class_str:
                 if "non-frontline" in class_str:

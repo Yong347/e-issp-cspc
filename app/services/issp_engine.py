@@ -360,7 +360,7 @@ class ISSPSingularityEngine:
             if not (is_support or is_admin or is_operations):
                 if "support" in class_str: is_support = True
                 if "administrative" in class_str or "general administrative" in class_str: is_admin = True
-                if "operations" in class_str: is_operations = True
+                if "operations" in class_str and "support" not in class_str: is_operations = True
 
             if not (is_support or is_admin or is_operations):
                 violations.append(
@@ -369,6 +369,10 @@ class ISSPSingularityEngine:
                 )
 
             # Check 3.2: Operations Sub-Classification
+            # If the system is purely Support to Operations or General Administrative without frontline flags, clear is_operations
+            if is_operations and (is_support or is_admin) and not getattr(sys, "is_frontline_service", False) and not getattr(sys, "is_non_frontline_service", False) and "frontline" not in class_str:
+                is_operations = False
+
             if is_operations:
                 is_front = bool(getattr(sys, "is_frontline_service", False)) or ("frontline" in class_str and "non-frontline" not in class_str)
                 is_non_front = bool(getattr(sys, "is_non_frontline_service", False)) or ("non-frontline" in class_str)

@@ -2052,9 +2052,12 @@ def sync_information_system_classification(mapper, connection, target: Informati
     if not target.is_support_to_operations and not target.is_general_administrative and not target.is_operations:
         target.is_operations = True
 
-    # If Operations is selected, ensure either Frontline or Non-Frontline is flagged
+    # If Operations is selected without frontline/non-frontline flags, resolve appropriately
     if target.is_operations and not target.is_frontline_service and not target.is_non_frontline_service:
-        target.is_frontline_service = True
+        if target.is_support_to_operations or target.is_general_administrative:
+            target.is_operations = False
+        else:
+            target.is_frontline_service = True
 
     classes = []
     if target.is_support_to_operations:
