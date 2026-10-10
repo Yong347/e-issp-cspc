@@ -5,7 +5,8 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — WORD (.DOCX) DOCUMENT GENERATOR
 =============================================================================
 Strictly adheres to official DICT ISSP v.2026 Guidelines and statutory order:
 - Single Central Institutional Emblem (No Secondary Side Logos)
-- First-Page Header/Footer Suppression (Cover Page Clean Mode)
+- First-Page Section Isolation (Strict 1-Page Cover Page, No Spillover)
+- Running Header & Dynamic Page Numbers on All Subsequent Pages (Page X of Y)
 - Full Statutory Structure:
     * Cover Page (Page 1)
     * Table of Contents (2-Column Format with Statutorily Mapped Page Numbers)
@@ -29,9 +30,9 @@ from typing import List, Dict, Any, Optional, Union
 
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.enum.section import WD_ORIENTATION
+from docx.enum.section import WD_ORIENTATION, WD_SECTION_START
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn, nsdecls
 
@@ -39,6 +40,11 @@ from app.config import settings
 
 logger = logging.getLogger("app.services.docx_generator")
 
+# Security & Compliance Blacklist against test artwork leaks
+DIAGRAM_BLACKLIST = (
+    "syanart", "boruto", "naruto", "wallpaper", "anime", 
+    "test", "dummy", "placeholder", "sample"
+)
 
 # =========================================================================
 # CANONICAL DICT STATUTORY GLOSSARY FALLBACK
@@ -97,8 +103,25 @@ DEFAULT_CANONICAL_GLOSSARY = [
 
 
 # =========================================================================
-# XML FORMATTING HELPERS FOR WORD TABLES & CELL STYLING
+# XML FORMATTING HELPERS FOR WORD TABLES, CELLS & FIELDS
 # =========================================================================
+
+def add_xml_field(paragraph, field_name: str):
+    """Inserts a native dynamic Word field (like PAGE or NUMPAGES) into a paragraph."""
+    run = paragraph.add_run()
+    run.font.name = "Palatino Linotype"
+    run.font.size = Pt(7.5)
+    run.font.color.rgb = RGBColor(148, 163, 184)
+    fldChar1 = parse_xml(r'<w:fldChar %s w:fldCharType="begin"/>' % nsdecls('w'))
+    instrText = parse_xml(r'<w:instrText %s xml:space="preserve"> %s </w:instrText>' % (nsdecls('w'), field_name))
+    fldChar2 = parse_xml(r'<w:fldChar %s w:fldCharType="separate"/>' % nsdecls('w'))
+    fldChar3 = parse_xml(r'<w:fldChar %s w:fldCharType="end"/>' % nsdecls('w'))
+    run._r.append(fldChar1)
+    run._r.append(instrText)
+    run._r.append(fldChar2)
+    run._r.append(fldChar3)
+    return run
+
 
 def set_cell_shading(cell, color_hex: str = "F1F5F9"):
     """Applies a solid background shading color to a Word table cell."""
@@ -106,7 +129,7 @@ def set_cell_shading(cell, color_hex: str = "F1F5F9"):
     cell._tc.get_or_add_tcPr().append(shading_elm)
 
 
-def set_cell_margins(cell, top: int = 80, bottom: int = 80, left: int = 120, right: int = 120):
+def set_cell_margins(cell, top: int = 60, bottom: int = 60, left: int = 100, right: int = 100):
     """Sets internal padding (in dxa: 20 dxa = 1 pt) for a table cell."""
     tcPr = cell._tc.get_or_add_tcPr()
     tcMar = OxmlElement('w:tcMar')
@@ -188,10 +211,19 @@ def clean_uacs_title(uacs_str: str) -> str:
 
 
 def resolve_diagram_path(url: Optional[str]) -> Optional[str]:
-    """Resolves local file path on disk if available for direct insertion into Word .docx."""
+    """
+    Resolves local file path on disk if available for direct insertion into Word .docx.
+    Defensively strips and blocks unverified test, anime, and wallpaper artworks.
+    """
     if not url or not isinstance(url, str):
         return None
     url_clean = url.strip()
+
+    # Block unverified test images or wallpaper leaks
+    if any(k in url_clean.lower() for k in DIAGRAM_BLACKLIST):
+        logger.warning(f"Sanity Guard: Blocked test artwork from Word generation: {url_clean}")
+        return None
+
     if os.path.exists(url_clean) and os.path.isfile(url_clean):
         return url_clean
     if "/static/uploads/" in url_clean:
@@ -199,6 +231,8 @@ def resolve_diagram_path(url: Optional[str]) -> Optional[str]:
             rel = url_clean.split("/static/uploads/")[-1]
             candidate = os.path.join(getattr(settings, "LOCAL_UPLOAD_DIR", "uploads"), rel)
             if os.path.exists(candidate) and os.path.isfile(candidate):
+                if any(k in candidate.lower() for k in DIAGRAM_BLACKLIST):
+                    return None
                 return candidate
         except Exception:
             pass
@@ -208,22 +242,23 @@ def resolve_diagram_path(url: Optional[str]) -> Optional[str]:
 def render_schematic_box(doc, title: str, subtitle: str, section_label: str, img_url: Optional[str] = None):
     """
     Renders an official schematic exhibit in Word format.
-    If the image exists locally on disk, inserts the actual picture.
-    Otherwise, renders the official DICT statutory schematic container box.
+    If an authentic image exists, inserts it cleanly.
+    Otherwise, renders the official statutory DICT schematic container box.
     """
     local_path = resolve_diagram_path(img_url)
     if local_path:
         try:
             p_img = doc.add_paragraph()
             p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p_img.paragraph_format.space_before = Pt(6)
+            p_img.paragraph_format.space_before = Pt(4)
             p_img.paragraph_format.space_after = Pt(6)
             r_img = p_img.add_run()
-            r_img.add_picture(local_path, width=Inches(9.5))
+            r_img.add_picture(local_path, width=Inches(9.2))
             return
         except Exception as e:
             logger.debug(f"Direct schematic image insertion note for {title}: {e}")
 
+    # Official DICT Statutory Schematic Box Container
     tbl = doc.add_table(rows=1, cols=1)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.autofit = False
@@ -231,7 +266,7 @@ def render_schematic_box(doc, title: str, subtitle: str, section_label: str, img
     cell = tbl.rows[0].cells[0]
     cell.width = Inches(10.2)
     set_cell_shading(cell, "F8FAFC")
-    set_cell_margins(cell, top=200, bottom=200, left=240, right=240)
+    set_cell_margins(cell, top=160, bottom=160, left=200, right=200)
 
     tblPr = tbl._tbl.tblPr
     borders = parse_xml(
@@ -248,6 +283,8 @@ def render_schematic_box(doc, title: str, subtitle: str, section_label: str, img
 
     p = cell.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
 
     r_hdr = p.add_run("OFFICIAL SCHEMATIC SPECIFICATION FRAMEWORK\n")
     r_hdr.font.name = "Palatino Linotype"
@@ -300,6 +337,7 @@ def render_cybersecurity_checklist(doc, cyber_list: List[Any], is_proposed: bool
         c = tbl.rows[0].cells[idx]
         c.width = widths[idx]
         set_cell_shading(c, "F1F5F9")
+        set_cell_margins(c, top=60, bottom=60, left=80, right=80)
         r = c.paragraphs[0].add_run(h)
         r.font.name = "Palatino Linotype"
         r.font.bold = True
@@ -316,6 +354,7 @@ def render_cybersecurity_checklist(doc, cyber_list: List[Any], is_proposed: bool
         c0 = row.cells[0]
         c0.width = widths[0]
         set_cell_shading(c0, "F8FAFC")
+        set_cell_margins(c0, top=50, bottom=50, left=80, right=80)
         r0 = c0.paragraphs[0].add_run(domain)
         r0.font.name = "Palatino Linotype"
         r0.font.bold = True
@@ -323,6 +362,7 @@ def render_cybersecurity_checklist(doc, cyber_list: List[Any], is_proposed: bool
 
         c1 = row.cells[1]
         c1.width = widths[1]
+        set_cell_margins(c1, top=50, bottom=50, left=80, right=80)
         p1 = c1.paragraphs[0]
         if mandatory:
             for c in mandatory:
@@ -339,6 +379,7 @@ def render_cybersecurity_checklist(doc, cyber_list: List[Any], is_proposed: bool
 
         c2 = row.cells[2]
         c2.width = widths[2]
+        set_cell_margins(c2, top=50, bottom=50, left=80, right=80)
         p2 = c2.paragraphs[0]
         if optional:
             for c in optional:
@@ -355,10 +396,7 @@ def render_cybersecurity_checklist(doc, cyber_list: List[Any], is_proposed: bool
 
 
 def render_information_system_card_docx(doc, sys_obj: Any, is_proposed: bool = False, projects: List[Any] = None):
-    """
-    Renders an official DICT Information System Specification Card in Word format
-    (Parts II.C & III.D). Captures all statutory parameters.
-    """
+    """Renders an official DICT Information System Specification Card in Word format."""
     tbl = doc.add_table(rows=1, cols=2)
     tbl.style = 'Table Grid'
     set_table_borders(tbl)
@@ -368,33 +406,41 @@ def render_information_system_card_docx(doc, sys_obj: Any, is_proposed: bool = F
     c_hdr_merge = tbl.rows[0].cells[1]
     c_hdr.merge(c_hdr_merge)
     set_cell_shading(c_hdr, "1E3A8A")
-    set_cell_margins(c_hdr, top=100, bottom=100, left=140, right=140)
+    set_cell_margins(c_hdr, top=80, bottom=80, left=120, right=120)
 
     p_hdr = c_hdr.paragraphs[0]
+    p_hdr.paragraph_format.space_before = Pt(0)
+    p_hdr.paragraph_format.space_after = Pt(0)
     r_hdr = p_hdr.add_run(f"INFORMATION SYSTEM: {clean_str(sys_obj.name).upper()}")
     r_hdr.font.name = "Palatino Linotype"
     r_hdr.font.bold = True
-    r_hdr.font.size = Pt(9)
+    r_hdr.font.size = Pt(8.5)
     r_hdr.font.color.rgb = RGBColor(255, 255, 255)
 
     def add_card_row(label: str, content: str, is_mono: bool = False, is_highlight: bool = False):
         row = tbl.add_row()
         prevent_row_split(row)
         c0, c1 = row.cells[0], row.cells[1]
-        c0.width = Inches(2.8)
-        c1.width = Inches(7.4)
+        c0.width = Inches(2.6)
+        c1.width = Inches(7.6)
         set_cell_shading(c0, "F8FAFC")
-        set_cell_margins(c0, top=70, bottom=70, left=120, right=120)
-        set_cell_margins(c1, top=70, bottom=70, left=120, right=120)
+        set_cell_margins(c0, top=50, bottom=50, left=100, right=100)
+        set_cell_margins(c1, top=50, bottom=50, left=100, right=100)
 
-        r0 = c0.paragraphs[0].add_run(label)
+        p0 = c0.paragraphs[0]
+        p0.paragraph_format.space_before = Pt(0)
+        p0.paragraph_format.space_after = Pt(0)
+        r0 = p0.add_run(label)
         r0.font.name = "Palatino Linotype"
         r0.font.bold = True
-        r0.font.size = Pt(8)
+        r0.font.size = Pt(7.5)
 
-        r1 = c1.paragraphs[0].add_run(content)
+        p1 = c1.paragraphs[0]
+        p1.paragraph_format.space_before = Pt(0)
+        p1.paragraph_format.space_after = Pt(0)
+        r1 = p1.add_run(content)
         r1.font.name = "Courier New" if is_mono else "Palatino Linotype"
-        r1.font.size = Pt(8)
+        r1.font.size = Pt(7.5)
         if is_highlight:
             r1.font.bold = True
             r1.font.color.rgb = RGBColor(4, 120, 87)
@@ -402,7 +448,7 @@ def render_information_system_card_docx(doc, sys_obj: Any, is_proposed: bool = F
     class_str = clean_str(getattr(sys_obj, "classification", "")).lower()
     is_supp = getattr(sys_obj, "is_support_to_operations", False) or "support" in class_str
     is_adm = getattr(sys_obj, "is_general_administrative", False) or "admin" in class_str
-    is_ops = getattr(sys_obj, "is_operations", False) or "operations" in class_str or (not is_supp and not is_adm)
+    is_ops = getattr(sys_obj, "is_operations", False) or ("operations" in class_str and not is_supp and not is_adm)
     is_front = getattr(sys_obj, "is_frontline_service", False) or ("frontline" in class_str and "non-frontline" not in class_str)
     is_non_front = getattr(sys_obj, "is_non_frontline_service", False) or "non-frontline" in class_str
 
@@ -469,14 +515,13 @@ def render_information_system_card_docx(doc, sys_obj: Any, is_proposed: bool = F
     )
     add_card_row("PRIVACY IMPACT ASSESSMENT (PIA)", pia_text)
 
-    doc.add_paragraph()
+    p_spacer = doc.add_paragraph()
+    p_spacer.paragraph_format.space_before = Pt(0)
+    p_spacer.paragraph_format.space_after = Pt(4)
 
 
 def render_project_charter_card(doc, proj: Any, is_cross: bool = False, planning_years: List[int] = None):
-    """
-    Renders an official DICT Project Charter Card in Word format (Parts III.E.1 & III.E.2)
-    matching DICT ISSP Guidelines & Templates.
-    """
+    """Renders an official DICT Project Charter Card in Word format (Parts III.E.1 & III.E.2)."""
     tbl = doc.add_table(rows=1, cols=2)
     tbl.style = 'Table Grid'
     set_table_borders(tbl)
@@ -486,34 +531,42 @@ def render_project_charter_card(doc, proj: Any, is_cross: bool = False, planning
     c_hdr_merge = tbl.rows[0].cells[1]
     c_hdr.merge(c_hdr_merge)
     set_cell_shading(c_hdr, "1E3A8A")
-    set_cell_margins(c_hdr, top=100, bottom=100, left=140, right=140)
+    set_cell_margins(c_hdr, top=80, bottom=80, left=120, right=120)
 
     p_hdr = c_hdr.paragraphs[0]
+    p_hdr.paragraph_format.space_before = Pt(0)
+    p_hdr.paragraph_format.space_after = Pt(0)
     sec_prefix = "E.2. CROSS-AGENCY ICT PROJECT" if is_cross else "E.1. INTERNAL ICT PROJECT"
     r_hdr = p_hdr.add_run(f"{sec_prefix}: {clean_str(proj.project_title).upper()}")
     r_hdr.font.name = "Palatino Linotype"
     r_hdr.font.bold = True
-    r_hdr.font.size = Pt(9)
+    r_hdr.font.size = Pt(8.5)
     r_hdr.font.color.rgb = RGBColor(255, 255, 255)
 
     def add_charter_row(label: str, content: str, is_mono: bool = False, is_highlight: bool = False):
         row = tbl.add_row()
         prevent_row_split(row)
         c0, c1 = row.cells[0], row.cells[1]
-        c0.width = Inches(2.8)
-        c1.width = Inches(7.4)
+        c0.width = Inches(2.6)
+        c1.width = Inches(7.6)
         set_cell_shading(c0, "F8FAFC")
-        set_cell_margins(c0, top=70, bottom=70, left=120, right=120)
-        set_cell_margins(c1, top=70, bottom=70, left=120, right=120)
+        set_cell_margins(c0, top=50, bottom=50, left=100, right=100)
+        set_cell_margins(c1, top=50, bottom=50, left=100, right=100)
 
-        r0 = c0.paragraphs[0].add_run(label)
+        p0 = c0.paragraphs[0]
+        p0.paragraph_format.space_before = Pt(0)
+        p0.paragraph_format.space_after = Pt(0)
+        r0 = p0.add_run(label)
         r0.font.name = "Palatino Linotype"
         r0.font.bold = True
-        r0.font.size = Pt(8)
+        r0.font.size = Pt(7.5)
 
-        r1 = c1.paragraphs[0].add_run(content)
+        p1 = c1.paragraphs[0]
+        p1.paragraph_format.space_before = Pt(0)
+        p1.paragraph_format.space_after = Pt(0)
+        r1 = p1.add_run(content)
         r1.font.name = "Courier New" if is_mono else "Palatino Linotype"
-        r1.font.size = Pt(8)
+        r1.font.size = Pt(7.5)
         if is_highlight:
             r1.font.bold = True
             r1.font.color.rgb = RGBColor(4, 120, 87)
@@ -578,7 +631,9 @@ def render_project_charter_card(doc, proj: Any, is_cross: bool = False, planning
         add_charter_row("LEAD AGENCY", clean_str(getattr(proj, "lead_agency", None), "DICT"))
         add_charter_row("PARTNER AGENCIES", clean_str(getattr(proj, "partner_agencies", None), "None"))
 
-    doc.add_paragraph()
+    p_spacer = doc.add_paragraph()
+    p_spacer.paragraph_format.space_before = Pt(0)
+    p_spacer.paragraph_format.space_after = Pt(4)
 
 
 # =========================================================================
@@ -610,45 +665,32 @@ def create_issp_docx(
     """
     Builds a fully formatted, editable Microsoft Word (.docx) document
     representing the complete DICT ISSP v.2026 statutory blueprint.
-    Strictly follows the official DICT ISSP section-by-section order and
-    enforces single-agency branding, correct signatories, and unlinked proposal quarantine.
+    Guarantees strict single-page cover sheet layout, running headers/footers with
+    dynamic page numbers, and total sanitization of placeholder images.
     """
     doc = Document()
 
-    # 1. SETUP PAGE DIMENSIONS & MARGINS (A4 LANDSCAPE)
-    for section in doc.sections:
-        section.orientation = WD_ORIENTATION.LANDSCAPE
-        section.page_width = Inches(11.69)
-        section.page_height = Inches(8.27)
-        section.top_margin = Inches(0.7)
-        section.bottom_margin = Inches(0.7)
-        section.left_margin = Inches(0.7)
-        section.right_margin = Inches(0.7)
+    # =========================================================================
+    # SECTION 1: COVER PAGE SETUP (NO HEADER, NO FOOTER, STRICT 1-PAGE)
+    # =========================================================================
+    sec1 = doc.sections[0]
+    sec1.orientation = WD_ORIENTATION.LANDSCAPE
+    sec1.page_width = Inches(11.69)
+    sec1.page_height = Inches(8.27)
+    sec1.top_margin = Inches(0.55)
+    sec1.bottom_margin = Inches(0.55)
+    sec1.left_margin = Inches(0.7)
+    sec1.right_margin = Inches(0.7)
 
-        # CLEAN FIRST PAGE: Suppress Running Header & Footer on Cover Page
-        section.different_first_page_header_footer = True
+    # Detach headers and footers completely for Section 1
+    sec1.header.is_linked_to_previous = False
+    sec1.footer.is_linked_to_previous = False
+    sec1.header.paragraphs[0].text = ""
+    sec1.footer.paragraphs[0].text = ""
 
-        # Running Header for subsequent pages
-        header = section.header
-        hp = header.paragraphs[0]
-        hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        hrun = hp.add_run(f"REPUBLIC OF THE PHILIPPINES | {clean_str(narrative.agency_name, 'AGENCY').upper()} — ISSP FY {narrative.issp_period}")
-        hrun.font.name = "Palatino Linotype"
-        hrun.font.size = Pt(7.5)
-        hrun.font.color.rgb = RGBColor(100, 116, 139)
-
-        # Running Footer for subsequent pages
-        footer = section.footer
-        fp = footer.paragraphs[0]
-        fp.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        frun = fp.add_run("OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD")
-        frun.font.name = "Palatino Linotype"
-        frun.font.size = Pt(7)
-        frun.font.color.rgb = RGBColor(148, 163, 184)
-
-    issp_period = clean_str(narrative.issp_period, "2028-2030")
+    issp_period = clean_str(narrative.issp_period, "2026-2028")
     agency_name = clean_str(narrative.agency_name, "National Government Agency")
-    start_year = getattr(narrative, "issp_period_from", None) or 2028
+    start_year = getattr(narrative, "issp_period_from", None) or 2026
     end_year = getattr(narrative, "issp_period_to", None) or (start_year + 2)
     planning_years = list(range(start_year, end_year + 1))
 
@@ -661,11 +703,11 @@ def create_issp_docx(
 
     raw_head = clean_str(getattr(narrative, "signatory_approved_by", None) or getattr(narrative, "head_of_agency_name", None))
     if not raw_head or raw_head.lower() in ["head of agency", "agency head", "college president", "president", "none", "null"]:
-        head_name = "AMADO A. OLIVA JR, PhD."
+        head_name = "AMADO A. OLIVA JR, PHD."
     else:
         head_name = raw_head
 
-    head_title = clean_str(getattr(narrative, "agency_head_position", None), "Head of Agency")
+    head_title = clean_str(getattr(narrative, "agency_head_position", None), "College President")
 
     # Resolve relationships defensively if optional lists are omitted
     hc_list = human_capitals or getattr(narrative, "human_capitals_relation", []) or []
@@ -678,44 +720,62 @@ def create_issp_docx(
     bia_list = dr_bias or getattr(narrative, "dr_bia_relation", []) or []
     drm_list = dr_metrics or getattr(narrative, "dr_metrics_relation", []) or []
 
-    # FALLBACK SEEDING: Guarantee Definition of Terms is NEVER empty
-    glossary_list = glossary or []
-    if not glossary_list:
-        glossary_list = DEFAULT_CANONICAL_GLOSSARY
+    # MERGE STATUTORY GLOSSARY: Guarantee all 12 official terms exist alongside custom definitions
+    glossary_dict = {}
+    for term, definition in DEFAULT_CANONICAL_GLOSSARY:
+        glossary_dict[term.upper()] = (term, definition)
 
-    # =========================================================================
-    # SECTION 1: COVER PAGE (Page 1) — PROMINENT SINGLE AGENCY EMBLEM (1.65 IN)
-    # =========================================================================
+    if glossary:
+        for g in glossary:
+            if isinstance(g, (list, tuple)) and len(g) >= 2:
+                t, d = str(g[0]).strip(), str(g[1]).strip()
+            else:
+                t = clean_str(getattr(g, "term", ""))
+                d = clean_str(getattr(g, "definition", ""))
+            if t and d:
+                glossary_dict[t.upper()] = (t, d)
+
+    glossary_list = list(glossary_dict.values())
+
+    # -------------------------------------------------------------
+    # BUILD COVER PAGE CONTENT (STRICT COMPACT 1-PAGE FIT)
+    # -------------------------------------------------------------
     agency_logo_path = resolve_diagram_path(getattr(narrative, "agency_logo_url", None))
     if agency_logo_path:
         try:
             p_logo = doc.add_paragraph()
             p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p_logo.add_run().add_picture(agency_logo_path, width=Inches(1.65))
+            p_logo.paragraph_format.space_before = Pt(0)
+            p_logo.paragraph_format.space_after = Pt(2)
+            p_logo.add_run().add_picture(agency_logo_path, width=Inches(1.2))
         except Exception as e:
             logger.debug(f"Cover logo insertion note: {e}")
 
     p_rep = doc.add_paragraph()
     p_rep.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_rep.paragraph_format.space_before = Pt(0)
+    p_rep.paragraph_format.space_after = Pt(4)
+    p_rep.paragraph_format.line_spacing = 1.12
+
     r_rep = p_rep.add_run("Republic of the Philippines\n")
     r_rep.font.name = "Palatino Linotype"
-    r_rep.font.size = Pt(9.5)
+    r_rep.font.size = Pt(8.5)
     r_rep.font.color.rgb = RGBColor(71, 85, 105)
 
     r_agency = p_rep.add_run(f"{agency_name.upper()}\n")
     r_agency.font.name = "Palatino Linotype"
-    r_agency.font.size = Pt(14)
+    r_agency.font.size = Pt(13)
     r_agency.font.bold = True
     r_agency.font.color.rgb = RGBColor(15, 23, 42)
 
-    r_loc = p_rep.add_run(f"{clean_str(getattr(narrative, 'agency_address', None), 'Nabua, Camarines Sur')}\n\n")
+    r_loc = p_rep.add_run(f"{clean_str(getattr(narrative, 'agency_address', None), 'Nabua, Camarines Sur')}\n")
     r_loc.font.name = "Palatino Linotype"
-    r_loc.font.size = Pt(8.5)
+    r_loc.font.size = Pt(8.0)
     r_loc.font.color.rgb = RGBColor(100, 116, 139)
 
     r_plan = p_rep.add_run("INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\n")
     r_plan.font.name = "Palatino Linotype"
-    r_plan.font.size = Pt(20)
+    r_plan.font.size = Pt(17)
     r_plan.font.bold = True
     r_plan.font.color.rgb = RGBColor(30, 58, 138)
 
@@ -725,75 +785,108 @@ def create_issp_docx(
 
     r_type = p_rep.add_run(f"{type_str}\n")
     r_type.font.name = "Palatino Linotype"
-    r_type.font.size = Pt(10)
+    r_type.font.size = Pt(9.5)
     r_type.font.bold = True
 
     r_period = p_rep.add_run(f"For the period {start_year} to {end_year}\n")
     r_period.font.name = "Palatino Linotype"
-    r_period.font.size = Pt(11)
+    r_period.font.size = Pt(10)
     r_period.font.color.rgb = RGBColor(71, 85, 105)
 
     if narrative.agency_website_url:
         r_url = p_rep.add_run(f"<{narrative.agency_website_url}>\n")
         r_url.font.name = "Palatino Linotype"
-        r_url.font.size = Pt(9)
+        r_url.font.size = Pt(8.5)
         r_url.font.italic = True
         r_url.font.color.rgb = RGBColor(100, 116, 139)
 
-    doc.add_paragraph()
-
-    # Cover Table: Signatories & Scope (Clean Two-Column Institutional Format)
+    # Cover Table: Signatories & Scope
     cov_table = doc.add_table(rows=1, cols=2)
     cov_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     cov_table.autofit = False
     set_table_borders(cov_table, color="FFFFFF")
+    prevent_row_split(cov_table.rows[0])
 
-    # Left Cell: Formal Signatories (Actual human names centered directly on top of the signature lines)
+    # Left Cell: Signatories structured cleanly without excessive vertical newlines
     c_left = cov_table.rows[0].cells[0]
-    c_left.width = Inches(5.0)
-    p_sig = c_left.paragraphs[0]
+    c_left.width = Inches(5.1)
+    set_cell_margins(c_left, top=30, bottom=30, left=80, right=80)
 
-    r_prep = p_sig.add_run("PREPARED BY:\n\n\n")
+    p_prep = c_left.paragraphs[0]
+    p_prep.paragraph_format.space_before = Pt(0)
+    p_prep.paragraph_format.space_after = Pt(20)
+    r_prep = p_prep.add_run("PREPARED BY:")
     r_prep.font.name = "Palatino Linotype"
     r_prep.font.size = Pt(8.5)
     r_prep.font.bold = True
     r_prep.font.color.rgb = RGBColor(30, 58, 138)
 
-    r_cio = p_sig.add_run(f"    {cio_name.upper()}\n")
+    p_cio = c_left.add_paragraph()
+    p_cio.paragraph_format.space_before = Pt(0)
+    p_cio.paragraph_format.space_after = Pt(1)
+    r_cio = p_cio.add_run(f"    {cio_name.upper()}")
     r_cio.font.name = "Palatino Linotype"
-    r_cio.font.size = Pt(10)
+    r_cio.font.size = Pt(9.5)
     r_cio.font.bold = True
-    r_cio_line = p_sig.add_run("    _________________________________________\n")
-    r_cio_line.font.name = "Palatino Linotype"
-    r_cio_title = p_sig.add_run("    Name & Signature of Chief Information Officer\n\n\n")
-    r_cio_title.font.name = "Palatino Linotype"
-    r_cio_title.font.size = Pt(8)
-    r_cio_title.font.color.rgb = RGBColor(71, 85, 105)
 
-    r_app = p_sig.add_run("APPROVED BY:\n\n\n")
+    p_cio_line = c_left.add_paragraph()
+    p_cio_line.paragraph_format.space_before = Pt(0)
+    p_cio_line.paragraph_format.space_after = Pt(1)
+    r_cline = p_cio_line.add_run("    _________________________________________")
+    r_cline.font.name = "Palatino Linotype"
+    r_cline.font.size = Pt(8.5)
+
+    p_cio_tit = c_left.add_paragraph()
+    p_cio_tit.paragraph_format.space_before = Pt(0)
+    p_cio_tit.paragraph_format.space_after = Pt(18)
+    r_ctit = p_cio_tit.add_run("    Name & Signature of Chief Information Officer")
+    r_ctit.font.name = "Palatino Linotype"
+    r_ctit.font.size = Pt(7.5)
+    r_ctit.font.color.rgb = RGBColor(71, 85, 105)
+
+    p_app = c_left.add_paragraph()
+    p_app.paragraph_format.space_before = Pt(0)
+    p_app.paragraph_format.space_after = Pt(20)
+    r_app = p_app.add_run("APPROVED BY:")
     r_app.font.name = "Palatino Linotype"
     r_app.font.size = Pt(8.5)
     r_app.font.bold = True
     r_app.font.color.rgb = RGBColor(30, 58, 138)
 
-    r_head = p_sig.add_run(f"    {head_name.upper()}\n")
+    p_head = c_left.add_paragraph()
+    p_head.paragraph_format.space_before = Pt(0)
+    p_head.paragraph_format.space_after = Pt(1)
+    r_head = p_head.add_run(f"    {head_name.upper()}")
     r_head.font.name = "Palatino Linotype"
-    r_head.font.size = Pt(10)
+    r_head.font.size = Pt(9.5)
     r_head.font.bold = True
-    r_head_line = p_sig.add_run("    _________________________________________\n")
-    r_head_line.font.name = "Palatino Linotype"
-    r_head_title = p_sig.add_run(f"    Name & Signature of Agency Head\n    ({head_title})\n")
-    r_head_title.font.name = "Palatino Linotype"
-    r_head_title.font.size = Pt(8)
-    r_head_title.font.color.rgb = RGBColor(71, 85, 105)
+
+    p_head_line = c_left.add_paragraph()
+    p_head_line.paragraph_format.space_before = Pt(0)
+    p_head_line.paragraph_format.space_after = Pt(1)
+    r_hline = p_head_line.add_run("    _________________________________________")
+    r_hline.font.name = "Palatino Linotype"
+    r_hline.font.size = Pt(8.5)
+
+    p_head_tit = c_left.add_paragraph()
+    p_head_tit.paragraph_format.space_before = Pt(0)
+    p_head_tit.paragraph_format.space_after = Pt(0)
+    r_htit = p_head_tit.add_run(f"    Name & Signature of Agency Head\n    ({head_title})")
+    r_htit.font.name = "Palatino Linotype"
+    r_htit.font.size = Pt(7.5)
+    r_htit.font.color.rgb = RGBColor(71, 85, 105)
 
     # Right Cell: Scope Checklist Box
     c_right = cov_table.rows[0].cells[1]
-    c_right.width = Inches(5.0)
+    c_right.width = Inches(5.1)
     set_cell_shading(c_right, "F8FAFC")
-    set_cell_margins(c_right, 140, 140, 180, 180)
+    set_cell_margins(c_right, top=60, bottom=60, left=120, right=120)
 
     p_scope = c_right.paragraphs[0]
+    p_scope.paragraph_format.space_before = Pt(0)
+    p_scope.paragraph_format.space_after = Pt(0)
+    p_scope.paragraph_format.line_spacing = 1.12
+
     r_sc_title = p_scope.add_run("SCOPE OF PLAN:\n")
     r_sc_title.font.name = "Palatino Linotype"
     r_sc_title.font.size = Pt(8.5)
@@ -825,14 +918,55 @@ def create_issp_docx(
     for s_line in scope_lines:
         r_sc = p_scope.add_run(f"{s_line}\n")
         r_sc.font.name = "Palatino Linotype"
-        r_sc.font.size = Pt(8)
-
-    doc.add_page_break()
+        r_sc.font.size = Pt(7.5)
 
     # =========================================================================
-    # TABLE OF CONTENTS (2-COLUMN FORMAT: TITLES + DOT LEADERS + ESTIMATED PAGES)
+    # SECTION 2: BODY & ANNEXES (NEW SECTION WITH RUNNING HEADER & PAGE NUMBERS)
+    # =========================================================================
+    sec2 = doc.add_section(WD_SECTION_START.NEW_PAGE)
+    sec2.orientation = WD_ORIENTATION.LANDSCAPE
+    sec2.page_width = Inches(11.69)
+    sec2.page_height = Inches(8.27)
+    sec2.top_margin = Inches(0.7)
+    sec2.bottom_margin = Inches(0.7)
+    sec2.left_margin = Inches(0.7)
+    sec2.right_margin = Inches(0.7)
+
+    # Detach headers & footers from cover page
+    sec2.header.is_linked_to_previous = False
+    sec2.footer.is_linked_to_previous = False
+
+    # Running Header
+    hp = sec2.header.paragraphs[0]
+    hp.text = ""
+    hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    hrun = hp.add_run(f"REPUBLIC OF THE PHILIPPINES | {clean_str(narrative.agency_name, 'AGENCY').upper()} — ISSP FY {narrative.issp_period}")
+    hrun.font.name = "Palatino Linotype"
+    hrun.font.size = Pt(7.5)
+    hrun.font.color.rgb = RGBColor(100, 116, 139)
+
+    # Running Footer: Left title + Right Page {PAGE} of {NUMPAGES}
+    fp = sec2.footer.paragraphs[0]
+    fp.text = ""
+    fp.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    fp.paragraph_format.tab_stops.add_tab_stop(Inches(10.29), WD_TAB_ALIGNMENT.RIGHT)
+    frun1 = fp.add_run("OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD\tPage ")
+    frun1.font.name = "Palatino Linotype"
+    frun1.font.size = Pt(7.5)
+    frun1.font.color.rgb = RGBColor(148, 163, 184)
+    add_xml_field(fp, "PAGE")
+    frun2 = fp.add_run(" of ")
+    frun2.font.name = "Palatino Linotype"
+    frun2.font.size = Pt(7.5)
+    frun2.font.color.rgb = RGBColor(148, 163, 184)
+    add_xml_field(fp, "NUMPAGES")
+
+    # =========================================================================
+    # TABLE OF CONTENTS
     # =========================================================================
     h_toc = doc.add_heading(level=1)
+    h_toc.paragraph_format.space_before = Pt(0)
+    h_toc.paragraph_format.space_after = Pt(4)
     r_toc = h_toc.add_run("TABLE OF CONTENTS")
     r_toc.font.name = "Palatino Linotype"
     r_toc.font.size = Pt(13)
@@ -875,7 +1009,6 @@ def create_issp_docx(
         ("A. Detailed Resource Deployment and Cost Breakdown", 1, False, "23"),
     ]
 
-    # Dynamically map annual resource deployment pages
     cur_p = 23
     for y_idx, y_val in enumerate(planning_years):
         toc_items.append((f"A.{y_idx + 1}. Year {y_idx + 1} Resource Deployment (FY {y_val})", 2, False, str(cur_p)))
@@ -910,20 +1043,26 @@ def create_issp_docx(
         c0, c1 = row.cells[0], row.cells[1]
         c0.width = Inches(9.2)
         c1.width = Inches(1.0)
+        set_cell_margins(c0, top=10, bottom=10, left=40, right=40)
+        set_cell_margins(c1, top=10, bottom=10, left=40, right=40)
 
         p0 = c0.paragraphs[0]
-        p0.paragraph_format.left_indent = Inches(indent_level * 0.25)
+        p0.paragraph_format.space_before = Pt(0)
+        p0.paragraph_format.space_after = Pt(0)
+        p0.paragraph_format.left_indent = Inches(indent_level * 0.22)
         run0 = p0.add_run(title)
         run0.font.name = "Palatino Linotype"
-        run0.font.size = Pt(8.5 if indent_level == 0 else 8.0)
+        run0.font.size = Pt(8.0 if indent_level == 0 else 7.5)
         run0.font.bold = is_bold
         run0.font.color.rgb = RGBColor(30, 58, 138) if is_bold else RGBColor(15, 23, 42)
 
         p1 = c1.paragraphs[0]
+        p1.paragraph_format.space_before = Pt(0)
+        p1.paragraph_format.space_after = Pt(0)
         p1.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         run1 = p1.add_run(page_num)
         run1.font.name = "Courier New" if page_num.isdigit() else "Palatino Linotype"
-        run1.font.size = Pt(8.0)
+        run1.font.size = Pt(7.5)
         run1.font.bold = is_bold
         run1.font.color.rgb = RGBColor(30, 58, 138) if is_bold else RGBColor(71, 85, 105)
 
@@ -933,6 +1072,8 @@ def create_issp_docx(
     # PRELIMINARY: DEFINITION OF TERMS (GLOSSARY)
     # =========================================================================
     h_defs = doc.add_heading(level=1)
+    h_defs.paragraph_format.space_before = Pt(0)
+    h_defs.paragraph_format.space_after = Pt(4)
     r_defs = h_defs.add_run("DEFINITION OF TERMS")
     r_defs.font.name = "Palatino Linotype"
     r_defs.font.size = Pt(13)
@@ -946,9 +1087,11 @@ def create_issp_docx(
     prevent_row_split(g_table.rows[0])
 
     c0, c1 = g_table.rows[0].cells[0], g_table.rows[0].cells[1]
-    c0.width, c1.width = Inches(3.0), Inches(7.0)
+    c0.width, c1.width = Inches(2.8), Inches(7.4)
     set_cell_shading(c0, "F1F5F9")
     set_cell_shading(c1, "F1F5F9")
+    set_cell_margins(c0, top=60, bottom=60, left=80, right=80)
+    set_cell_margins(c1, top=60, bottom=60, left=80, right=80)
     r0 = c0.paragraphs[0].add_run("ACRONYM / KEYWORD")
     r0.font.bold = True
     r0.font.size = Pt(8.5)
@@ -956,27 +1099,18 @@ def create_issp_docx(
     r1.font.bold = True
     r1.font.size = Pt(8.5)
 
-    # Normalize glossary items whether objects or tuples
-    clean_glossary = []
-    for g in glossary_list:
-        if isinstance(g, (list, tuple)) and len(g) >= 2:
-            clean_glossary.append((str(g[0]).strip(), str(g[1]).strip()))
-        else:
-            t = clean_str(getattr(g, "term", ""))
-            d = clean_str(getattr(g, "definition", ""))
-            if t and d:
-                clean_glossary.append((t, d))
-
-    for term_title, def_text in sorted(clean_glossary, key=lambda x: x[0].lower()):
+    for term_title, def_text in sorted(glossary_list, key=lambda x: x[0].lower()):
         row = g_table.add_row()
         prevent_row_split(row)
         cell0, cell1 = row.cells[0], row.cells[1]
-        cell0.width, cell1.width = Inches(3.0), Inches(7.0)
+        cell0.width, cell1.width = Inches(2.8), Inches(7.4)
+        set_cell_margins(cell0, top=40, bottom=40, left=80, right=80)
+        set_cell_margins(cell1, top=40, bottom=40, left=80, right=80)
         rg0 = cell0.paragraphs[0].add_run(term_title)
         rg0.font.bold = True
-        rg0.font.size = Pt(8)
+        rg0.font.size = Pt(7.5)
         rg1 = cell1.paragraphs[0].add_run(def_text)
-        rg1.font.size = Pt(8)
+        rg1.font.size = Pt(7.5)
 
     doc.add_page_break()
 
@@ -984,6 +1118,8 @@ def create_issp_docx(
     # PART I. AGENCY PROFILE & STRATEGIC CONTEXT
     # =========================================================================
     h1 = doc.add_heading(level=1)
+    h1.paragraph_format.space_before = Pt(0)
+    h1.paragraph_format.space_after = Pt(4)
     hrun1 = h1.add_run("PART I. AGENCY PROFILE & STRATEGIC CONTEXT")
     hrun1.font.name = "Palatino Linotype"
     hrun1.font.size = Pt(13)
@@ -991,6 +1127,8 @@ def create_issp_docx(
     hrun1.font.color.rgb = RGBColor(30, 58, 138)
 
     p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(4)
     p.add_run("A. Mandate, Vision, Mission, and Organizational Outcome\n").font.bold = True
     p.add_run("A.1. Mandate:\n").font.bold = True
     p.add_run(f"Legal Basis: {strip_html_tags(narrative.mandate_text or narrative.mandate_html) or 'Enabling law / statutory charter establishing institutional mandate.'}\n")
@@ -1006,6 +1144,8 @@ def create_issp_docx(
     if outcomes:
         for oo in outcomes:
             p_oo = doc.add_paragraph(style='List Bullet')
+            p_oo.paragraph_format.space_before = Pt(0)
+            p_oo.paragraph_format.space_after = Pt(2)
             title_oo = clean_str(oo.outcome_name or oo.program_name, f"Outcome #{oo.id}")
             r_oo = p_oo.add_run(f"[{oo.type_label}] {title_oo}: ")
             r_oo.font.bold = True
@@ -1014,8 +1154,11 @@ def create_issp_docx(
         doc.add_paragraph("No Organizational Outcomes mapped for this cycle.")
 
     # B. Leadership & Human Capital
-    doc.add_paragraph().add_run("\nB. Organizational Structure\n").font.bold = True
-    doc.add_paragraph().add_run("B.1. Chief Information Officer (CIO) & ISSP Focal Person\n").font.bold = True
+    p_b = doc.add_paragraph()
+    p_b.paragraph_format.space_before = Pt(6)
+    p_b.paragraph_format.space_after = Pt(2)
+    p_b.add_run("B. Organizational Structure\n").font.bold = True
+    p_b.add_run("B.1. Chief Information Officer (CIO) & ISSP Focal Person\n").font.bold = True
 
     cio_table = doc.add_table(rows=5, cols=2)
     cio_table.style = 'Table Grid'
@@ -1031,15 +1174,21 @@ def create_issp_docx(
         row = cio_table.rows[idx]
         prevent_row_split(row)
         c0, c1 = row.cells[0], row.cells[1]
-        c0.width, c1.width = Inches(3.0), Inches(7.0)
+        c0.width, c1.width = Inches(2.8), Inches(7.4)
         set_cell_shading(c0, "F8FAFC")
+        set_cell_margins(c0, top=40, bottom=40, left=80, right=80)
+        set_cell_margins(c1, top=40, bottom=40, left=80, right=80)
         c0.paragraphs[0].add_run(label).font.bold = True
         c1.paragraphs[0].add_run(val)
 
     # Render Alternate Focal Person Card if available
     focal_name = clean_str(getattr(narrative, 'focal_name', None), "")
     if focal_name:
-        doc.add_paragraph().add_run("\nAlternate ISSP Focal Person Profile\n").font.bold = True
+        p_focal = doc.add_paragraph()
+        p_focal.paragraph_format.space_before = Pt(4)
+        p_focal.paragraph_format.space_after = Pt(2)
+        p_focal.add_run("Alternate ISSP Focal Person Profile\n").font.bold = True
+
         focal_table = doc.add_table(rows=5, cols=2)
         focal_table.style = 'Table Grid'
         set_table_borders(focal_table)
@@ -1054,13 +1203,19 @@ def create_issp_docx(
             row = focal_table.rows[idx]
             prevent_row_split(row)
             c0, c1 = row.cells[0], row.cells[1]
-            c0.width, c1.width = Inches(3.0), Inches(7.0)
+            c0.width, c1.width = Inches(2.8), Inches(7.4)
             set_cell_shading(c0, "F8FAFC")
+            set_cell_margins(c0, top=40, bottom=40, left=80, right=80)
+            set_cell_margins(c1, top=40, bottom=40, left=80, right=80)
             c0.paragraphs[0].add_run(label).font.bold = True
             c1.paragraphs[0].add_run(val)
 
     # B.2 Human Capital Staffing Matrix
-    doc.add_paragraph().add_run("\nB.2. Human Capital (Current Personnel)\n").font.bold = True
+    p_hc = doc.add_paragraph()
+    p_hc.paragraph_format.space_before = Pt(6)
+    p_hc.paragraph_format.space_after = Pt(2)
+    p_hc.add_run("B.2. Human Capital (Current Personnel)\n").font.bold = True
+
     hc_current = [h for h in hc_list if not getattr(h, "is_proposed", False)]
     if hc_current:
         hc_table = doc.add_table(rows=1, cols=5)
@@ -1073,6 +1228,7 @@ def create_issp_docx(
         for i, h in enumerate(headers_hc):
             c = hc_table.rows[0].cells[i]
             set_cell_shading(c, "F1F5F9")
+            set_cell_margins(c, top=50, bottom=50, left=80, right=80)
             c.paragraphs[0].add_run(h).font.bold = True
 
         total_it = sum(getattr(h, "it_positions_count", 0) or 0 for h in hc_current)
@@ -1083,6 +1239,8 @@ def create_issp_docx(
         for h in hc_current:
             r = hc_table.add_row()
             prevent_row_split(r)
+            for c_i in range(5):
+                set_cell_margins(r.cells[c_i], top=40, bottom=40, left=80, right=80)
             r.cells[0].paragraphs[0].add_run(clean_str(h.employment_status)).font.bold = True
             r.cells[1].paragraphs[0].add_run(str(h.it_positions_count or 0))
             r.cells[2].paragraphs[0].add_run(str(h.non_it_positions_count or 0))
@@ -1091,16 +1249,21 @@ def create_issp_docx(
 
         r_tot = hc_table.add_row()
         prevent_row_split(r_tot)
-        set_cell_shading(r_tot.cells[0], "E2E8F0")
+        for c_i in range(5):
+            set_cell_shading(r_tot.cells[c_i], "E2E8F0")
+            set_cell_margins(r_tot.cells[c_i], top=50, bottom=50, left=80, right=80)
         r_tot.cells[0].paragraphs[0].add_run("Grand Total").font.bold = True
         for i, val in enumerate([total_it, total_non_it, total_male, total_female], start=1):
-            set_cell_shading(r_tot.cells[i], "E2E8F0")
             r_tot.cells[i].paragraphs[0].add_run(str(val)).font.bold = True
     else:
         doc.add_paragraph("Baseline staffing matrix not recorded.")
 
     # C. Stakeholder Analysis
-    doc.add_paragraph().add_run("\nC. Stakeholder Analysis\n").font.bold = True
+    p_sh = doc.add_paragraph()
+    p_sh.paragraph_format.space_before = Pt(6)
+    p_sh.paragraph_format.space_after = Pt(2)
+    p_sh.add_run("C. Stakeholder Analysis\n").font.bold = True
+
     if sh_list:
         sh_table = doc.add_table(rows=1, cols=3)
         sh_table.style = 'Table Grid'
@@ -1109,16 +1272,19 @@ def create_issp_docx(
         prevent_row_split(sh_table.rows[0])
 
         headers_sh = ["Stakeholder Group", "Transaction Processed", "Complexity Level"]
-        widths_sh = [Inches(3.0), Inches(5.0), Inches(2.0)]
+        widths_sh = [Inches(2.6), Inches(5.6), Inches(2.0)]
         for i, h in enumerate(headers_sh):
             c = sh_table.rows[0].cells[i]
             c.width = widths_sh[i]
             set_cell_shading(c, "F1F5F9")
+            set_cell_margins(c, top=50, bottom=50, left=80, right=80)
             c.paragraphs[0].add_run(h).font.bold = True
 
         for s in sh_list:
             r = sh_table.add_row()
             prevent_row_split(r)
+            for c_i in range(3):
+                set_cell_margins(r.cells[c_i], top=40, bottom=40, left=80, right=80)
             r.cells[0].paragraphs[0].add_run(clean_str(s.stakeholder_group)).font.bold = True
 
             tx_in = clean_str(s.transaction_processed_incoming, "N/A")
@@ -1137,6 +1303,8 @@ def create_issp_docx(
     # PART II. CURRENT ICT ASSESSMENT
     # =========================================================================
     h2 = doc.add_heading(level=1)
+    h2.paragraph_format.space_before = Pt(0)
+    h2.paragraph_format.space_after = Pt(4)
     hrun2 = h2.add_run("PART II. CURRENT ICT ASSESSMENT")
     hrun2.font.name = "Palatino Linotype"
     hrun2.font.size = Pt(13)
@@ -1144,7 +1312,11 @@ def create_issp_docx(
     hrun2.font.color.rgb = RGBColor(30, 58, 138)
 
     # II.A Strategic Concerns
-    doc.add_paragraph().add_run("A. Strategic Concerns for ICT Use (Table II.A)\n").font.bold = True
+    p_ca = doc.add_paragraph()
+    p_ca.paragraph_format.space_before = Pt(0)
+    p_ca.paragraph_format.space_after = Pt(2)
+    p_ca.add_run("A. Strategic Concerns for ICT Use (Table II.A)\n").font.bold = True
+
     if concerns:
         c_table = doc.add_table(rows=1, cols=4)
         c_table.style = 'Table Grid'
@@ -1159,9 +1331,10 @@ def create_issp_docx(
             cell = c_table.rows[0].cells[i]
             cell.width = widths_c[i]
             set_cell_shading(cell, "F1F5F9")
+            set_cell_margins(cell, top=50, bottom=50, left=80, right=80)
             r = cell.paragraphs[0].add_run(h)
             r.font.bold = True
-            r.font.size = Pt(8.5)
+            r.font.size = Pt(8.0)
 
         for c in concerns:
             row = c_table.add_row()
@@ -1170,15 +1343,22 @@ def create_issp_docx(
             for i, v in enumerate(vals):
                 cell = row.cells[i]
                 cell.width = widths_c[i]
-                cell.paragraphs[0].add_run(v).font.size = Pt(8)
+                set_cell_margins(cell, top=40, bottom=40, left=80, right=80)
+                cell.paragraphs[0].add_run(v).font.size = Pt(7.5)
     else:
         doc.add_paragraph("No Strategic Concerns registered for this cycle.")
 
     # II.B Existing Network Infrastructure & Cybersecurity (B1 Text -> B1 Diagram -> B2 Controls)
-    doc.add_paragraph().add_run("\nB. Existing Network Infrastructure & Cybersecurity Controls\n").font.bold = True
+    p_bnet = doc.add_paragraph()
+    p_bnet.paragraph_format.space_before = Pt(6)
+    p_bnet.paragraph_format.space_after = Pt(2)
+    p_bnet.add_run("B. Existing Network Infrastructure & Cybersecurity Controls\n").font.bold = True
+
     existing_infra = [n for n in net_list if not getattr(n, "is_proposed", False)]
     if existing_infra:
         p_net = doc.add_paragraph()
+        p_net.paragraph_format.space_before = Pt(0)
+        p_net.paragraph_format.space_after = Pt(2)
         p_net.add_run("B1. LAN/WAN Set-Up and Connectivity Specifications:\n").font.bold = True
         for n in existing_infra:
             p_net.add_run(f"• Location: {clean_str(n.office_location, 'Main Campus')} | Type: {n.connectivity_type} | Bandwidth: {n.bandwidth_mbps} Mbps | IPv6: {'Yes' if n.is_ipv6_ready else 'No'}\n")
@@ -1195,14 +1375,22 @@ def create_issp_docx(
         img_url=getattr(narrative, "network_diagram_url", None)
     )
 
-    # Render B2 Cybersecurity Control Checklist Immediately After B1 Schematic
-    doc.add_paragraph().add_run("\nB2. Cybersecurity Control Checklist (Existing Baseline):\n").font.bold = True
+    # Render B2 Cybersecurity Control Checklist on Next Page
+    doc.add_page_break()
+    p_b2 = doc.add_paragraph()
+    p_b2.paragraph_format.space_before = Pt(0)
+    p_b2.paragraph_format.space_after = Pt(2)
+    p_b2.add_run("B2. Cybersecurity Control Checklist (Existing Baseline):\n").font.bold = True
     render_cybersecurity_checklist(doc, cyber_list, is_proposed=False)
 
     # II.C Existing Information Systems
-    doc.add_paragraph().add_run("\nC. Existing / Operational Information Systems (Part II.C)\n").font.bold = True
-    operational_systems = [s for s in systems if clean_str(getattr(s.status, 'value', s.status)).lower() == "operational"]
+    doc.add_page_break()
+    p_c = doc.add_paragraph()
+    p_c.paragraph_format.space_before = Pt(0)
+    p_c.paragraph_format.space_after = Pt(2)
+    p_c.add_run("C. Existing / Operational Information Systems (Part II.C)\n").font.bold = True
 
+    operational_systems = [s for s in systems if clean_str(getattr(s.status, 'value', s.status)).lower() == "operational"]
     if operational_systems:
         for s in operational_systems:
             render_information_system_card_docx(doc, s, is_proposed=False)
@@ -1210,7 +1398,12 @@ def create_issp_docx(
         doc.add_paragraph("No operational Information Systems cataloged.")
 
     # II.D E-Government Programs (EGP) Checklist
-    doc.add_paragraph().add_run("\nD. E-Government Programs (EGP) Checklist (Part II.D)\n").font.bold = True
+    doc.add_page_break()
+    p_d = doc.add_paragraph()
+    p_d.paragraph_format.space_before = Pt(0)
+    p_d.paragraph_format.space_after = Pt(2)
+    p_d.add_run("D. E-Government Programs (EGP) Checklist (Part II.D)\n").font.bold = True
+
     CANONICAL_EGOV_SPECS = [
         ("elgu", "1. ELECTRONIC LOCAL GOVERNMENT UNIT (ELGU) SYSTEM (Applicable only to LGUs)"),
         ("egovpay", "2. GOVERNMENT DIGITAL PAYMENT SYSTEM FOR COLLECTION AND DISBURSEMENT"),
@@ -1233,12 +1426,12 @@ def create_issp_docx(
     for idx, eh in enumerate(egov_headers):
         c = egov_table.rows[0].cells[idx]
         set_cell_shading(c, "F1F5F9")
+        set_cell_margins(c, top=50, bottom=50, left=80, right=80)
         r = c.paragraphs[0].add_run(eh)
         r.font.bold = True
-        r.font.size = Pt(8)
+        r.font.size = Pt(7.5)
 
     for key, display_label in CANONICAL_EGOV_SPECS:
-        # Robust matcher matching pdf_tasks.py logic
         match = None
         for e in egov_list:
             name_l = clean_str(getattr(e, "program_name", "")).lower()
@@ -1274,12 +1467,14 @@ def create_issp_docx(
 
         row = egov_table.add_row()
         prevent_row_split(row)
+        for c_i in range(3):
+            set_cell_margins(row.cells[c_i], top=40, bottom=40, left=80, right=80)
         r0 = row.cells[0].paragraphs[0].add_run(display_label)
         r0.font.bold = True
-        r0.font.size = Pt(7.5)
+        r0.font.size = Pt(7.0)
 
-        row.cells[1].paragraphs[0].add_run("[X] Yes" if is_used else "[X] No (Equivalent or Manual)").font.size = Pt(7.5)
-        row.cells[2].paragraphs[0].add_run(details_str).font.size = Pt(7.5)
+        row.cells[1].paragraphs[0].add_run("[X] Yes" if is_used else "[X] No (Equivalent or Manual)").font.size = Pt(7.0)
+        row.cells[2].paragraphs[0].add_run(details_str).font.size = Pt(7.0)
 
     doc.add_page_break()
 
@@ -1287,17 +1482,25 @@ def create_issp_docx(
     # PART III. PROPOSED ICT STRATEGY
     # =========================================================================
     h3 = doc.add_heading(level=1)
+    h3.paragraph_format.space_before = Pt(0)
+    h3.paragraph_format.space_after = Pt(4)
     hrun3 = h3.add_run("PART III. PROPOSED ICT STRATEGY")
     hrun3.font.name = "Palatino Linotype"
     hrun3.font.size = Pt(13)
     hrun3.font.bold = True
     hrun3.font.color.rgb = RGBColor(30, 58, 138)
 
-    # III.A Proposed Network Infrastructure (A.1 Text -> A.1 Diagram -> A.2 Controls)
-    doc.add_paragraph().add_run("A. Proposed Network Infrastructure & Cyber Defense\n").font.bold = True
+    # III.A Proposed Network Infrastructure
+    p_pa = doc.add_paragraph()
+    p_pa.paragraph_format.space_before = Pt(0)
+    p_pa.paragraph_format.space_after = Pt(2)
+    p_pa.add_run("A. Proposed Network Infrastructure & Cyber Defense\n").font.bold = True
+
     proposed_infra = [n for n in net_list if getattr(n, "is_proposed", False)]
     if proposed_infra:
         p_pnet = doc.add_paragraph()
+        p_pnet.paragraph_format.space_before = Pt(0)
+        p_pnet.paragraph_format.space_after = Pt(2)
         p_pnet.add_run("A.1. Proposed LAN/WAN Backbone Specifications:\n").font.bold = True
         for n in proposed_infra:
             p_pnet.add_run(f"• Location: {clean_str(n.office_location, 'Main Campus')} | Optical Leased Backbone: {n.connectivity_type} | Target Speed: {n.bandwidth_mbps} Mbps | IPv6: {'Yes' if n.is_ipv6_ready else 'No'}\n")
@@ -1314,12 +1517,21 @@ def create_issp_docx(
         img_url=getattr(narrative, "fiber_backbone_url", None)
     )
 
-    # Render A.2 Cybersecurity Control Checklist Immediately After A.1 Schematic
-    doc.add_paragraph().add_run("\nA.2. Cybersecurity Control Checklist (Proposed Expansion):\n").font.bold = True
+    # Render A.2 Cybersecurity Control Checklist on Next Page
+    doc.add_page_break()
+    p_a2 = doc.add_paragraph()
+    p_a2.paragraph_format.space_before = Pt(0)
+    p_a2.paragraph_format.space_after = Pt(2)
+    p_a2.add_run("A.2. Cybersecurity Control Checklist (Proposed Expansion):\n").font.bold = True
     render_cybersecurity_checklist(doc, cyber_list, is_proposed=True)
 
     # III.B Enterprise Architecture Narrative & Schematic Box
-    doc.add_paragraph().add_run("\nB. Enterprise Architecture (Target Blueprint)\n").font.bold = True
+    doc.add_page_break()
+    p_ea = doc.add_paragraph()
+    p_ea.paragraph_format.space_before = Pt(0)
+    p_ea.paragraph_format.space_after = Pt(2)
+    p_ea.add_run("B. Enterprise Architecture (Target Blueprint)\n").font.bold = True
+
     ea_text = strip_html_tags(narrative.enterprise_architecture_narrative) or (
         f"The proposed Enterprise Architecture of {agency_name} rationalizes disparate operational workflows into scalable microservices hosted in institutional facilities and cloud environments, utilizing PeGIF-compliant API gateways to establish automated interoperability with national oversight agencies and citizen portals."
     )
@@ -1333,7 +1545,12 @@ def create_issp_docx(
     )
 
     # III.C Proposed ICT Human Capital
-    doc.add_paragraph().add_run("\nC. Proposed ICT Human Capital (Staffing Registry)\n").font.bold = True
+    doc.add_page_break()
+    p_hc_prop = doc.add_paragraph()
+    p_hc_prop.paragraph_format.space_before = Pt(0)
+    p_hc_prop.paragraph_format.space_after = Pt(2)
+    p_hc_prop.add_run("C. Proposed ICT Human Capital (Staffing Registry)\n").font.bold = True
+
     if staff_list:
         st_table = doc.add_table(rows=1, cols=3)
         st_table.style = 'Table Grid'
@@ -1345,46 +1562,61 @@ def create_issp_docx(
         st_table.rows[0].cells[1].paragraphs[0].add_run("Employment Status").font.bold = True
         st_table.rows[0].cells[2].paragraphs[0].add_run("Target Count").font.bold = True
 
+        for c_i in range(3):
+            set_cell_margins(st_table.rows[0].cells[c_i], top=50, bottom=50, left=80, right=80)
+            set_cell_shading(st_table.rows[0].cells[c_i], "F1F5F9")
+
         total_staff_count = sum(getattr(st, "count", 1) or 1 for st in staff_list)
 
         for st in staff_list:
             r = st_table.add_row()
             prevent_row_split(r)
+            for c_i in range(3):
+                set_cell_margins(r.cells[c_i], top=40, bottom=40, left=80, right=80)
             r.cells[0].paragraphs[0].add_run(clean_str(st.position_title)).font.bold = True
             r.cells[1].paragraphs[0].add_run(clean_str(st.status))
             r.cells[2].paragraphs[0].add_run(str(st.count or 1))
 
         r_tot = st_table.add_row()
         prevent_row_split(r_tot)
-        set_cell_shading(r_tot.cells[0], "E2E8F0")
-        set_cell_shading(r_tot.cells[1], "E2E8F0")
-        set_cell_shading(r_tot.cells[2], "E2E8F0")
+        for c_i in range(3):
+            set_cell_shading(r_tot.cells[c_i], "E2E8F0")
+            set_cell_margins(r_tot.cells[c_i], top=50, bottom=50, left=80, right=80)
         r_tot.cells[0].paragraphs[0].add_run("Grand Total").font.bold = True
         r_tot.cells[2].paragraphs[0].add_run(str(total_staff_count)).font.bold = True
     else:
         doc.add_paragraph("Proposed staffing targets documented in administrative HR registry.")
 
     # III.D Proposed Information Systems
-    doc.add_paragraph().add_run("\nD. Proposed Information Systems & Major Enhancements (Table III.D)\n").font.bold = True
-    proposed_systems = [s for s in systems if clean_str(getattr(s.status, 'value', s.status)).lower() != "operational"]
+    doc.add_page_break()
+    p_prop_sys = doc.add_paragraph()
+    p_prop_sys.paragraph_format.space_before = Pt(0)
+    p_prop_sys.paragraph_format.space_after = Pt(2)
+    p_prop_sys.add_run("D. Proposed Information Systems & Major Enhancements (Table III.D)\n").font.bold = True
 
+    proposed_systems = [s for s in systems if clean_str(getattr(s.status, 'value', s.status)).lower() != "operational"]
     if proposed_systems:
         for s in proposed_systems:
             render_information_system_card_docx(doc, s, is_proposed=True, projects=projects)
     else:
         doc.add_paragraph("No proposed Information Systems logged for this cycle.")
 
-    # III.E Strategic ICT Projects Portfolio (Project Charters + Summary)
-    doc.add_paragraph().add_run("\nE. Strategic ICT Projects Portfolio (Table III.E)\n").font.bold = True
+    # III.E Strategic ICT Projects Portfolio
+    doc.add_page_break()
+    p_proj = doc.add_paragraph()
+    p_proj.paragraph_format.space_before = Pt(0)
+    p_proj.paragraph_format.space_after = Pt(2)
+    p_proj.add_run("E. Strategic ICT Projects Portfolio (Table III.E)\n").font.bold = True
 
     internal_projects = [p for p in projects if "cross" not in clean_str(getattr(p, "project_category", "")).lower()]
     cross_projects = [p for p in projects if "cross" in clean_str(getattr(p, "project_category", "")).lower()]
 
-    # Render E.1 Project Charters
     p_e1 = doc.add_paragraph()
+    p_e1.paragraph_format.space_before = Pt(2)
+    p_e1.paragraph_format.space_after = Pt(2)
     r_e1 = p_e1.add_run("E.1. Internal ICT Projects Portfolio")
     r_e1.font.bold = True
-    r_e1.font.size = Pt(10)
+    r_e1.font.size = Pt(9.5)
     r_e1.font.color.rgb = RGBColor(30, 58, 138)
 
     if internal_projects:
@@ -1393,11 +1625,12 @@ def create_issp_docx(
     else:
         doc.add_paragraph("No internal ICT projects registered for this cycle.")
 
-    # Render E.2 Cross-Agency Project Charters
     p_e2 = doc.add_paragraph()
-    r_e2 = p_e2.add_run("\nE.2. Cross-Agency ICT Projects Portfolio")
+    p_e2.paragraph_format.space_before = Pt(4)
+    p_e2.paragraph_format.space_after = Pt(2)
+    r_e2 = p_e2.add_run("E.2. Cross-Agency ICT Projects Portfolio")
     r_e2.font.bold = True
-    r_e2.font.size = Pt(10)
+    r_e2.font.size = Pt(9.5)
     r_e2.font.color.rgb = RGBColor(30, 58, 138)
 
     if cross_projects:
@@ -1407,14 +1640,20 @@ def create_issp_docx(
         doc.add_paragraph("No cross-agency ICT projects registered for this cycle.")
 
     # III.F Performance Measurement Framework (PMF Scorecard)
-    doc.add_paragraph().add_run("\nF. Performance Measurement Framework (PMF Scorecard)\n").font.bold = True
+    doc.add_page_break()
+    p_pmf = doc.add_paragraph()
+    p_pmf.paragraph_format.space_before = Pt(0)
+    p_pmf.paragraph_format.space_after = Pt(2)
+    p_pmf.add_run("F. Performance Measurement Framework (PMF Scorecard)\n").font.bold = True
     pmf_metrics = performance_metrics or []
 
     def render_pmf_subtable(metrics_subset: List[Any], subheader: str):
         p_sub = doc.add_paragraph()
+        p_sub.paragraph_format.space_before = Pt(4)
+        p_sub.paragraph_format.space_after = Pt(2)
         r_sub = p_sub.add_run(subheader)
         r_sub.font.bold = True
-        r_sub.font.size = Pt(9)
+        r_sub.font.size = Pt(8.5)
         r_sub.font.color.rgb = RGBColor(30, 58, 138)
 
         if not metrics_subset:
@@ -1434,9 +1673,10 @@ def create_issp_docx(
             cell = pmf_table.rows[0].cells[i]
             cell.width = widths_pmf[i]
             set_cell_shading(cell, "F1F5F9")
+            set_cell_margins(cell, top=50, bottom=50, left=60, right=60)
             r = cell.paragraphs[0].add_run(h)
             r.font.bold = True
-            r.font.size = Pt(8)
+            r.font.size = Pt(7.5)
 
         for m in metrics_subset:
             row = pmf_table.add_row()
@@ -1452,8 +1692,9 @@ def create_issp_docx(
             for i, v in enumerate(vals):
                 cell = row.cells[i]
                 cell.width = widths_pmf[i]
+                set_cell_margins(cell, top=40, bottom=40, left=60, right=60)
                 r = cell.paragraphs[0].add_run(v)
-                r.font.size = Pt(7.5)
+                r.font.size = Pt(7.0)
                 if i in [3, 4]:
                     cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
@@ -1475,16 +1716,20 @@ def create_issp_docx(
     # PART IV. RESOURCE REQUIREMENTS & FOUR-WAY PARITY
     # =========================================================================
     h4 = doc.add_heading(level=1)
+    h4.paragraph_format.space_before = Pt(0)
+    h4.paragraph_format.space_after = Pt(4)
     hrun4 = h4.add_run("PART IV. RESOURCE REQUIREMENTS & SUMMARY OF INVESTMENTS")
     hrun4.font.name = "Palatino Linotype"
     hrun4.font.size = Pt(13)
     hrun4.font.bold = True
     hrun4.font.color.rgb = RGBColor(30, 58, 138)
 
-    # IV.A Resource Deployments (Categorized Deployment Tables with Shaded Bands)
-    doc.add_paragraph().add_run("A. Detailed Resource Deployment and Cost Breakdown (Part IV.A)\n").font.bold = True
+    # IV.A Resource Deployments
+    p_iv_a = doc.add_paragraph()
+    p_iv_a.paragraph_format.space_before = Pt(0)
+    p_iv_a.paragraph_format.space_after = Pt(2)
+    p_iv_a.add_run("A. Detailed Resource Deployment and Cost Breakdown (Part IV.A)\n").font.bold = True
 
-    # Filter items: only approved items that belong to the compiled plan
     raw_items = items or []
     cap_threshold = Decimal("50000.00")
 
@@ -1518,8 +1763,13 @@ def create_issp_docx(
     ]
 
     for yr_idx, yr in enumerate(planning_years):
+        if yr_idx > 0:
+            doc.add_page_break()
+
         p_yr = doc.add_paragraph()
-        p_yr.add_run(f"\nA.{yr_idx + 1}. [YEAR #{yr_idx + 1}] (FY {yr})\n").font.bold = True
+        p_yr.paragraph_format.space_before = Pt(2)
+        p_yr.paragraph_format.space_after = Pt(2)
+        p_yr.add_run(f"A.{yr_idx + 1}. [YEAR #{yr_idx + 1}] (FY {yr})\n").font.bold = True
 
         iv_a_table = doc.add_table(rows=1, cols=6)
         iv_a_table.style = 'Table Grid'
@@ -1534,13 +1784,13 @@ def create_issp_docx(
             cell = iv_a_table.rows[0].cells[i]
             cell.width = widths_iva[i]
             set_cell_shading(cell, "F1F5F9")
+            set_cell_margins(cell, top=50, bottom=50, left=60, right=60)
             r = cell.paragraphs[0].add_run(h)
             r.font.bold = True
-            r.font.size = Pt(8)
+            r.font.size = Pt(7.5)
 
         total_yr_cost = Decimal("0.00")
 
-        # Compute items with non-zero quantity for this year
         year_cat_items = {}
         for cat_name, is_proj_linked in canonical_categories:
             matched_items = []
@@ -1576,7 +1826,6 @@ def create_issp_docx(
             if matched_items:
                 year_cat_items[cat_name] = (is_proj_linked, matched_items)
 
-        # Output categorized sections
         for cat_name, (is_proj_linked, cat_items) in year_cat_items.items():
             cat_subtotal = Decimal("0.00")
             for itm, q in cat_items:
@@ -1587,12 +1836,11 @@ def create_issp_docx(
                 adj_unit = (u_cost * (Decimal("1.00") + rate)).quantize(Decimal("0.01"))
                 cat_subtotal += Decimal(q) * adj_unit
 
-            # Category Header Band Row
             r_cat = iv_a_table.add_row()
             prevent_row_split(r_cat)
-            for c_i in range(5):
+            for c_i in range(6):
                 set_cell_shading(r_cat.cells[c_i], "E2E8F0")
-            set_cell_shading(r_cat.cells[5], "E2E8F0")
+                set_cell_margins(r_cat.cells[c_i], top=40, bottom=40, left=60, right=60)
             r_cat.cells[0].paragraphs[0].add_run(cat_name.upper()).font.bold = True
             r_cat.cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
             r_cat.cells[5].paragraphs[0].add_run(fmt_currency(cat_subtotal)).font.bold = True
@@ -1611,19 +1859,19 @@ def create_issp_docx(
                     for itm, q in exp_items
                 )
 
-                # Expenditure Class Band Row
                 r_exp = iv_a_table.add_row()
                 prevent_row_split(r_exp)
                 for c_i in range(6):
                     set_cell_shading(r_exp.cells[c_i], "F8FAFC")
+                    set_cell_margins(r_exp.cells[c_i], top=30, bottom=30, left=60, right=60)
                 r_exp.cells[0].paragraphs[0].paragraph_format.left_indent = Inches(0.15)
                 run_exp = r_exp.cells[0].paragraphs[0].add_run(exp_class_name.upper())
                 run_exp.font.bold = True
-                run_exp.font.size = Pt(7.5)
+                run_exp.font.size = Pt(7.0)
                 r_exp.cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 run_exp_tot = r_exp.cells[5].paragraphs[0].add_run(fmt_currency(exp_subtotal))
                 run_exp_tot.font.bold = True
-                run_exp_tot.font.size = Pt(7.5)
+                run_exp_tot.font.size = Pt(7.0)
 
                 for itm, qty_int in exp_items:
                     u_cost = Decimal(str(itm.unit_cost or 0))
@@ -1651,41 +1899,46 @@ def create_issp_docx(
                     for i, v in enumerate(vals):
                         cell = row.cells[i]
                         cell.width = widths_iva[i]
+                        set_cell_margins(cell, top=30, bottom=30, left=60, right=60)
                         p_cell = cell.paragraphs[0]
+                        p_cell.paragraph_format.space_before = Pt(0)
+                        p_cell.paragraph_format.space_after = Pt(0)
                         if i == 0:
-                            p_cell.paragraph_format.left_indent = Inches(0.3)
+                            p_cell.paragraph_format.left_indent = Inches(0.25)
                         r = p_cell.add_run(v)
-                        r.font.size = Pt(7.5)
+                        r.font.size = Pt(7.0)
                         if i in [3, 5]:
                             p_cell.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                         elif i == 4:
                             p_cell.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # Grand Total Row for that year
         gr_row = iv_a_table.add_row()
         prevent_row_split(gr_row)
-        for i in range(5):
+        for i in range(6):
             set_cell_shading(gr_row.cells[i], "E2E8F0")
+            set_cell_margins(gr_row.cells[i], top=40, bottom=40, left=60, right=60)
         gr_row.cells[0].paragraphs[0].add_run(f"GRAND TOTAL (FY {yr})").font.bold = True
 
         last_cell = gr_row.cells[5]
-        set_cell_shading(last_cell, "E2E8F0")
         last_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
         r_tot = last_cell.paragraphs[0].add_run(fmt_currency(total_yr_cost))
         r_tot.font.bold = True
 
-        # Statutory footnote
         p_note = doc.add_paragraph()
-        p_note.paragraph_format.space_before = Pt(3)
+        p_note.paragraph_format.space_before = Pt(2)
+        p_note.paragraph_format.space_after = Pt(4)
         r_fn = p_note.add_run(f"*All costs indicated in this section are based on market research conducted by {agency_name} (inclusive of administrative inflation buffer adjustments).")
-        r_fn.font.size = Pt(7)
+        r_fn.font.size = Pt(6.5)
         r_fn.font.italic = True
         r_fn.font.color.rgb = RGBColor(100, 116, 139)
 
     doc.add_page_break()
 
     # IV.B Four-Way Parity Tables B.1 to B.4
-    doc.add_paragraph().add_run("B. Summary of Investments (Four-Way Parity Matrices)\n").font.bold = True
+    p_bhead = doc.add_paragraph()
+    p_bhead.paragraph_format.space_before = Pt(0)
+    p_bhead.paragraph_format.space_after = Pt(2)
+    p_bhead.add_run("B. Summary of Investments (Four-Way Parity Matrices)\n").font.bold = True
 
     p_data = parity_data or {}
     year_cols = p_data.get("year_columns", [f"FY {y}" for y in planning_years])
@@ -1699,9 +1952,11 @@ def create_issp_docx(
 
     for title_mat, matrix_dict, col_label in tables_to_render:
         p_t = doc.add_paragraph()
-        r_t = p_t.add_run(f"\n{title_mat}\n")
+        p_t.paragraph_format.space_before = Pt(4)
+        p_t.paragraph_format.space_after = Pt(2)
+        r_t = p_t.add_run(f"{title_mat}\n")
         r_t.font.bold = True
-        r_t.font.size = Pt(9.5)
+        r_t.font.size = Pt(8.5)
         r_t.font.color.rgb = RGBColor(30, 58, 138)
 
         if matrix_dict:
@@ -1712,25 +1967,27 @@ def create_issp_docx(
             make_header_row_repeat(m_table.rows[0])
             prevent_row_split(m_table.rows[0])
 
-            # Header Row
             hdr_cells = m_table.rows[0].cells
             hdr_cells[0].text = col_label
             set_cell_shading(hdr_cells[0], "F1F5F9")
+            set_cell_margins(hdr_cells[0], top=40, bottom=40, left=60, right=60)
             hdr_cells[0].paragraphs[0].runs[0].font.bold = True
-            hdr_cells[0].paragraphs[0].runs[0].font.size = Pt(8)
+            hdr_cells[0].paragraphs[0].runs[0].font.size = Pt(7.5)
 
             for i, y_col in enumerate(year_cols):
                 hdr_cells[i + 1].text = y_col
                 set_cell_shading(hdr_cells[i + 1], "F1F5F9")
+                set_cell_margins(hdr_cells[i + 1], top=40, bottom=40, left=60, right=60)
                 hdr_cells[i + 1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 hdr_cells[i + 1].paragraphs[0].runs[0].font.bold = True
-                hdr_cells[i + 1].paragraphs[0].runs[0].font.size = Pt(8)
+                hdr_cells[i + 1].paragraphs[0].runs[0].font.size = Pt(7.5)
 
             hdr_cells[-1].text = "Total Outlay"
             set_cell_shading(hdr_cells[-1], "F1F5F9")
+            set_cell_margins(hdr_cells[-1], top=40, bottom=40, left=60, right=60)
             hdr_cells[-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
             hdr_cells[-1].paragraphs[0].runs[0].font.bold = True
-            hdr_cells[-1].paragraphs[0].runs[0].font.size = Pt(8)
+            hdr_cells[-1].paragraphs[0].runs[0].font.size = Pt(7.5)
 
             for cat_name, row_vals in matrix_dict.items():
                 is_grand = (cat_name.upper() == "GRAND TOTAL")
@@ -1739,6 +1996,8 @@ def create_issp_docx(
 
                 display_title = clean_uacs_title(cat_name) if "B.4" in title_mat else cat_name
                 row_cells[0].text = display_title
+                row_cells[0].paragraphs[0].runs[0].font.size = Pt(7.0)
+                set_cell_margins(row_cells[0], top=35, bottom=35, left=60, right=60)
                 if is_grand:
                     set_cell_shading(row_cells[0], "E2E8F0")
                     row_cells[0].paragraphs[0].runs[0].font.bold = True
@@ -1747,7 +2006,8 @@ def create_issp_docx(
                     amount = Decimal(str(row_vals.get(y_col, row_vals.get(y_col.replace("FY ", ""), 0.0))))
                     row_cells[idx + 1].text = fmt_currency(amount)
                     row_cells[idx + 1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                    row_cells[idx + 1].paragraphs[0].runs[0].font.size = Pt(8)
+                    row_cells[idx + 1].paragraphs[0].runs[0].font.size = Pt(7.0)
+                    set_cell_margins(row_cells[idx + 1], top=35, bottom=35, left=60, right=60)
                     if is_grand:
                         set_cell_shading(row_cells[idx + 1], "E2E8F0")
                         row_cells[idx + 1].paragraphs[0].runs[0].font.bold = True
@@ -1755,26 +2015,30 @@ def create_issp_docx(
                 tot = Decimal(str(row_vals.get("Total", row_vals.get("total", 0.0))))
                 row_cells[-1].text = fmt_currency(tot)
                 row_cells[-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                row_cells[-1].paragraphs[0].runs[0].font.size = Pt(8)
+                row_cells[-1].paragraphs[0].runs[0].font.size = Pt(7.0)
+                set_cell_margins(row_cells[-1], top=35, bottom=35, left=60, right=60)
                 if is_grand:
                     set_cell_shading(row_cells[-1], "E2E8F0")
                     row_cells[-1].paragraphs[0].runs[0].font.bold = True
         else:
             doc.add_paragraph("Table matrix not generated.")
 
-    # Parity Certification Statement
     p_cert = doc.add_paragraph()
-    r_cert = p_cert.add_run(f"\n★ FOUR-WAY PARITY CERTIFIED: Certified Grand Total = {fmt_currency(p_data.get('certified_grand_total', 0))} ★\n")
+    p_cert.paragraph_format.space_before = Pt(4)
+    p_cert.paragraph_format.space_after = Pt(4)
+    r_cert = p_cert.add_run(f"★ FOUR-WAY PARITY CERTIFIED: Certified Grand Total = {fmt_currency(p_data.get('certified_grand_total', 0))} ★\n")
     r_cert.font.bold = True
-    r_cert.font.size = Pt(9)
+    r_cert.font.size = Pt(8.5)
     r_cert.font.color.rgb = RGBColor(5, 150, 105)
 
     doc.add_page_break()
 
     # =========================================================================
-    # ANNEX 1: MASTER ASSET INVENTORY (EQUIPMENT & SOFTWARE - REAL AGGREGATIONS)
+    # ANNEX 1: MASTER ASSET INVENTORY (EQUIPMENT & SOFTWARE)
     # =========================================================================
     h5 = doc.add_heading(level=1)
+    h5.paragraph_format.space_before = Pt(0)
+    h5.paragraph_format.space_after = Pt(4)
     hrun5 = h5.add_run("ANNEX 1: EXISTING INFORMATION & COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY")
     hrun5.font.name = "Palatino Linotype"
     hrun5.font.size = Pt(13)
@@ -1783,7 +2047,6 @@ def create_issp_docx(
 
     inv_items = inventory or []
 
-    # Category matching helpers
     def is_inv_item_functional(status_val):
         s = clean_str(status_val).lower()
         return s in ["functional", "operational"]
@@ -1818,8 +2081,11 @@ def create_issp_docx(
             return not any(k in name for k in std_keys)
         return target_cat.strip().lower().split()[0] in name
 
-    # Table 1: Equipment Inventory
-    doc.add_paragraph().add_run("1. ICT Equipment Inventory (Central vs. Field Offices)\n").font.bold = True
+    p_a1 = doc.add_paragraph()
+    p_a1.paragraph_format.space_before = Pt(0)
+    p_a1.paragraph_format.space_after = Pt(2)
+    p_a1.add_run("1. ICT Equipment Inventory (Central vs. Field Offices)\n").font.bold = True
+
     eq_table = doc.add_table(rows=1, cols=5)
     eq_table.style = 'Table Grid'
     set_table_borders(eq_table)
@@ -1832,6 +2098,7 @@ def create_issp_docx(
         c = eq_table.rows[0].cells[i]
         c.width = widths_eq[i]
         set_cell_shading(c, "F1F5F9")
+        set_cell_margins(c, top=40, bottom=40, left=60, right=60)
         c.paragraphs[0].add_run(h).font.bold = True
 
     eq_categories = ["Servers", "Desktop", "Laptop", "Mobile Phone", "Tablet", "Printer", "Network Switch", "Others, please specify"]
@@ -1856,48 +2123,51 @@ def create_issp_docx(
         tot_f_eol += fEol
         tot_f_bak += fBak
 
-        # Central Office row
         r_c = eq_table.add_row()
         prevent_row_split(r_c)
+        for c_i in range(5):
+            set_cell_margins(r_c.cells[c_i], top=30, bottom=30, left=60, right=60)
         r_c.cells[0].paragraphs[0].add_run(cat).font.bold = True
         r_c.cells[1].paragraphs[0].add_run("Central Office")
         r_c.cells[2].paragraphs[0].add_run(str(cOps))
         r_c.cells[3].paragraphs[0].add_run(str(cEol))
         r_c.cells[4].paragraphs[0].add_run(str(cBak))
 
-        # Field Office row
         r_f = eq_table.add_row()
         prevent_row_split(r_f)
+        for c_i in range(5):
+            set_cell_margins(r_f.cells[c_i], top=30, bottom=30, left=60, right=60)
         r_f.cells[1].paragraphs[0].add_run("Field/Regional Office")
         r_f.cells[2].paragraphs[0].add_run(str(fOps))
         r_f.cells[3].paragraphs[0].add_run(str(fEol))
         r_f.cells[4].paragraphs[0].add_run(str(fBak))
 
-        # Category Subtotal row
         r_sub = eq_table.add_row()
         prevent_row_split(r_sub)
-        set_cell_shading(r_sub.cells[1], "F8FAFC")
-        set_cell_shading(r_sub.cells[2], "F8FAFC")
-        set_cell_shading(r_sub.cells[3], "F8FAFC")
-        set_cell_shading(r_sub.cells[4], "F8FAFC")
+        for c_i in range(5):
+            set_cell_margins(r_sub.cells[c_i], top=30, bottom=30, left=60, right=60)
+            set_cell_shading(r_sub.cells[c_i], "F8FAFC")
         r_sub.cells[1].paragraphs[0].add_run("Subtotal").font.bold = True
         r_sub.cells[2].paragraphs[0].add_run(str(cOps + fOps)).font.bold = True
         r_sub.cells[3].paragraphs[0].add_run(str(cEol + fEol)).font.bold = True
         r_sub.cells[4].paragraphs[0].add_run(str(cBak + fBak)).font.bold = True
 
-    # Equipment Grand Total Row
     r_eq_tot = eq_table.add_row()
     prevent_row_split(r_eq_tot)
     for c_i in range(5):
         set_cell_shading(r_eq_tot.cells[c_i], "E2E8F0")
+        set_cell_margins(r_eq_tot.cells[c_i], top=40, bottom=40, left=60, right=60)
     r_eq_tot.cells[0].paragraphs[0].add_run("GRAND TOTAL (EQUIPMENT)").font.bold = True
     r_eq_tot.cells[1].paragraphs[0].add_run("All Locations").font.bold = True
     r_eq_tot.cells[2].paragraphs[0].add_run(str(tot_c_ops + tot_f_ops)).font.bold = True
     r_eq_tot.cells[3].paragraphs[0].add_run(str(tot_c_eol + tot_f_eol)).font.bold = True
     r_eq_tot.cells[4].paragraphs[0].add_run(str(tot_c_bak + tot_f_bak)).font.bold = True
 
-    # Table 2: Software Inventory
-    doc.add_paragraph().add_run("\n2. ICT Software Inventory (Perpetual vs. Subscription)\n").font.bold = True
+    p_a2 = doc.add_paragraph()
+    p_a2.paragraph_format.space_before = Pt(6)
+    p_a2.paragraph_format.space_after = Pt(2)
+    p_a2.add_run("2. ICT Software Inventory (Perpetual vs. Subscription)\n").font.bold = True
+
     sw_table = doc.add_table(rows=1, cols=4)
     sw_table.style = 'Table Grid'
     set_table_borders(sw_table)
@@ -1910,6 +2180,7 @@ def create_issp_docx(
         c = sw_table.rows[0].cells[i]
         c.width = widths_sw[i]
         set_cell_shading(c, "F1F5F9")
+        set_cell_margins(c, top=40, bottom=40, left=60, right=60)
         c.paragraphs[0].add_run(h).font.bold = True
 
     sw_categories = ["Office Productivity Tool", "Grammar checker", "Graphics and Simulation Software", "Antivirus", "IT Help Desk Tool", "Others, please specify"]
@@ -1930,36 +2201,37 @@ def create_issp_docx(
         tot_f_perp += fPerp
         tot_f_sub += fSub
 
-        # Central row
         r_sc = sw_table.add_row()
         prevent_row_split(r_sc)
+        for c_i in range(4):
+            set_cell_margins(r_sc.cells[c_i], top=30, bottom=30, left=60, right=60)
         r_sc.cells[0].paragraphs[0].add_run(scat).font.bold = True
         r_sc.cells[1].paragraphs[0].add_run("Central Office")
         r_sc.cells[2].paragraphs[0].add_run(str(cPerp))
         r_sc.cells[3].paragraphs[0].add_run(str(cSub))
 
-        # Field row
         r_sf = sw_table.add_row()
         prevent_row_split(r_sf)
+        for c_i in range(4):
+            set_cell_margins(r_sf.cells[c_i], top=30, bottom=30, left=60, right=60)
         r_sf.cells[1].paragraphs[0].add_run("Field/Regional Office")
         r_sf.cells[2].paragraphs[0].add_run(str(fPerp))
         r_sf.cells[3].paragraphs[0].add_run(str(fSub))
 
-        # Subtotal row
         r_ssub = sw_table.add_row()
         prevent_row_split(r_ssub)
-        set_cell_shading(r_ssub.cells[1], "F8FAFC")
-        set_cell_shading(r_ssub.cells[2], "F8FAFC")
-        set_cell_shading(r_ssub.cells[3], "F8FAFC")
+        for c_i in range(4):
+            set_cell_margins(r_ssub.cells[c_i], top=30, bottom=30, left=60, right=60)
+            set_cell_shading(r_ssub.cells[c_i], "F8FAFC")
         r_ssub.cells[1].paragraphs[0].add_run("Subtotal").font.bold = True
         r_ssub.cells[2].paragraphs[0].add_run(str(cPerp + fPerp)).font.bold = True
         r_ssub.cells[3].paragraphs[0].add_run(str(cSub + fSub)).font.bold = True
 
-    # Software Grand Total Row
     r_sw_tot = sw_table.add_row()
     prevent_row_split(r_sw_tot)
     for c_i in range(4):
         set_cell_shading(r_sw_tot.cells[c_i], "E2E8F0")
+        set_cell_margins(r_sw_tot.cells[c_i], top=40, bottom=40, left=60, right=60)
     r_sw_tot.cells[0].paragraphs[0].add_run("GRAND TOTAL (SOFTWARE)").font.bold = True
     r_sw_tot.cells[1].paragraphs[0].add_run("All Locations").font.bold = True
     r_sw_tot.cells[2].paragraphs[0].add_run(str(tot_c_perp + tot_f_perp)).font.bold = True
@@ -1971,15 +2243,19 @@ def create_issp_docx(
     # ANNEX 2: DISASTER RECOVERY & BUSINESS CONTINUITY PLAN (DRBCP)
     # =========================================================================
     h6 = doc.add_heading(level=1)
+    h6.paragraph_format.space_before = Pt(0)
+    h6.paragraph_format.space_after = Pt(4)
     hrun6 = h6.add_run("ANNEX 2: DISASTER RECOVERY & BUSINESS CONTINUITY PLAN (DRBCP) FOR ICT RESOURCES")
     hrun6.font.name = "Palatino Linotype"
     hrun6.font.size = Pt(13)
     hrun6.font.bold = True
     hrun6.font.color.rgb = RGBColor(30, 58, 138)
 
-    # 1. Plan Overview & Governance
-    doc.add_paragraph().add_run("1. Plan Overview & Disaster Recovery Team (DRT)\n").font.bold = True
-    app_date = clean_str(getattr(narrative, "drbcp_approval_date", None), f"January 15, {start_year}")
+    p_d1 = doc.add_paragraph()
+    p_d1.paragraph_format.space_before = Pt(0)
+    p_d1.paragraph_format.space_after = Pt(2)
+    p_d1.add_run("1. Plan Overview & Disaster Recovery Team (DRT)\n").font.bold = True
+    app_date = clean_str(getattr(narrative, "drbcp_approval_date", None), f"March 15, {start_year}")
     doc.add_paragraph(f"Agency: {agency_name} | Version: {issp_period}.1 | Official Approval Date: {app_date}")
 
     if drt_list:
@@ -1993,17 +2269,26 @@ def create_issp_docx(
         drt_table.rows[0].cells[1].paragraphs[0].add_run("Responsibility").font.bold = True
         drt_table.rows[0].cells[2].paragraphs[0].add_run("Designated Contact").font.bold = True
 
+        for c_i in range(3):
+            set_cell_shading(drt_table.rows[0].cells[c_i], "F1F5F9")
+            set_cell_margins(drt_table.rows[0].cells[c_i], top=40, bottom=40, left=60, right=60)
+
         for dt in drt_list:
             r = drt_table.add_row()
             prevent_row_split(r)
+            for c_i in range(3):
+                set_cell_margins(r.cells[c_i], top=35, bottom=35, left=60, right=60)
             r.cells[0].paragraphs[0].add_run(clean_str(dt.role)).font.bold = True
             r.cells[1].paragraphs[0].add_run(clean_str(dt.responsibility))
             r.cells[2].paragraphs[0].add_run(f"{clean_str(dt.contact_person)} ({clean_str(dt.contact_details)})")
     else:
         doc.add_paragraph("DRT roster defined under administrative continuity protocol.")
 
-    # 2. BIA Summary
-    doc.add_paragraph().add_run("\n2. Business Impact Analysis (BIA) Summary\n").font.bold = True
+    p_d2 = doc.add_paragraph()
+    p_d2.paragraph_format.space_before = Pt(4)
+    p_d2.paragraph_format.space_after = Pt(2)
+    p_d2.add_run("2. Business Impact Analysis (BIA) Summary\n").font.bold = True
+
     real_bias = [b for b in bia_list if b.system_name and not clean_str(b.system_name).lower().startswith("testtt")]
     if real_bias:
         bia_table = doc.add_table(rows=1, cols=5)
@@ -2016,11 +2301,14 @@ def create_issp_docx(
         for i, h in enumerate(headers_bia):
             c = bia_table.rows[0].cells[i]
             set_cell_shading(c, "F1F5F9")
+            set_cell_margins(c, top=40, bottom=40, left=60, right=60)
             c.paragraphs[0].add_run(h).font.bold = True
 
         for b in real_bias:
             r = bia_table.add_row()
             prevent_row_split(r)
+            for c_i in range(5):
+                set_cell_margins(r.cells[c_i], top=35, bottom=35, left=60, right=60)
             r.cells[0].paragraphs[0].add_run(clean_str(b.system_name)).font.bold = True
             r.cells[1].paragraphs[0].add_run(clean_str(b.classification))
             r.cells[2].paragraphs[0].add_run(f"{getattr(b, 'mtpd_hours', 24)}h")
@@ -2029,8 +2317,11 @@ def create_issp_docx(
     else:
         doc.add_paragraph("Mission-critical systems evaluated for business continuity.")
 
-    # 3. Affected Assets
-    doc.add_paragraph().add_run("\n3. ICT Component Inventory & Affected Assets\n").font.bold = True
+    p_d3 = doc.add_paragraph()
+    p_d3.paragraph_format.space_before = Pt(4)
+    p_d3.paragraph_format.space_after = Pt(2)
+    p_d3.add_run("3. ICT Component Inventory & Affected Assets\n").font.bold = True
+
     raw_assets = getattr(narrative, "drbcp_affected_assets_json", None) or []
     if isinstance(raw_assets, str):
         try: raw_assets = json.loads(raw_assets)
@@ -2040,34 +2331,49 @@ def create_issp_docx(
         for a in raw_assets:
             if isinstance(a, dict):
                 p_a = doc.add_paragraph(style='List Bullet')
+                p_a.paragraph_format.space_before = Pt(0)
+                p_a.paragraph_format.space_after = Pt(1)
                 p_a.add_run(f"{a.get('asset_group', 'Asset Group')}: ").font.bold = True
                 p_a.add_run(clean_str(a.get("details", "")))
     else:
         doc.add_paragraph("Primary Data Center: Physical Enterprise Servers, Core Network Switches, Dedicated Campus Backbone.")
 
-    # 4 & 5. Strategy & SOP
-    doc.add_paragraph().add_run("\n4. Technical Recovery Strategy\n").font.bold = True
+    p_d4 = doc.add_paragraph()
+    p_d4.paragraph_format.space_before = Pt(4)
+    p_d4.paragraph_format.space_after = Pt(2)
+    p_d4.add_run("4. Technical Recovery Strategy\n").font.bold = True
+
     strat_text = strip_html_tags(getattr(narrative, "drbcp_recovery_strategy_text", None) or getattr(narrative, "drbcp_recovery_strategy_html", None)) or (
         "Daily database snapshots transferred to an off-site secondary facility (>30km). Real-time operational failover configured for frontline student and financial services."
     )
     doc.add_paragraph(strat_text)
 
-    doc.add_paragraph().add_run("\n5. Standard Operating Procedures (SOP Operational Phases)\n").font.bold = True
+    p_d5 = doc.add_paragraph()
+    p_d5.paragraph_format.space_before = Pt(4)
+    p_d5.paragraph_format.space_after = Pt(2)
+    p_d5.add_run("5. Standard Operating Procedures (SOP Operational Phases)\n").font.bold = True
+
     sop_text = strip_html_tags(getattr(narrative, "drbcp_sop_phases_text", None) or getattr(narrative, "drbcp_sop_phases_html", None)) or (
         "Phase I (Detection & Declaration): Monitoring alerts evaluated; Incident Commander activates DRBCP within 1 hour.\nPhase II (Activation): Operations shifted to secondary standby instances.\nPhase III (Failback): Primary infrastructure restored and delta synchronized."
     )
     doc.add_paragraph(sop_text)
 
-    # 6. Compliance, Scalability & Sustainability (MITHI Resolution 2025-01) + DRBCP KPIs
-    doc.add_paragraph().add_run("\n6. Compliance, Scalability & Sustainability (MITHI Resolution 2025-01)\n").font.bold = True
+    p_d6 = doc.add_paragraph()
+    p_d6.paragraph_format.space_before = Pt(4)
+    p_d6.paragraph_format.space_after = Pt(2)
+    p_d6.add_run("6. Compliance, Scalability & Sustainability (MITHI Resolution 2025-01)\n").font.bold = True
+
     comp_text = strip_html_tags(getattr(narrative, "drbcp_compliance_narrative_text", None) or getattr(narrative, "drbcp_compliance_narrative_html", None)) or (
         "Cybersecurity controls isolate compromised nodes prior to snapshot mounting. Full simulation drill conducted annually. Continuing infrastructure costs budgeted under Part IV."
     )
     doc.add_paragraph(comp_text)
 
-    # Render DRBCP KPIs Table if available
+    p_dkpi = doc.add_paragraph()
+    p_dkpi.paragraph_format.space_before = Pt(4)
+    p_dkpi.paragraph_format.space_after = Pt(2)
+    p_dkpi.add_run("Key Performance Indicators for DRBCP\n").font.bold = True
+
     if drm_list:
-        doc.add_paragraph().add_run("\nKey Performance Indicators for DRBCP\n").font.bold = True
         drm_table = doc.add_table(rows=1, cols=2)
         drm_table.style = 'Table Grid'
         set_table_borders(drm_table)
@@ -2076,12 +2382,15 @@ def create_issp_docx(
 
         drm_table.rows[0].cells[0].paragraphs[0].add_run("Indicator").font.bold = True
         drm_table.rows[0].cells[1].paragraphs[0].add_run("Target Metric").font.bold = True
-        set_cell_shading(drm_table.rows[0].cells[0], "F1F5F9")
-        set_cell_shading(drm_table.rows[0].cells[1], "F1F5F9")
+        for c_i in range(2):
+            set_cell_shading(drm_table.rows[0].cells[c_i], "F1F5F9")
+            set_cell_margins(drm_table.rows[0].cells[c_i], top=40, bottom=40, left=60, right=60)
 
         for dm in drm_list:
             r = drm_table.add_row()
             prevent_row_split(r)
+            for c_i in range(2):
+                set_cell_margins(r.cells[c_i], top=35, bottom=35, left=60, right=60)
             r.cells[0].paragraphs[0].add_run(clean_str(dm.indicator)).font.bold = True
             r.cells[1].paragraphs[0].add_run(clean_str(dm.target_metric))
 
