@@ -33,8 +33,6 @@ import {
   Edit3 
 } from "lucide-react";
 
-// Dynamic API URL resolver: automatically uses current browser origin in production
-// (e.g. Azure App Service) to prevent mixed-content & localhost fetch failures.
 const getApiUrl = () => {
   if (typeof window !== "undefined" && window.location?.origin) {
     const { hostname, origin, port } = window.location;
@@ -53,10 +51,6 @@ const getApiUrl = () => {
 
 const API_BASE_URL = getApiUrl();
 
-/**
- * Normalizes error messages from FastAPI / Pydantic validation envelopes
- * without rendering unhelpful "[object Object]" text.
- */
 const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
   if (!errData) return fallbackMsg;
   if (typeof errData.detail === "string") return errData.detail;
@@ -78,7 +72,6 @@ const parseErrorMessage = (errData, fallbackMsg = "Operation failed") => {
   return fallbackMsg;
 };
 
-// Official 7-Stage Compilation Pipeline Phases (matching backend Celery tasks)
 const COMPILATION_STAGES = [
   { step: 1, percent: 15, name: "Singularity DAG Audit", desc: "Traversing legal mandate, outcomes, concerns, systems & project linkages" },
   { step: 2, percent: 30, name: "4-Way Parity Verification", desc: "Reconciling Tables B.1, B.2, B.3 & B.4 to the exact centavo" },
@@ -105,35 +98,32 @@ export default function DocumentVault() {
   const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
 
   const isMountedRef = useRef(true);
+  const activePollIntervalRef = useRef(null);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+      if (activePollIntervalRef.current) {
+        clearInterval(activePollIntervalRef.current);
+      }
     };
   }, []);
 
-  // Active Narrative & Document Data
   const [narrative, setNarrative] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  // Background Compilation Progress States
-  const [taskId, setTaskId] = useState(null);
   const [isCompiling, setIsCompiling] = useState(false);
-  const [compiledFormat, setCompiledFormat] = useState("pdf"); // "pdf" | "docx"
+  const [compiledFormat, setCompiledFormat] = useState("pdf");
   const [progressPercent, setProgressPercent] = useState(0);
   const [currentStepMessage, setCurrentStepMessage] = useState("");
   const [compilationLogs, setCompilationLogs] = useState([]);
   
-  // Independent Format Artifact Tracking (Zero Overwrite Collisions)
   const [compiledPdfUrl, setCompiledPdfUrl] = useState(null);
   const [compiledDocxUrl, setCompiledDocxUrl] = useState(null);
-
-  // CSV Export Loading State
   const [exportingCsv, setExportingCsv] = useState(false);
-
-  // Interactive Live Cover Page Generator Modal State
   const [isCoverPreviewOpen, setIsCoverPreviewOpen] = useState(false);
 
   const addLog = useCallback((msg, type = "info") => {
@@ -141,7 +131,6 @@ export default function DocumentVault() {
     setCompilationLogs(prev => [...prev, { time: timeStr, text: msg, type }]);
   }, []);
 
-  // Fetch active narrative to verify compilation status and existing document URLs independently
   const fetchVaultDetails = useCallback(async () => {
     if (!token || !activeCycle) return;
     setLoading(true);
@@ -186,17 +175,26 @@ export default function DocumentVault() {
     }
   }, [fetchVaultDetails, isAdmin]);
 
-  // Polling Worker Progress for Async Celery Compilation Task
-  useEffect(() => {
-    if (!taskId || !isCompiling || !isAdmin) return;
+  // Robust, task-specific polling function that prevents old task cross-talk
+  const startPollingTask = useCallback((activeTaskId, targetFormat) => {
+    if (activePollIntervalRef.current) {
+      clearInterval(activePollIntervalRef.current);
+    }
 
-    const interval = setInterval(async () => {
+    const formatLabel = targetFormat === "docx" ? "Word (.docx)" : "PDF";
+
+    activePollIntervalRef.current = setInterval(async () => {
+      if (!isMountedRef.current) {
+        clearInterval(activePollIntervalRef.current);
+        return;
+      }
+
       try {
         let data = null;
         try {
-          data = await getTaskStatus(token, taskId);
+          data = await getTaskStatus(token, activeTaskId);
         } catch {
-          const res = await fetch(`${API_BASE_URL}/api/admin/governance/task-status/${encodeURIComponent(taskId)}`, {
+          const res = await fetch(`${API_BASE_URL}/api/admin/governance/task-status/${encodeURIComponent(activeTaskId)}`, {
             headers: { 
               Authorization: `Bearer ${token}`,
               "Content-Type": "application/json"
@@ -217,11 +215,11 @@ export default function DocumentVault() {
           addLog(`WORKER [${prog}%]: ${msg}`);
         } else if (data.state === "SUCCESS") {
           setProgressPercent(100);
-          setCurrentStepMessage("Compilation Complete. Certified document archived.");
+          setCurrentStepMessage(`Compilation Complete. Certified ${formatLabel} archived.`);
           setIsCompiling(false);
           
           const downloadUrl = data.result?.file_url || data.download_url || "";
-          const isDocx = (data.result?.format === "docx") || downloadUrl.includes(".docx");
+          const isDocx = (data.result?.format === "docx") || downloadUrl.includes(".docx") || targetFormat === "docx";
           
           if (isDocx) {
             setCompiledDocxUrl(downloadUrl);
@@ -233,30 +231,34 @@ export default function DocumentVault() {
           addLog(`SUCCESS: Final ${label} certified and stored in Official Document Vault.`, "success");
           setSuccess(`Official ISSP ${label} document compiled and certified successfully!`);
           fetchVaultDetails();
-          clearInterval(interval);
+          clearInterval(activePollIntervalRef.current);
         } else if (data.state === "FAILURE") {
           setIsCompiling(false);
           const failureMsg = data.error || (data.result && data.result.error) || "Compilation failed during document generation.";
           setError(failureMsg);
           addLog(`ERROR: Compilation aborted: ${failureMsg}`, "error");
-          clearInterval(interval);
+          clearInterval(activePollIntervalRef.current);
         }
       } catch (pollErr) {
         console.warn("Polling error:", pollErr);
       }
     }, 1800);
-
-    return () => clearInterval(interval);
-  }, [taskId, isCompiling, token, fetchVaultDetails, isAdmin, addLog]);
+  }, [token, fetchVaultDetails, addLog]);
 
   // Trigger Asynchronous Document Compilation (PDF or Word DOCX)
   const handleTriggerCompilation = async (format = "pdf") => {
     if (!isAdmin) return;
+    
+    // Clear previous poll intervals and errors
+    if (activePollIntervalRef.current) {
+      clearInterval(activePollIntervalRef.current);
+    }
     setError(null);
     setSuccess(null);
-    setIsCompiling(true);
     setProgressPercent(5);
     setCompiledFormat(format);
+    setIsCompiling(true);
+
     const formatLabel = format === "docx" ? "Word (.docx)" : "PDF";
     setCurrentStepMessage(`Submitting ${formatLabel} compilation job to worker queue...`);
     setCompilationLogs([{ time: new Date().toLocaleTimeString(), text: `INIT: Queueing ${formatLabel} compilation task for FY ${activeCycle}...`, type: "info" }]);
@@ -282,8 +284,9 @@ export default function DocumentVault() {
       }
 
       if (resData?.task_id && isMountedRef.current) {
-        setTaskId(resData.task_id);
         addLog(`QUEUED: Task registered with Worker ID ${resData.task_id} (Format: ${format.toUpperCase()})`, "info");
+        // Start polling ONLY for this specific new task
+        startPollingTask(resData.task_id, format);
       }
     } catch (err) {
       if (isMountedRef.current) {
@@ -293,7 +296,6 @@ export default function DocumentVault() {
     }
   };
 
-  // 1-Click DBM OSPS / NEP-Compliant CSV Spreadsheet Export
   const handleExportDbmCsv = async () => {
     setExportingCsv(true);
     setError(null);
@@ -334,7 +336,6 @@ export default function DocumentVault() {
     }
   };
 
-  // Historical Cycles Ledger (Sanitized Statutory Archival Terminology)
   const historicalCycles = useMemo(() => {
     return [
       {
@@ -360,7 +361,6 @@ export default function DocumentVault() {
     ];
   }, [activeCycle, compiledPdfUrl, compiledDocxUrl]);
 
-  // Identify active step in the 7-stage compilation stepper
   const currentStageIndex = useMemo(() => {
     if (!isCompiling && progressPercent === 100) return 7;
     for (let i = 0; i < COMPILATION_STAGES.length; i++) {
@@ -371,9 +371,6 @@ export default function DocumentVault() {
     return 1;
   }, [isCompiling, progressPercent]);
 
-  // =========================================================================
-  // DYNAMIC COVER PAGE GENERATOR HELPERS (SINGLE LOGO & ACCURATE SIGNATORIES)
-  // =========================================================================
   const coverDetails = useMemo(() => {
     const rawScope = String(narrative?.scope_choice || "Department-Wide").trim().toLowerCase().replace(/_/g, "-");
     const scopeJson = narrative?.scope_json || {};
@@ -382,7 +379,6 @@ export default function DocumentVault() {
     const isAmend = Boolean(narrative?.is_amendment);
     const amendNum = narrative?.amendment_number || "1st";
 
-    // Flexible evaluation matching compiler engine
     const isDeptWide = rawScope.includes("department-wide") || rawScope === "department" || rawScope === "dept-wide" || !rawScope;
     const isDeptCo = (rawScope.includes("central") || rawScope.includes("head-office") || rawScope.includes("head office")) && !isDeptWide;
     const isDeptCoOnly = isDeptCo && !hasReg && !hasBur;
@@ -394,7 +390,6 @@ export default function DocumentVault() {
     const startYr = narrative?.issp_period_from || (planningYears && planningYears[0]) || 2028;
     const endYr = narrative?.issp_period_to || (planningYears && planningYears[planningYears.length - 1]) || 2030;
 
-    // Sanitize Signatory Names (Eliminate placeholder titles; ensure actual human names render)
     const rawCio = String(narrative?.cio_name || narrative?.signatory_prepared_by || "").trim();
     const isGenericCio = !rawCio || ["chief information officer", "cio", "none", "null", "undefined"].includes(rawCio.toLowerCase());
     const cioSignatory = isGenericCio ? "REY T. CORTEZ, MIT" : rawCio.toUpperCase();
@@ -405,8 +400,6 @@ export default function DocumentVault() {
 
     const agencyHeadTitle = narrative?.agency_head_position || "Agency Head";
     const websiteUrl = narrative?.agency_website_url || "www.agency.gov.ph";
-
-    // SINGLE INSTITUTIONAL EMBLEM (strictly no side logos on cover sheet)
     const emblemLogo = narrative?.agency_logo_url || agencyLogoUrl || null;
 
     const scopeVal = isDeptWide 
@@ -442,7 +435,6 @@ export default function DocumentVault() {
     };
   }, [narrative, agencyLogoUrl, planningYears]);
 
-  // Print Formal Cover Page in Official Landscape Orientation
   const handlePrintCoverPage = () => {
     const el = document.getElementById("issp-cover-sheet-print-container");
     if (!el) {
@@ -490,9 +482,6 @@ export default function DocumentVault() {
     }, 350);
   };
 
-  // =========================================================================
-  // DEPARTMENT-SCOPED VAULT VIEW (ROLE_DEPT_USER & NON-ADMIN ACCESS GUARD)
-  // =========================================================================
   if (!isAdmin) {
     return (
       <div className="space-y-6 max-w-5xl mx-auto text-xs text-slate-800 dark:text-slate-100 select-none animate-fadeIn font-sans">
@@ -555,7 +544,6 @@ export default function DocumentVault() {
           </div>
         </div>
 
-        {/* Quick redirect link to dedicated dept vault */}
         <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
@@ -575,9 +563,6 @@ export default function DocumentVault() {
     );
   }
 
-  // =========================================================================
-  // ADMINISTRATOR VAULT VIEW (FULL COMPILATION ENGINE & DUAL EXPORTS)
-  // =========================================================================
   return (
     <div className="space-y-6 max-w-7xl mx-auto text-xs text-slate-800 dark:text-slate-100 select-none font-sans transition-colors duration-200">
       
@@ -599,7 +584,6 @@ export default function DocumentVault() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Live Cover Page Preview Button */}
           <button
             type="button"
             onClick={() => setIsCoverPreviewOpen(true)}
@@ -610,7 +594,6 @@ export default function DocumentVault() {
             <span>Preview Cover Sheet</span>
           </button>
 
-          {/* DBM OSPS/NEP CSV Export Button */}
           <button
             onClick={handleExportDbmCsv}
             disabled={exportingCsv}
@@ -621,7 +604,6 @@ export default function DocumentVault() {
             <span>{exportingCsv ? "Generating CSV..." : "Export DBM Budget CSV"}</span>
           </button>
 
-          {/* Dual Compilation Buttons */}
           <button
             onClick={() => handleTriggerCompilation("pdf")}
             disabled={isCompiling}
@@ -748,7 +730,6 @@ export default function DocumentVault() {
             </div>
           </div>
 
-          {/* Stepper Progress Bar */}
           <div className="w-full bg-slate-100 dark:bg-slate-800 h-2.5 rounded-full overflow-hidden">
             <div 
               className={`h-full rounded-full transition-all duration-500 ${
@@ -758,7 +739,6 @@ export default function DocumentVault() {
             />
           </div>
 
-          {/* 7-Stage Horizontal Step Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-7 gap-2 pt-1 font-sans">
             {COMPILATION_STAGES.map((stg) => {
               const isPast = progressPercent >= stg.percent;
@@ -801,7 +781,6 @@ export default function DocumentVault() {
             })}
           </div>
 
-          {/* Compilation Logs Terminal Box */}
           {compilationLogs.length > 0 && (
             <div className="bg-slate-955 text-slate-300 p-3.5 rounded-xl font-mono text-[9.5px] max-h-36 overflow-y-auto space-y-1 border border-slate-800">
               <span className="text-slate-500 block uppercase font-bold text-[8.5px] tracking-wider border-b border-slate-800 pb-1">
@@ -848,7 +827,6 @@ export default function DocumentVault() {
               <span>DBM CSV</span>
             </button>
 
-            {/* Render PDF download button if PDF is compiled */}
             {compiledPdfUrl && (
               <a
                 href={compiledPdfUrl}
@@ -862,7 +840,6 @@ export default function DocumentVault() {
               </a>
             )}
 
-            {/* Render Word (.docx) download button if Word is compiled */}
             {compiledDocxUrl && (
               <a
                 href={compiledDocxUrl}
@@ -882,7 +859,6 @@ export default function DocumentVault() {
               </span>
             )}
 
-            {/* Trigger Re-Compile Buttons */}
             <button
               type="button"
               onClick={() => handleTriggerCompilation("pdf")}
@@ -950,7 +926,6 @@ export default function DocumentVault() {
           </span>
         </div>
 
-        {/* Archival Information Note */}
         <div className="p-3.5 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl text-[10.5px] text-slate-700 dark:text-slate-300 leading-relaxed flex items-start gap-2.5">
           <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
           <span>
@@ -1032,7 +1007,6 @@ export default function DocumentVault() {
         <div className="fixed inset-0 bg-slate-900/75 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden">
             
-            {/* Modal Navigation & Print Action Header */}
             <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap justify-between items-center bg-slate-50 dark:bg-slate-955 gap-3">
               <div>
                 <h3 className="font-bold text-slate-900 dark:text-white text-sm flex items-center gap-2 font-serif">
@@ -1074,10 +1048,7 @@ export default function DocumentVault() {
               </div>
             </div>
 
-            {/* Modal Body: Scrollable Paper Preview */}
             <div className="flex-1 overflow-y-auto p-6 bg-slate-100 dark:bg-slate-955 flex justify-center">
-              
-              {/* RENDER DYNAMIC COVER CONTAINER (Exact A4 Landscape Layout - Single Logo) */}
               <div 
                 id="issp-cover-sheet-print-container" 
                 className="bg-white text-slate-900 rounded-xl border border-slate-300 p-8 shadow-xl max-w-4xl w-full font-serif my-auto"
@@ -1086,7 +1057,6 @@ export default function DocumentVault() {
                   boxSizing: "border-box"
                 }}
               >
-                {/* Header with ONLY ONE Central Institutional Seal (Enlarged to 110px) */}
                 <div style={{ textAlign: "center", marginBottom: "18px" }}>
                   {coverDetails.emblemLogo && (
                     <img 
@@ -1102,7 +1072,6 @@ export default function DocumentVault() {
                   </p>
                 </div>
 
-                {/* Central Plan Titles */}
                 <div style={{ textAlign: "center", margin: "18px 0 16px 0" }}>
                   <h1 style={{ fontSize: "20pt", fontWeight: "bold", margin: "4px 0", color: "#0f172a", letterSpacing: "0.5px" }}>
                     INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)
@@ -1122,11 +1091,9 @@ export default function DocumentVault() {
                   </p>
                 </div>
 
-                {/* Two-Column Signatories & Scope Checklist Layout */}
                 <table style={{ width: "100%", border: "none", marginTop: "28px", borderCollapse: "collapse" }}>
                   <tbody>
                     <tr>
-                      {/* Left Column: Signatories with Actual Full Names sitting ON TOP of the horizontal signing line */}
                       <td style={{ width: "52%", border: "none", verticalAlign: "top", paddingRight: "30px" }}>
                         <div style={{ marginBottom: "38px" }}>
                           <strong style={{ textTransform: "uppercase", fontSize: "8.5pt", display: "block", color: "#1e3a8a", fontFamily: "sans-serif" }}>
@@ -1157,7 +1124,6 @@ export default function DocumentVault() {
                         </div>
                       </td>
 
-                      {/* Right Column: Scope Box Checklist with [X] Alignment */}
                       <td style={{ width: "48%", border: "none", verticalAlign: "top" }}>
                         <div style={{ background: "#f8fafc", border: "1px solid #cbd5e1", borderRadius: "6px", padding: "12px 14px", fontSize: "8pt", lineHeight: 1.6, fontFamily: "sans-serif" }}>
                           <strong style={{ color: "#1e3a8a", textTransform: "uppercase", display: "block", marginBottom: "4px", borderBottom: "1px solid #e2e8f0", paddingBottom: "2px" }}>
@@ -1191,7 +1157,6 @@ export default function DocumentVault() {
                   </tbody>
                 </table>
               </div>
-
             </div>
           </div>
         </div>
