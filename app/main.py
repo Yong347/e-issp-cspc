@@ -25,7 +25,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
@@ -1511,15 +1511,35 @@ async def check_engine_health():
         }
     )
 
-
 # ==========================================================
-# ROOT ROUTE & FRONTEND SPA DISTRIBUTION MOUNT
+# ROOT ROUTE & FRONTEND SPA DISTRIBUTION MOUNT (CATCH-ALL)
 # ==========================================================
 
-# Mount frontend production build if present, otherwise serve standard API root JSON
 frontend_dist = os.path.join(settings.BASE_DIR, "frontend", "dist")
 if os.path.exists(frontend_dist) and os.path.isdir(frontend_dist):
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    # 1. Mount static assets folder explicitly (/assets/...)
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_dir) and os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend_assets")
+
+    # 2. SPA Catch-All: Serves existing files or falls back to index.html for React Router
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa_frontend(request: Request, full_path: str):
+        # Allow backend APIs, documentation, and static upload assets to pass through
+        if full_path.startswith("api/") or full_path.startswith("static/") or full_path in ("docs", "redoc", "openapi.json"):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # Serve static files in dist (e.g. favicon.svg, icons.svg) if they exist
+        file_path = os.path.join(frontend_dist, full_path)
+        if full_path and os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+
+        # Fall back to index.html for all React Router client-side routes (/login, /dept/*, /admin/*)
+        index_file = os.path.join(frontend_dist, "index.html")
+        if os.path.exists(index_file):
+            return FileResponse(index_file)
+
+        raise HTTPException(status_code=404, detail="Frontend index.html not found")
 else:
     @app.get("/", tags=["Root"])
     async def root():
