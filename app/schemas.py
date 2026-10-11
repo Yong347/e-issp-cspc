@@ -3,7 +3,7 @@ import uuid
 import html
 import json
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, ConfigDict
@@ -747,8 +747,9 @@ class IctProjectCreate(BaseModel):
     harmonizes_cross_collaboration: bool = Field(default=False)
     harmonizes_scalability: bool = Field(default=False)
     
-    duration_start_year: Optional[int] = Field(default=2026, example=2026)
-    duration_end_year: Optional[int] = Field(default=2028, example=2028)
+    # Dynamic 3-year duration bounds calculated from active UTC calendar year
+    duration_start_year: Optional[int] = Field(default_factory=lambda: datetime.now(timezone.utc).year)
+    duration_end_year: Optional[int] = Field(default_factory=lambda: datetime.now(timezone.utc).year + 2)
     
     # Dynamic Multi-Year Deliverables / Milestones Map (2 to 5+ Years)
     annual_deliverables: Dict[str, str] = Field(
@@ -800,10 +801,10 @@ class IctProjectCreate(BaseModel):
                 if "cross" in k_lower or "collaboration" in k_lower or "jmc" in k_lower: self.harmonizes_cross_collaboration = b_val
                 if "scalability" in k_lower or "sustainability" in k_lower or "spar" in k_lower or "prexc" in k_lower: self.harmonizes_scalability = b_val
 
-        # Synchronize annual deliverables bidirectionally with year-by-year keys
+        # Synchronize annual deliverables bidirectionally with year-by-year keys without hardcoded years
+        start_yr = self.duration_start_year or datetime.now(timezone.utc).year
         if not self.annual_deliverables:
             deliverables = {}
-            start_yr = self.duration_start_year or 2026
             if self.year_1_deliverables:
                 deliverables["Year 1"] = self.year_1_deliverables
                 deliverables[str(start_yr)] = self.year_1_deliverables
@@ -815,7 +816,7 @@ class IctProjectCreate(BaseModel):
                 deliverables[str(start_yr + 2)] = self.year_3_deliverables
             self.annual_deliverables = deliverables
         else:
-            start_yr_str = str(self.duration_start_year or 2026)
+            start_yr_str = str(start_yr)
             if not self.year_1_deliverables:
                 self.year_1_deliverables = self.annual_deliverables.get("Year 1") or self.annual_deliverables.get(start_yr_str) or ""
             if not self.year_2_deliverables:
@@ -903,7 +904,7 @@ class IctProjectResponse(IctProjectCreate):
 class CrossAgencyProjectCreate(BaseModel):
     name: str = Field(..., example="National Single Window & Inter-Agency Interoperability Project")
     objectives: str = Field(default="")
-    duration: str = Field(default="2026-2028", example="2026-2028")
+    duration: str = Field(default_factory=lambda: settings.DEFAULT_ISSP_CYCLE)
     deliverables: str = Field(default="")
     lead_agency: str = Field(default="Department of Information and Communications Technology (DICT)", example="DICT")
     implementing_agencies: str = Field(default="")
@@ -979,8 +980,6 @@ class PerformanceMetricResponse(BaseModel):
 # ==========================================================
 
 class ProposalCreatePayload(BaseModel):
-    # Optional provenance fields: Department users submit raw technical needs;
-    # Admin assigns Outcome, Project, Strategic Category, Office, and Fund Source upon review.
     outcome_id: Optional[int] = Field(None, description="Target Organizational Outcome ID (Broader Scope)")
     department_id: Optional[int] = Field(None, description="Target Department ID (Admin assignment)")
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Department Needs Assessment")
@@ -989,7 +988,6 @@ class ProposalCreatePayload(BaseModel):
     project_key: Optional[str] = Field(None, description="Project key identifier")
     project_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Strategic ICT Project ID")
     
-    # High-level classification intent
     category: Optional[str] = Field(default="Hardware", description="Hardware, Software, Subscription, or Services")
     strategic_category: Optional[str] = Field(default="Office Productivity", description="Dynamic Strategic Category")
     office_location: Optional[str] = Field(default="Central Office")
@@ -999,7 +997,6 @@ class ProposalCreatePayload(BaseModel):
     item_name: str = Field(..., max_length=255, description="Name and description of item requested")
     unit_cost: Decimal = Field(..., ge=0, description="Unit cost in Philippine Peso (PHP)")
 
-    # Arbitrary multi-year planning horizon (2 to 5+ years)
     yearly_quantities: Dict[str, int] = Field(
         default_factory=dict, 
         description="Arbitrary multi-year quantity mapping, e.g. {'2028': 5, '2029': 2, '2030': 4, ...}"
@@ -1108,15 +1105,18 @@ class ProposalCreatePayload(BaseModel):
             self.is_in_house_turnover = False
             self.created_by_students = False
 
-        # Synchronize yearly quantities across any planning horizon
+        # Synchronize yearly quantities across any planning horizon without hardcoded years
         if self.yearly_quantities and len(self.yearly_quantities) > 0:
-            years_sorted = sorted([k for k in self.yearly_quantities.keys() if str(k).isdigit()])
+            years_sorted = sorted([k for k in self.yearly_quantities.keys() if str(k).isdigit() and len(str(k)) == 4])
             if len(years_sorted) >= 1:
                 self.year_1_qty = int(self.yearly_quantities.get(years_sorted[0], 0) or 0)
+                self.yearly_quantities["Year 1"] = self.year_1_qty
             if len(years_sorted) >= 2:
                 self.year_2_qty = int(self.yearly_quantities.get(years_sorted[1], 0) or 0)
+                self.yearly_quantities["Year 2"] = self.year_2_qty
             if len(years_sorted) >= 3:
                 self.year_3_qty = int(self.yearly_quantities.get(years_sorted[2], 0) or 0)
+                self.yearly_quantities["Year 3"] = self.year_3_qty
         else:
             self.yearly_quantities = {
                 "Year 1": self.year_1_qty or 0,
@@ -1455,12 +1455,12 @@ class UpdateGlobalCeilingPayload(BaseModel):
 
 
 class BulkCeilingValidationPayload(BaseModel):
-    issp_period: Optional[str] = Field(default="2026-2028")
+    issp_period: Optional[str] = Field(default_factory=lambda: settings.DEFAULT_ISSP_CYCLE)
     department_ids: Optional[List[int]] = Field(default_factory=list)
 
 
 # ==========================================================
-# 13. MASTER NARRATIVES (DICT v.2026 PLAIN-TEXT SCHEMAS)
+# 13. MASTER NARRATIVES & COMPLETED PLAN ARCHIVE SCHEMAS
 # ==========================================================
 
 class ISPlannerSchema(BaseModel):
@@ -1599,19 +1599,14 @@ class MasterNarrativeUpdate(BaseModel):
     @classmethod
     def synchronize_plain_text_and_html_inputs(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # Sync mandate
             if not data.get("mandate_text"):
                 data["mandate_text"] = data.get("mandate_html") or data.get("legal_basis") or ""
-            # Sync vision
             if not data.get("vision_text"):
                 data["vision_text"] = data.get("vision_html") or data.get("vision_statement") or ""
-            # Sync mission
             if not data.get("mission_text"):
                 data["mission_text"] = data.get("mission_html") or data.get("mission_statement") or ""
-            # Sync situation
             if not data.get("present_situation_text"):
                 data["present_situation_text"] = data.get("present_situation_html") or ""
-            # Sync DRBCP sections
             if not data.get("drbcp_recovery_strategy_text"):
                 data["drbcp_recovery_strategy_text"] = data.get("drbcp_recovery_strategy_html")
             if not data.get("drbcp_sop_phases_text"):
@@ -1619,7 +1614,6 @@ class MasterNarrativeUpdate(BaseModel):
             if not data.get("drbcp_compliance_narrative_text"):
                 data["drbcp_compliance_narrative_text"] = data.get("drbcp_compliance_narrative_html")
 
-            # Signatories name resolution
             cio = data.get("cio_name") or data.get("signatory_prepared_by")
             if cio and str(cio).strip():
                 data["cio_name"] = str(cio).strip()
@@ -1645,7 +1639,7 @@ class MasterNarrativeResponse(BaseModel):
     scope_json: Optional[Dict[str, Any]] = None
     is_active: bool
     
-    # Official Text Signatories (Formal Physical Sign-off Lines)
+    # Official Text Signatories
     signatory_prepared_by: Optional[str] = ""
     cio_name: Optional[str] = None
     preparer_position: Optional[str] = None
@@ -1702,7 +1696,6 @@ class MasterNarrativeResponse(BaseModel):
     drbcp_sop_phases_text: Optional[str] = None
     drbcp_compliance_narrative_text: Optional[str] = None
 
-    # Backward-compatible DRBCP aliases
     drbcp_recovery_strategy_html: Optional[str] = None
     drbcp_sop_phases_html: Optional[str] = None
     drbcp_compliance_narrative_html: Optional[str] = None
@@ -1748,7 +1741,6 @@ class MasterNarrativeResponse(BaseModel):
         self.drbcp_sop_phases_html = self.drbcp_sop_phases_text
         self.drbcp_compliance_narrative_html = self.drbcp_compliance_narrative_text
 
-        # Synchronize signatories cleanly
         if not self.cio_name and self.signatory_prepared_by:
             self.cio_name = self.signatory_prepared_by
         elif not self.signatory_prepared_by and self.cio_name:
@@ -1773,6 +1765,22 @@ class MasterNarrativeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class IsspPlanArchiveResponse(BaseModel):
+    """Schema for historical, completed ISSP plan snapshots preserved in storage."""
+    id: int
+    issp_period: str
+    agency_name: str
+    start_year: int
+    end_year: int
+    certified_grand_total: Decimal = Decimal("0.00")
+    pdf_vault_url: Optional[str] = None
+    docx_vault_url: Optional[str] = None
+    archived_at: Optional[datetime] = None
+    archived_by_user: Optional[str] = None
+    notes: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
 class LifecycleRolloverResponse(BaseModel):
     status: str
     expired_cycle: Optional[str] = None
@@ -1785,7 +1793,7 @@ class LifecycleRolloverResponse(BaseModel):
 
 class SystemGovernanceSettings(BaseModel):
     global_budget_ceiling: Decimal = Field(default=Decimal("200000000.00"))
-    issp_active_cycle: str = Field(default="2026-2028")
+    issp_active_cycle: str = Field(default_factory=lambda: settings.DEFAULT_ISSP_CYCLE)
     model_config = ConfigDict(from_attributes=True)
 
 

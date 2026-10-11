@@ -6,10 +6,11 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — CORE RELATIONAL MODELS & ARCHITECTURE
 Singularity Relational Core:
 - Dialect-Agnostic GUID (CHAR(36)) & Resilient JSON/Mutable Types
 - Master Governance Root (MasterNarrative: Cover Sheet, Scope, DRBCP & Vault)
+- Permanent Historical Plan Archives (IsspPlanArchive: Pre-Deletion Preservation)
 - Program Outcomes (Part I.A.4) -> Strategic Concerns (Part II.A)
 - Information Systems Register (Parts II.C & III.D) with Multi-Classification
 - ICT Projects Portfolio (Part III.E) with Dynamic Harmonization Framework
-- Unified Proposals Ledger (Part IV.A) with Multi-Year Compounded Targets
+- Unified Proposals Ledger (Part IV.A) with Dynamic 3-Year Compounded Targets
 - Annex 1 Master Inventory (Equipment & Software) with Anti-Loop EOL Tracking
 - Annex 2 Disaster Recovery and Business Continuity Plan (DRBCP)
 =============================================================================
@@ -663,6 +664,31 @@ class User(Base):
 
 
 # =========================================================================
+# PERMANENT HISTORICAL PLAN ARCHIVES (PRE-DELETION PRESERVATION)
+# =========================================================================
+
+class IsspPlanArchive(Base):
+    """
+    Permanent archive ledger.
+    Stores certified snapshots of deleted or concluded ISSP cycles 
+    so historical PDF and Word (.docx) files are never lost.
+    """
+    __tablename__ = "issp_plan_archives"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    issp_period: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    agency_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    certified_grand_total: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
+    pdf_vault_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    docx_vault_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    archived_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    archived_by_user: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+# =========================================================================
 # PART I: STRATEGIC CONTEXT & GOVERNANCE ROOT
 # =========================================================================
 
@@ -756,7 +782,7 @@ class MasterNarrative(Base):
     proposals: Mapped[List["Proposal"]] = relationship(
         "Proposal", 
         back_populates="master_narrative",
-        cascade="save-update, merge",
+        cascade="all, delete-orphan",
         passive_deletes=True
     )
     strategic_concerns_relation: Mapped[List["StrategicConcern"]] = relationship(
@@ -852,10 +878,10 @@ class MasterNarrative(Base):
         cascade="all, delete-orphan"
     )
 
-    # Dynamic Planning Horizon properties
+    # Dynamic Planning Horizon properties (strictly derived from issp_period_from or active calendar year)
     @property
     def planning_years(self) -> List[int]:
-        start = self.issp_period_from or 2028
+        start = self.issp_period_from or datetime.utcnow().year
         end = self.issp_period_to or (start + 2)
         if start > end:
             start, end = end, start
@@ -1432,7 +1458,7 @@ class Proposal(Base):
     )
     issp_period: Mapped[str] = mapped_column(
         String(50), 
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="RESTRICT"),
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
         nullable=False, 
         index=True
     )
@@ -2039,7 +2065,12 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
     if target.annual_deliverables is None:
         target.annual_deliverables = {}
     
-    start_y = target.duration_start_year or 2028
+    current_cal_year = datetime.utcnow().year
+    start_y = target.duration_start_year or (
+        int(target.issp_period.split("-")[0]) 
+        if target.issp_period and "-" in target.issp_period 
+        else current_cal_year
+    )
     end_y = target.duration_end_year or (start_y + 2)
 
     if not target.annual_deliverables:
@@ -2090,17 +2121,18 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     """
     Enforces dynamic multi-year physical targets and calculates total_cost
     as the exact sum of annual inflation-adjusted outlays.
-    Handles calendar years ('2028') and ordinal labels ('Year 1') robustly without zeroing out values.
+    Derives start_year dynamically from target.issp_period without static year assumptions.
     Respects parent project category inheritance without forcibly overriding valid strategic categories.
     """
     from app.utils.helpers import get_adjusted_unit_cost_for_year
 
-    start_year = 2028
+    current_cal_year = datetime.utcnow().year
+    start_year = current_cal_year
     if target.issp_period and "-" in target.issp_period:
         try:
             start_year = int(target.issp_period.split("-")[0].strip())
         except Exception:
-            start_year = 2028
+            start_year = current_cal_year
 
     base_unit = target.unit_cost if target.unit_cost is not None else Decimal("0.00")
     total_accumulated = Decimal("0.00")

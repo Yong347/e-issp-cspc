@@ -4,6 +4,7 @@ import sys
 import logging
 from decimal import Decimal
 from typing import Optional, List
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if present
@@ -28,7 +29,10 @@ class Settings:
     DEFAULT_AGENCY_NAME: str = os.getenv("DEFAULT_AGENCY_NAME", "National Government Agency")
     DEFAULT_AGENCY_WEBSITE: str = os.getenv("DEFAULT_AGENCY_WEBSITE", "https://agency.gov.ph")
     DEFAULT_AGENCY_HEAD_TITLE: str = os.getenv("DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency")
-    DEFAULT_ISSP_CYCLE: str = os.getenv("DEFAULT_ISSP_CYCLE", "2026-2028")
+
+    # Dynamically compute default 3-year statutory cycle from active calendar year (Y -> Y + 2)
+    _current_year: int = datetime.now(timezone.utc).year
+    DEFAULT_ISSP_CYCLE: str = os.getenv("DEFAULT_ISSP_CYCLE", f"{_current_year}-{_current_year + 2}")
 
     # Comma-separated list of authorized email domains (set to "*" to allow all domains)
     ALLOWED_EMAIL_DOMAINS: List[str] = [

@@ -7,7 +7,8 @@ import {
   getNarrative, 
   getTaskStatus, 
   triggerDocumentGeneration, 
-  exportBudgetBlob 
+  exportBudgetBlob,
+  getPlanArchives
 } from "../../../api/admin";
 import { 
   ShieldCheck, 
@@ -92,6 +93,9 @@ export default function DocumentVault() {
   } = useCycle();
   const navigate = useNavigate();
 
+  const currentYear = useMemo(() => new Date().getFullYear(), []);
+  const defaultDynamicCycle = useMemo(() => `${currentYear}-${currentYear + 2}`, [currentYear]);
+
   const isAdmin = user?.role === "ROLE_MIS_ADMIN";
   const defaultAgency = import.meta.env.VITE_DEFAULT_AGENCY_NAME || import.meta.env.VITE_AGENCY_NAME || "National Government Agency";
   const agencyName = cycleAgencyName || user?.agency_name || defaultAgency;
@@ -111,6 +115,7 @@ export default function DocumentVault() {
   }, []);
 
   const [narrative, setNarrative] = useState(null);
+  const [archivedPlans, setArchivedPlans] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
@@ -160,6 +165,29 @@ export default function DocumentVault() {
           setCompiledDocxUrl(data.final_docx_vault_url);
         }
       }
+
+      // Query permanent historical plan archives
+      try {
+        let archivesList = [];
+        if (typeof getPlanArchives === "function") {
+          archivesList = await getPlanArchives(token);
+        } else {
+          const resArch = await fetch(`${API_BASE_URL}/api/admin/archives`, {
+            headers: { 
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }
+          });
+          if (resArch.ok) {
+            archivesList = await resArch.json();
+          }
+        }
+        if (Array.isArray(archivesList) && isMountedRef.current) {
+          setArchivedPlans(archivesList);
+        }
+      } catch (archErr) {
+        console.warn("Could not load permanent plan archives:", archErr);
+      }
     } catch (err) {
       console.warn("Could not load narrative metadata:", err);
     } finally {
@@ -175,7 +203,7 @@ export default function DocumentVault() {
     }
   }, [fetchVaultDetails, isAdmin]);
 
-  // Robust, task-specific polling function that prevents old task cross-talk
+  // Task-specific status polling preventing cross-task interference
   const startPollingTask = useCallback((activeTaskId, targetFormat) => {
     if (activePollIntervalRef.current) {
       clearInterval(activePollIntervalRef.current);
@@ -249,7 +277,6 @@ export default function DocumentVault() {
   const handleTriggerCompilation = async (format = "pdf") => {
     if (!isAdmin) return;
     
-    // Clear previous poll intervals and errors
     if (activePollIntervalRef.current) {
       clearInterval(activePollIntervalRef.current);
     }
@@ -261,7 +288,7 @@ export default function DocumentVault() {
 
     const formatLabel = format === "docx" ? "Word (.docx)" : "PDF";
     setCurrentStepMessage(`Submitting ${formatLabel} compilation job to worker queue...`);
-    setCompilationLogs([{ time: new Date().toLocaleTimeString(), text: `INIT: Queueing ${formatLabel} compilation task for FY ${activeCycle}...`, type: "info" }]);
+    setCompilationLogs([{ time: new Date().toLocaleTimeString(), text: `INIT: Queueing ${formatLabel} compilation task for FY ${activeCycle || defaultDynamicCycle}...`, type: "info" }]);
 
     try {
       let resData = null;
@@ -285,7 +312,6 @@ export default function DocumentVault() {
 
       if (resData?.task_id && isMountedRef.current) {
         addLog(`QUEUED: Task registered with Worker ID ${resData.task_id} (Format: ${format.toUpperCase()})`, "info");
-        // Start polling ONLY for this specific new task
         startPollingTask(resData.task_id, format);
       }
     } catch (err) {
@@ -336,30 +362,33 @@ export default function DocumentVault() {
     }
   };
 
+  // Dynamically constructed historical plan ledger
   const historicalCycles = useMemo(() => {
-    return [
-      {
-        cycle: activeCycle || "2028-2030",
-        label: "Current Active Planning Cycle",
-        tier: "Official Document Vault",
-        isConcluded: false,
-        status: (compiledPdfUrl || compiledDocxUrl) ? "Certified & Available" : "Pending Compilation",
-        pdfUrl: compiledPdfUrl,
-        docxUrl: compiledDocxUrl,
-        sizeMb: "4.8 MB"
-      },
-      {
-        cycle: "2025-2027",
-        label: "Concluded Plan Snapshot",
-        tier: "Long-Term Procurement Archive",
-        isConcluded: true,
-        status: "Archived & Preserved",
-        pdfUrl: `${API_BASE_URL}/static/uploads/issp_compiled/ISSP-2025-2027-FINAL.pdf`,
-        docxUrl: null,
-        sizeMb: "5.6 MB"
-      }
-    ];
-  }, [activeCycle, compiledPdfUrl, compiledDocxUrl]);
+    const activeItem = {
+      cycle: activeCycle || defaultDynamicCycle,
+      label: "Current Active Planning Cycle",
+      tier: "Official Document Vault",
+      isConcluded: false,
+      status: (compiledPdfUrl || compiledDocxUrl) ? "Certified & Available" : "Pending Compilation",
+      pdfUrl: compiledPdfUrl,
+      docxUrl: compiledDocxUrl,
+      sizeMb: "4.8 MB"
+    };
+
+    const archivedItems = archivedPlans.map(a => ({
+      cycle: a.issp_period,
+      label: a.notes || `${a.agency_name} Concluded Plan Snapshot`,
+      tier: "Permanent Institutional Archive",
+      isConcluded: true,
+      status: "Archived & Preserved",
+      pdfUrl: a.pdf_vault_url,
+      docxUrl: a.docx_vault_url,
+      sizeMb: "5.2 MB"
+    }));
+
+    const filteredArchives = archivedItems.filter(a => a.cycle !== (activeCycle || defaultDynamicCycle));
+    return [activeItem, ...filteredArchives];
+  }, [activeCycle, defaultDynamicCycle, compiledPdfUrl, compiledDocxUrl, archivedPlans]);
 
   const currentStageIndex = useMemo(() => {
     if (!isCompiling && progressPercent === 100) return 7;
@@ -371,6 +400,7 @@ export default function DocumentVault() {
     return 1;
   }, [isCompiling, progressPercent]);
 
+  // Dynamic Cover Page Parameters (Zero static year hardcoding)
   const coverDetails = useMemo(() => {
     const rawScope = String(narrative?.scope_choice || "Department-Wide").trim().toLowerCase().replace(/_/g, "-");
     const scopeJson = narrative?.scope_json || {};
@@ -387,8 +417,15 @@ export default function DocumentVault() {
     const isOtherGov = rawScope.includes("other");
     const isLgu = rawScope.includes("lgu");
 
-    const startYr = narrative?.issp_period_from || (planningYears && planningYears[0]) || 2028;
-    const endYr = narrative?.issp_period_to || (planningYears && planningYears[planningYears.length - 1]) || 2030;
+    const startYr = narrative?.issp_period_from || 
+                    (planningYears && planningYears[0]) || 
+                    (activeCycle && parseInt(activeCycle.split("-")[0], 10)) || 
+                    currentYear;
+
+    const endYr = narrative?.issp_period_to || 
+                  (planningYears && planningYears[planningYears.length - 1]) || 
+                  (activeCycle && parseInt(activeCycle.split("-")[1], 10)) || 
+                  (startYr + 2);
 
     const rawCio = String(narrative?.cio_name || narrative?.signatory_prepared_by || "").trim();
     const cioSignatory = rawCio ? rawCio.toUpperCase() : "CHIEF INFORMATION OFFICER";
@@ -433,7 +470,7 @@ export default function DocumentVault() {
       websiteUrl,
       emblemLogo
     };
-  }, [narrative, agencyLogoUrl, planningYears]);
+  }, [narrative, agencyLogoUrl, planningYears, activeCycle, currentYear]);
 
   const handlePrintCoverPage = () => {
     const el = document.getElementById("issp-cover-sheet-print-container");
@@ -451,7 +488,7 @@ export default function DocumentVault() {
       <html>
         <head>
           <meta charset="utf-8" />
-          <title>ISSP Cover Page - ${agencyName} (${activeCycle})</title>
+          <title>ISSP Cover Page - ${agencyName} (${activeCycle || defaultDynamicCycle})</title>
           <style>
             @page {
               size: A4 landscape;
@@ -532,7 +569,7 @@ export default function DocumentVault() {
             <Coins className="w-6 h-6 text-purple-600 dark:text-purple-400" />
             <h3 className="font-bold text-sm text-slate-900 dark:text-white">Department Budget Allocation</h3>
             <p className="text-slate-500 dark:text-slate-400 text-[11px] leading-relaxed">
-              Review authorized CapEx and MOOE sub-ceilings and committed spent balances for planning cycle FY {activeCycle}.
+              Review authorized CapEx and MOOE sub-ceilings and committed spent balances for planning cycle FY {activeCycle || defaultDynamicCycle}.
             </p>
             <Link
               to="/dept/dashboard"
@@ -575,7 +612,7 @@ export default function DocumentVault() {
               <span>Official ISSP Document Vault &amp; Submission Hub</span>
             </h2>
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 font-mono">
-              FY {activeCycle || "2028-2030"}
+              FY {activeCycle || defaultDynamicCycle}
             </span>
           </div>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
@@ -643,7 +680,7 @@ export default function DocumentVault() {
           </div>
           <div>
             <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Active Planning Cycle</span>
-            <h3 className="text-base font-bold text-slate-900 dark:text-white font-mono mt-0.5">FY {activeCycle || "2028-2030"}</h3>
+            <h3 className="text-base font-bold text-slate-900 dark:text-white font-mono mt-0.5">FY {activeCycle || defaultDynamicCycle}</h3>
           </div>
         </div>
 
@@ -808,7 +845,7 @@ export default function DocumentVault() {
                 Active Cycle Document
               </span>
               <h3 className="font-bold text-slate-900 dark:text-white text-sm">
-                Republic of the Philippines &bull; {agencyName} ISSP ({activeCycle})
+                Republic of the Philippines &bull; {agencyName} ISSP ({activeCycle || defaultDynamicCycle})
               </h3>
             </div>
             <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">
@@ -830,7 +867,7 @@ export default function DocumentVault() {
             {compiledPdfUrl && (
               <a
                 href={compiledPdfUrl}
-                download={`ISSP_${activeCycle}_FINAL.pdf`}
+                download={`ISSP_${activeCycle || defaultDynamicCycle}_FINAL.pdf`}
                 target="_blank"
                 rel="noreferrer"
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold flex items-center gap-1.5 shadow-sm text-xs transition-all cursor-pointer"
@@ -843,7 +880,7 @@ export default function DocumentVault() {
             {compiledDocxUrl && (
               <a
                 href={compiledDocxUrl}
-                download={`ISSP_${activeCycle}_FINAL.docx`}
+                download={`ISSP_${activeCycle || defaultDynamicCycle}_FINAL.docx`}
                 target="_blank"
                 rel="noreferrer"
                 className="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded-xl font-bold flex items-center gap-1.5 shadow-sm text-xs transition-all cursor-pointer"
@@ -955,7 +992,7 @@ export default function DocumentVault() {
                   </td>
                   <td className="p-3.5">
                     <span className="px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 text-[9px] font-bold flex items-center gap-1 w-fit">
-                      <Archive className="w-3 h-3" />
+                      <Archive className="w-3.5 h-3.5" />
                       <span>{cycleItem.tier}</span>
                     </span>
                   </td>
@@ -1039,7 +1076,7 @@ export default function DocumentVault() {
                 </button>
 
                 <button 
-                  type="button"
+                  type="button" 
                   onClick={() => setIsCoverPreviewOpen(false)}
                   className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer ml-1"
                 >

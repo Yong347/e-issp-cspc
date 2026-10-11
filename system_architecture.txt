@@ -3344,6 +3344,7 @@ import sys
 import logging
 from decimal import Decimal
 from typing import Optional, List
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if present
@@ -3368,7 +3369,10 @@ class Settings:
     DEFAULT_AGENCY_NAME: str = os.getenv("DEFAULT_AGENCY_NAME", "National Government Agency")
     DEFAULT_AGENCY_WEBSITE: str = os.getenv("DEFAULT_AGENCY_WEBSITE", "https://agency.gov.ph")
     DEFAULT_AGENCY_HEAD_TITLE: str = os.getenv("DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency")
-    DEFAULT_ISSP_CYCLE: str = os.getenv("DEFAULT_ISSP_CYCLE", "2026-2028")
+
+    # Dynamically compute default 3-year statutory cycle from active calendar year (Y -> Y + 2)
+    _current_year: int = datetime.now(timezone.utc).year
+    DEFAULT_ISSP_CYCLE: str = os.getenv("DEFAULT_ISSP_CYCLE", f"{_current_year}-{_current_year + 2}")
 
     # Comma-separated list of authorized email domains (set to "*" to allow all domains)
     ALLOWED_EMAIL_DOMAINS: List[str] = [
@@ -5163,7 +5167,7 @@ import uuid
 import html
 import json
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, ConfigDict
@@ -5907,8 +5911,9 @@ class IctProjectCreate(BaseModel):
     harmonizes_cross_collaboration: bool = Field(default=False)
     harmonizes_scalability: bool = Field(default=False)
     
-    duration_start_year: Optional[int] = Field(default=2026, example=2026)
-    duration_end_year: Optional[int] = Field(default=2028, example=2028)
+    # Dynamic 3-year duration bounds calculated from active UTC calendar year
+    duration_start_year: Optional[int] = Field(default_factory=lambda: datetime.now(timezone.utc).year)
+    duration_end_year: Optional[int] = Field(default_factory=lambda: datetime.now(timezone.utc).year + 2)
     
     # Dynamic Multi-Year Deliverables / Milestones Map (2 to 5+ Years)
     annual_deliverables: Dict[str, str] = Field(
@@ -5960,10 +5965,10 @@ class IctProjectCreate(BaseModel):
                 if "cross" in k_lower or "collaboration" in k_lower or "jmc" in k_lower: self.harmonizes_cross_collaboration = b_val
                 if "scalability" in k_lower or "sustainability" in k_lower or "spar" in k_lower or "prexc" in k_lower: self.harmonizes_scalability = b_val
 
-        # Synchronize annual deliverables bidirectionally with year-by-year keys
+        # Synchronize annual deliverables bidirectionally with year-by-year keys without hardcoded years
+        start_yr = self.duration_start_year or datetime.now(timezone.utc).year
         if not self.annual_deliverables:
             deliverables = {}
-            start_yr = self.duration_start_year or 2026
             if self.year_1_deliverables:
                 deliverables["Year 1"] = self.year_1_deliverables
                 deliverables[str(start_yr)] = self.year_1_deliverables
@@ -5975,7 +5980,7 @@ class IctProjectCreate(BaseModel):
                 deliverables[str(start_yr + 2)] = self.year_3_deliverables
             self.annual_deliverables = deliverables
         else:
-            start_yr_str = str(self.duration_start_year or 2026)
+            start_yr_str = str(start_yr)
             if not self.year_1_deliverables:
                 self.year_1_deliverables = self.annual_deliverables.get("Year 1") or self.annual_deliverables.get(start_yr_str) or ""
             if not self.year_2_deliverables:
@@ -6063,7 +6068,7 @@ class IctProjectResponse(IctProjectCreate):
 class CrossAgencyProjectCreate(BaseModel):
     name: str = Field(..., example="National Single Window & Inter-Agency Interoperability Project")
     objectives: str = Field(default="")
-    duration: str = Field(default="2026-2028", example="2026-2028")
+    duration: str = Field(default_factory=lambda: settings.DEFAULT_ISSP_CYCLE)
     deliverables: str = Field(default="")
     lead_agency: str = Field(default="Department of Information and Communications Technology (DICT)", example="DICT")
     implementing_agencies: str = Field(default="")
@@ -6139,8 +6144,6 @@ class PerformanceMetricResponse(BaseModel):
 # ==========================================================
 
 class ProposalCreatePayload(BaseModel):
-    # Optional provenance fields: Department users submit raw technical needs;
-    # Admin assigns Outcome, Project, Strategic Category, Office, and Fund Source upon review.
     outcome_id: Optional[int] = Field(None, description="Target Organizational Outcome ID (Broader Scope)")
     department_id: Optional[int] = Field(None, description="Target Department ID (Admin assignment)")
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Department Needs Assessment")
@@ -6149,7 +6152,6 @@ class ProposalCreatePayload(BaseModel):
     project_key: Optional[str] = Field(None, description="Project key identifier")
     project_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Strategic ICT Project ID")
     
-    # High-level classification intent
     category: Optional[str] = Field(default="Hardware", description="Hardware, Software, Subscription, or Services")
     strategic_category: Optional[str] = Field(default="Office Productivity", description="Dynamic Strategic Category")
     office_location: Optional[str] = Field(default="Central Office")
@@ -6159,7 +6161,6 @@ class ProposalCreatePayload(BaseModel):
     item_name: str = Field(..., max_length=255, description="Name and description of item requested")
     unit_cost: Decimal = Field(..., ge=0, description="Unit cost in Philippine Peso (PHP)")
 
-    # Arbitrary multi-year planning horizon (2 to 5+ years)
     yearly_quantities: Dict[str, int] = Field(
         default_factory=dict, 
         description="Arbitrary multi-year quantity mapping, e.g. {'2028': 5, '2029': 2, '2030': 4, ...}"
@@ -6268,15 +6269,18 @@ class ProposalCreatePayload(BaseModel):
             self.is_in_house_turnover = False
             self.created_by_students = False
 
-        # Synchronize yearly quantities across any planning horizon
+        # Synchronize yearly quantities across any planning horizon without hardcoded years
         if self.yearly_quantities and len(self.yearly_quantities) > 0:
-            years_sorted = sorted([k for k in self.yearly_quantities.keys() if str(k).isdigit()])
+            years_sorted = sorted([k for k in self.yearly_quantities.keys() if str(k).isdigit() and len(str(k)) == 4])
             if len(years_sorted) >= 1:
                 self.year_1_qty = int(self.yearly_quantities.get(years_sorted[0], 0) or 0)
+                self.yearly_quantities["Year 1"] = self.year_1_qty
             if len(years_sorted) >= 2:
                 self.year_2_qty = int(self.yearly_quantities.get(years_sorted[1], 0) or 0)
+                self.yearly_quantities["Year 2"] = self.year_2_qty
             if len(years_sorted) >= 3:
                 self.year_3_qty = int(self.yearly_quantities.get(years_sorted[2], 0) or 0)
+                self.yearly_quantities["Year 3"] = self.year_3_qty
         else:
             self.yearly_quantities = {
                 "Year 1": self.year_1_qty or 0,
@@ -6615,12 +6619,12 @@ class UpdateGlobalCeilingPayload(BaseModel):
 
 
 class BulkCeilingValidationPayload(BaseModel):
-    issp_period: Optional[str] = Field(default="2026-2028")
+    issp_period: Optional[str] = Field(default_factory=lambda: settings.DEFAULT_ISSP_CYCLE)
     department_ids: Optional[List[int]] = Field(default_factory=list)
 
 
 # ==========================================================
-# 13. MASTER NARRATIVES (DICT v.2026 PLAIN-TEXT SCHEMAS)
+# 13. MASTER NARRATIVES & COMPLETED PLAN ARCHIVE SCHEMAS
 # ==========================================================
 
 class ISPlannerSchema(BaseModel):
@@ -6759,19 +6763,14 @@ class MasterNarrativeUpdate(BaseModel):
     @classmethod
     def synchronize_plain_text_and_html_inputs(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # Sync mandate
             if not data.get("mandate_text"):
                 data["mandate_text"] = data.get("mandate_html") or data.get("legal_basis") or ""
-            # Sync vision
             if not data.get("vision_text"):
                 data["vision_text"] = data.get("vision_html") or data.get("vision_statement") or ""
-            # Sync mission
             if not data.get("mission_text"):
                 data["mission_text"] = data.get("mission_html") or data.get("mission_statement") or ""
-            # Sync situation
             if not data.get("present_situation_text"):
                 data["present_situation_text"] = data.get("present_situation_html") or ""
-            # Sync DRBCP sections
             if not data.get("drbcp_recovery_strategy_text"):
                 data["drbcp_recovery_strategy_text"] = data.get("drbcp_recovery_strategy_html")
             if not data.get("drbcp_sop_phases_text"):
@@ -6779,7 +6778,6 @@ class MasterNarrativeUpdate(BaseModel):
             if not data.get("drbcp_compliance_narrative_text"):
                 data["drbcp_compliance_narrative_text"] = data.get("drbcp_compliance_narrative_html")
 
-            # Signatories name resolution
             cio = data.get("cio_name") or data.get("signatory_prepared_by")
             if cio and str(cio).strip():
                 data["cio_name"] = str(cio).strip()
@@ -6805,7 +6803,7 @@ class MasterNarrativeResponse(BaseModel):
     scope_json: Optional[Dict[str, Any]] = None
     is_active: bool
     
-    # Official Text Signatories (Formal Physical Sign-off Lines)
+    # Official Text Signatories
     signatory_prepared_by: Optional[str] = ""
     cio_name: Optional[str] = None
     preparer_position: Optional[str] = None
@@ -6862,7 +6860,6 @@ class MasterNarrativeResponse(BaseModel):
     drbcp_sop_phases_text: Optional[str] = None
     drbcp_compliance_narrative_text: Optional[str] = None
 
-    # Backward-compatible DRBCP aliases
     drbcp_recovery_strategy_html: Optional[str] = None
     drbcp_sop_phases_html: Optional[str] = None
     drbcp_compliance_narrative_html: Optional[str] = None
@@ -6908,7 +6905,6 @@ class MasterNarrativeResponse(BaseModel):
         self.drbcp_sop_phases_html = self.drbcp_sop_phases_text
         self.drbcp_compliance_narrative_html = self.drbcp_compliance_narrative_text
 
-        # Synchronize signatories cleanly
         if not self.cio_name and self.signatory_prepared_by:
             self.cio_name = self.signatory_prepared_by
         elif not self.signatory_prepared_by and self.cio_name:
@@ -6933,6 +6929,22 @@ class MasterNarrativeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class IsspPlanArchiveResponse(BaseModel):
+    """Schema for historical, completed ISSP plan snapshots preserved in storage."""
+    id: int
+    issp_period: str
+    agency_name: str
+    start_year: int
+    end_year: int
+    certified_grand_total: Decimal = Decimal("0.00")
+    pdf_vault_url: Optional[str] = None
+    docx_vault_url: Optional[str] = None
+    archived_at: Optional[datetime] = None
+    archived_by_user: Optional[str] = None
+    notes: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
 class LifecycleRolloverResponse(BaseModel):
     status: str
     expired_cycle: Optional[str] = None
@@ -6945,7 +6957,7 @@ class LifecycleRolloverResponse(BaseModel):
 
 class SystemGovernanceSettings(BaseModel):
     global_budget_ceiling: Decimal = Field(default=Decimal("200000000.00"))
-    issp_active_cycle: str = Field(default="2026-2028")
+    issp_active_cycle: str = Field(default_factory=lambda: settings.DEFAULT_ISSP_CYCLE)
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -12195,10 +12207,11 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — CORE RELATIONAL MODELS & ARCHITECTURE
 Singularity Relational Core:
 - Dialect-Agnostic GUID (CHAR(36)) & Resilient JSON/Mutable Types
 - Master Governance Root (MasterNarrative: Cover Sheet, Scope, DRBCP & Vault)
+- Permanent Historical Plan Archives (IsspPlanArchive: Pre-Deletion Preservation)
 - Program Outcomes (Part I.A.4) -> Strategic Concerns (Part II.A)
 - Information Systems Register (Parts II.C & III.D) with Multi-Classification
 - ICT Projects Portfolio (Part III.E) with Dynamic Harmonization Framework
-- Unified Proposals Ledger (Part IV.A) with Multi-Year Compounded Targets
+- Unified Proposals Ledger (Part IV.A) with Dynamic 3-Year Compounded Targets
 - Annex 1 Master Inventory (Equipment & Software) with Anti-Loop EOL Tracking
 - Annex 2 Disaster Recovery and Business Continuity Plan (DRBCP)
 =============================================================================
@@ -12852,6 +12865,31 @@ class User(Base):
 
 
 # =========================================================================
+# PERMANENT HISTORICAL PLAN ARCHIVES (PRE-DELETION PRESERVATION)
+# =========================================================================
+
+class IsspPlanArchive(Base):
+    """
+    Permanent archive ledger.
+    Stores certified snapshots of deleted or concluded ISSP cycles 
+    so historical PDF and Word (.docx) files are never lost.
+    """
+    __tablename__ = "issp_plan_archives"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    issp_period: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    agency_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    certified_grand_total: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
+    pdf_vault_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    docx_vault_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    archived_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    archived_by_user: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+# =========================================================================
 # PART I: STRATEGIC CONTEXT & GOVERNANCE ROOT
 # =========================================================================
 
@@ -12945,7 +12983,7 @@ class MasterNarrative(Base):
     proposals: Mapped[List["Proposal"]] = relationship(
         "Proposal", 
         back_populates="master_narrative",
-        cascade="save-update, merge",
+        cascade="all, delete-orphan",
         passive_deletes=True
     )
     strategic_concerns_relation: Mapped[List["StrategicConcern"]] = relationship(
@@ -13041,10 +13079,10 @@ class MasterNarrative(Base):
         cascade="all, delete-orphan"
     )
 
-    # Dynamic Planning Horizon properties
+    # Dynamic Planning Horizon properties (strictly derived from issp_period_from or active calendar year)
     @property
     def planning_years(self) -> List[int]:
-        start = self.issp_period_from or 2028
+        start = self.issp_period_from or datetime.utcnow().year
         end = self.issp_period_to or (start + 2)
         if start > end:
             start, end = end, start
@@ -13621,7 +13659,7 @@ class Proposal(Base):
     )
     issp_period: Mapped[str] = mapped_column(
         String(50), 
-        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="RESTRICT"),
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
         nullable=False, 
         index=True
     )
@@ -14228,7 +14266,12 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
     if target.annual_deliverables is None:
         target.annual_deliverables = {}
     
-    start_y = target.duration_start_year or 2028
+    current_cal_year = datetime.utcnow().year
+    start_y = target.duration_start_year or (
+        int(target.issp_period.split("-")[0]) 
+        if target.issp_period and "-" in target.issp_period 
+        else current_cal_year
+    )
     end_y = target.duration_end_year or (start_y + 2)
 
     if not target.annual_deliverables:
@@ -14279,17 +14322,18 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     """
     Enforces dynamic multi-year physical targets and calculates total_cost
     as the exact sum of annual inflation-adjusted outlays.
-    Handles calendar years ('2028') and ordinal labels ('Year 1') robustly without zeroing out values.
+    Derives start_year dynamically from target.issp_period without static year assumptions.
     Respects parent project category inheritance without forcibly overriding valid strategic categories.
     """
     from app.utils.helpers import get_adjusted_unit_cost_for_year
 
-    start_year = 2028
+    current_cal_year = datetime.utcnow().year
+    start_year = current_cal_year
     if target.issp_period and "-" in target.issp_period:
         try:
             start_year = int(target.issp_period.split("-")[0].strip())
         except Exception:
-            start_year = 2028
+            start_year = current_cal_year
 
     base_unit = target.unit_cost if target.unit_cost is not None else Decimal("0.00")
     total_accumulated = Decimal("0.00")
@@ -25666,7 +25710,7 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — CENTRAL UTILITIES & GOVERNANCE HELPERS
 Core Capabilities:
 - Document Security, Traversal Guards & Transparent Archive Key Resolution
 - Dialect-Agnostic GUID/UUID & Native JSON Sanitization for COA Audit Trails
-- Dynamic Planning Cycle & Horizon Arithmetic (1 to N-Year Elastic Horizon)
+- Dynamic Planning Cycle & Statutory 3-Year Horizon (Zero Hardcoding)
 - Compounded Multi-Year Annual Inflation Rate & Unit Cost Calculation
 - DBM Capitalization Thresholding & Dynamic UACS Accounting Engine
 - Annex 1 Hardware Obsolescence Quota & Anti-Loop Replacement Enforcement
@@ -25930,13 +25974,26 @@ def get_dict_from_payload(payload: Any) -> dict:
 
 
 # =========================================================================
-# 2. DYNAMIC PLANNING CYCLE & HORIZON UTILITIES (1 to N Years)
+# 2. DYNAMIC PLANNING CYCLE & STATUTORY 3-YEAR HORIZON UTILITIES
 # =========================================================================
+
+def get_default_dynamic_cycle() -> str:
+    """
+    Computes a statutory 3-year ISSP cycle starting from the current calendar year.
+    Example: 2027 -> '2027-2029'. Eliminates static hardcoded strings.
+    """
+    current_year = datetime.now(timezone.utc).year
+    return f"{current_year}-{current_year + 2}"
+
 
 def get_active_issp_period(db: Optional[Session] = None) -> str:
     """
     Queries the database for the active planning cycle configured by the Administrator.
-    Falls back to system settings, latest narrative cycle, or default settings if unset.
+    Priority:
+    1. Active MasterNarrative (is_active == True)
+    2. system_settings (key == 'issp_active_cycle')
+    3. Latest configured MasterNarrative
+    4. Dynamically calculated 3-year cycle from current calendar year
     """
     from app.database.models import MasterNarrative, SystemSetting
 
@@ -25960,12 +26017,12 @@ def get_active_issp_period(db: Optional[Session] = None) -> str:
             if setting_period and str(setting_period).strip():
                 return str(setting_period).strip()
 
-            latest_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
+            latest_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period_to.desc()).first()
             if latest_narrative and latest_narrative.issp_period:
                 return latest_narrative.issp_period
         except Exception as e:
             session.rollback()
-            logger.warning(f"Query check: Failed to fetch MasterNarrative issp_period: {str(e)}")
+            logger.debug(f"Query check: Failed to fetch active issp_period: {str(e)}")
         finally:
             if close_session:
                 try:
@@ -25973,14 +26030,13 @@ def get_active_issp_period(db: Optional[Session] = None) -> str:
                 except Exception:
                     pass
 
-    return getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
+    return getattr(settings, "DEFAULT_ISSP_CYCLE", None) or get_default_dynamic_cycle()
 
 
 def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = None) -> List[int]:
     """
-    Resolves the exact sequence of calendar years [start_year, ..., end_year]
-    for any configured cycle horizon (e.g., 2-year amendment, standard 3-year plan,
-    or 5-year strategic roadmap).
+    Resolves the exact sequence of calendar years [Y1, Y2, Y3] for the active statutory 3-year cycle.
+    Enforces start_year <= end_year and defaults dynamically if unconfigured.
     """
     start_year = None
     end_year = None
@@ -25992,16 +26048,17 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
             issp_period = getattr(narrative, "issp_period", None)
 
     if not start_year or not end_year:
-        period_str = str(issp_period or getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")).strip()
+        period_str = str(issp_period or get_active_issp_period()).strip()
         parts = period_str.split("-")
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             start_year = int(parts[0])
             end_year = int(parts[1])
         elif len(parts) == 1 and parts[0].isdigit():
             start_year = int(parts[0])
-            end_year = int(parts[0])
+            end_year = start_year + 2
         else:
-            start_year, end_year = 2026, 2028
+            current_year = datetime.now(timezone.utc).year
+            start_year, end_year = current_year, current_year + 2
 
     if start_year > end_year:
         start_year, end_year = end_year, start_year
@@ -26012,7 +26069,7 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
 def validate_active_years_alignment(db: Optional[Session], submitted_years: List[Any]) -> str:
     """
     Validates that the keys of a submitted year-by-year dictionary 
-    match the active planning period years exactly across any horizon span (1 to N years).
+    match the active planning period years exactly across the 3-year horizon.
     """
     from app.database.models import MasterNarrative
 
@@ -26031,7 +26088,7 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
         try:
             active_narrative = session.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
             if not active_narrative:
-                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
+                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period_to.desc()).first()
         except Exception as e:
             logger.debug(f"MasterNarrative query note in validate_active_years_alignment: {e}")
         finally:
@@ -26041,7 +26098,7 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
                 except Exception:
                     pass
 
-    target_period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
+    target_period = active_narrative.issp_period if active_narrative else get_active_issp_period(session)
     year_range = get_cycle_year_range(active_narrative, issp_period=target_period)
     expected_years = [str(y) for y in year_range]
     submitted_years_str = [str(y).strip() for y in submitted_years]
@@ -26056,9 +26113,11 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
 
 def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any], is_submitting: bool = False) -> Tuple[str, Dict[str, int]]:
     """
-    Standardizes physical target inputs across arbitrary planning horizons (1 to N years)
-    without zeroing out user data. Seamlessly parses calendar years ('2028'),
-    ordinal labels ('Year 1', 'year_1'), or integer indices ('1').
+    Standardizes physical target inputs across the statutory 3-year planning horizon without zeroing out user data.
+    Maps:
+      Year 1 -> Y_start
+      Year 2 -> Y_start + 1
+      Year 3 -> Y_start + 2
     Maintains both calendar year and ordinal keys in the returned dictionary for downstream compatibility.
     """
     from app.database.models import MasterNarrative
@@ -26078,7 +26137,7 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
         try:
             active_narrative = session.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
             if not active_narrative:
-                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
+                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period_to.desc()).first()
         except Exception as e:
             logger.debug(f"MasterNarrative lookup note in align_and_validate_years: {e}")
         finally:
@@ -26088,10 +26147,30 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 except Exception:
                     pass
 
-    period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
-    year_range = get_cycle_year_range(active_narrative, issp_period=period)
-    expected_years = [str(y) for y in year_range]
-    aligned_data = {year: 0 for year in expected_years}
+    if active_narrative:
+        start_y = active_narrative.issp_period_from or datetime.now(timezone.utc).year
+        period = active_narrative.issp_period
+    else:
+        period = get_active_issp_period(session)
+        try:
+            start_y = int(period.split("-")[0].strip())
+        except Exception:
+            start_y = datetime.now(timezone.utc).year
+
+    # Statutory 3-year sequence
+    y1_str = str(start_y)
+    y2_str = str(start_y + 1)
+    y3_str = str(start_y + 2)
+    expected_years = [y1_str, y2_str, y3_str]
+
+    aligned_data = {
+        y1_str: 0,
+        y2_str: 0,
+        y3_str: 0,
+        "Year 1": 0,
+        "Year 2": 0,
+        "Year 3": 0
+    }
     valid_mapped_keys = set()
 
     sanitized_input: Dict[str, int] = {}
@@ -26104,29 +26183,38 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 qty_val = 0
             sanitized_input[k_str] = max(0, qty_val)
 
-    # 1. Direct calendar year match (e.g. "2026", "2027", "2028")
-    for yr in expected_years:
-        if yr in sanitized_input:
-            aligned_data[yr] = sanitized_input[yr]
-            valid_mapped_keys.add(yr)
+    # 1. Direct calendar year matches
+    if y1_str in sanitized_input:
+        aligned_data[y1_str] = sanitized_input[y1_str]
+        valid_mapped_keys.add(y1_str)
+    if y2_str in sanitized_input:
+        aligned_data[y2_str] = sanitized_input[y2_str]
+        valid_mapped_keys.add(y2_str)
+    if y3_str in sanitized_input:
+        aligned_data[y3_str] = sanitized_input[y3_str]
+        valid_mapped_keys.add(y3_str)
 
-    # 2. Parse ordinal keys ("Year 1", "year 1", "year_1", "Y1", "1", etc.)
-    for k_str, qty in sanitized_input.items():
-        if k_str in valid_mapped_keys:
-            continue
-        digits = re.findall(r'\d+', k_str)
-        if digits:
-            num = int(digits[0])
-            # Check if it's a 4-digit calendar year in expected_years
-            if str(num) in expected_years:
-                aligned_data[str(num)] = qty
-                valid_mapped_keys.add(k_str)
-            # Check if it's a 1-based index (e.g., Year 1, Year 2)
-            elif 1 <= num <= len(expected_years):
-                target_yr = expected_years[num - 1]
-                if aligned_data[target_yr] == 0:
-                    aligned_data[target_yr] = qty
-                valid_mapped_keys.add(k_str)
+    # 2. Parse ordinal keys ("Year 1", "Year 2", "Year 3", "Y1", etc.) if calendar years were 0
+    if aligned_data[y1_str] == 0:
+        for k_alt in ["Year 1", "year 1", "year_1", "Y1", "1"]:
+            if k_alt in sanitized_input:
+                aligned_data[y1_str] = sanitized_input[k_alt]
+                valid_mapped_keys.add(k_alt)
+                break
+
+    if aligned_data[y2_str] == 0:
+        for k_alt in ["Year 2", "year 2", "year_2", "Y2", "2"]:
+            if k_alt in sanitized_input:
+                aligned_data[y2_str] = sanitized_input[k_alt]
+                valid_mapped_keys.add(k_alt)
+                break
+
+    if aligned_data[y3_str] == 0:
+        for k_alt in ["Year 3", "year 3", "year_3", "Y3", "3"]:
+            if k_alt in sanitized_input:
+                aligned_data[y3_str] = sanitized_input[k_alt]
+                valid_mapped_keys.add(k_alt)
+                break
 
     # 3. Fallback: Sequential 4-digit years matching
     submitted_4digit_years = sorted([int(d[0]) for d in [re.findall(r'^\d{4}$', k) for k in sanitized_input.keys()] if d])
@@ -26137,15 +26225,16 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 aligned_data[year] = sanitized_input.get(orig_key, 0)
                 valid_mapped_keys.add(orig_key)
 
-    # Mirror ordinal labels ('Year 1', 'Year 2', ...) for template and reporting engines
-    for idx, yr in enumerate(expected_years):
-        aligned_data[f"Year {idx + 1}"] = aligned_data.get(yr, 0)
+    # Mirror ordinal labels ('Year 1', 'Year 2', 'Year 3') for compilation templates
+    aligned_data["Year 1"] = aligned_data[y1_str]
+    aligned_data["Year 2"] = aligned_data[y2_str]
+    aligned_data["Year 3"] = aligned_data[y3_str]
 
     if is_submitting:
         if sanitized_input and not valid_mapped_keys and not any(k in expected_years for k in sanitized_input):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Validation Failed: Submitted years {list(sanitized_input.keys())} do not match active cycle {expected_years}."
+                detail=f"Validation Failed: Submitted years {list(sanitized_input.keys())} do not match active 3-year cycle {expected_years}."
             )
 
     return period, aligned_data
@@ -26212,8 +26301,7 @@ def get_inflation_rate_for_year(connection_or_db: Any, cal_year: int, start_year
     """
     Determines the inflation percentage multiplier for any specific calendar year.
     Year 1 (cal_year <= start_year) is unadjusted (0.00%).
-    Year 2+ retrieves the admin-configured percentage from system_settings with canonical DICT fallbacks.
-    Dynamically scales for horizons of 2, 3, 4, 5, or more years.
+    Year 2 (idx = 1) is 3.0% by standard, Year 3 (idx = 2) is 5.0% by standard.
     """
     if cal_year <= start_year:
         return Decimal("0.00")
@@ -26226,7 +26314,7 @@ def get_inflation_rate_for_year(connection_or_db: Any, cal_year: int, start_year
         if str(cal_year) in rates_map:
             rate_percent = Decimal(str(rates_map[str(cal_year)]))
         else:
-            # DICT Guidelines standard fallback: 3% for Y2, 5% for Y3, +2% compounding per year thereafter
+            # DICT Guidelines standard: 3% for Y2, 5% for Y3, +2% compounding per year thereafter
             idx = cal_year - start_year
             if idx == 1:
                 rate_percent = Decimal("3.0")
@@ -26260,9 +26348,9 @@ def get_adjusted_unit_cost_for_year(connection_or_db: Any, base_cost: Decimal, c
     return (base_dec * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-# =========================================================================
+# ==========================================================
 # 4. DYNAMIC CAPITALIZATION & UACS RESOLUTION
-# =========================================================================
+# ==========================================================
 
 def classify_uacs_and_expenditure(
     item_name: str,

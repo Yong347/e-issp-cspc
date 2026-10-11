@@ -80,7 +80,8 @@ from app.database.models import (
     ExistingInventory,
     RoleTag,
     ScopeChoice,
-    DynamicChecklistCriteria
+    DynamicChecklistCriteria,
+    IsspPlanArchive
 )
 from app.schemas import (
     AdminOverridePayload,
@@ -173,7 +174,8 @@ from app.utils.helpers import (
     get_cycle_year_range,
     get_governance_policy,
     get_adjusted_unit_cost_for_year,
-    sanitize_for_json
+    sanitize_for_json,
+    get_default_dynamic_cycle
 )
 
 logger = logging.getLogger(__name__)
@@ -244,6 +246,13 @@ def execute_in_process_compilation(task_id: str, compiled_meta: dict):
 # ==========================================================
 # PYDANTIC INTAKE SCHEMAS FOR ADMIN ACTIONS
 # ==========================================================
+
+class ConfigureCyclePayload(BaseModel):
+    start_year: int = Field(..., ge=2020, le=2050, description="The first year of the statutory 3-year ISSP plan.")
+    agency_name: Optional[str] = None
+    agency_website_url: Optional[str] = None
+    agency_head_position: Optional[str] = None
+
 
 class SystemApprovalPayload(BaseModel):
     strategic_concern_id: Optional[Union[uuid.UUID, str]] = None
@@ -885,8 +894,288 @@ def validate_budget_preflight(
 
 
 # ==========================================================
-# 6. MASTER NARRATIVES & COVERSHEET MANAGEMENT
+# 6. MASTER NARRATIVES, 3-YEAR CYCLE CONTROLS & ARCHIVAL
 # ==========================================================
+
+@router.post("/cycles/configure-3year")
+def configure_three_year_cycle(
+    payload: ConfigureCyclePayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Configures and activates a statutory 3-year ISSP planning cycle:
+    Automatically computes End Year = Start Year + 2.
+    Initializes MasterNarrative, default annual budget ceilings, and inflation rates.
+    """
+    start_y = int(payload.start_year)
+    end_y = start_y + 2
+    period_str = f"{start_y}-{end_y}"
+
+    # Deactivate any existing active cycles
+    db.query(MasterNarrative).update({"is_active": False}, synchronize_session=False)
+
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == period_str).first()
+    agency_name_clean = payload.agency_name or getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency")
+    agency_web_clean = payload.agency_website_url or getattr(settings, "DEFAULT_AGENCY_WEBSITE", "https://agency.gov.ph")
+    agency_head_clean = payload.agency_head_position or getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency")
+
+    if not narrative:
+        narrative = MasterNarrative(
+            issp_period=period_str,
+            agency_name=agency_name_clean,
+            issp_period_from=start_y,
+            issp_period_to=end_y,
+            agency_website_url=agency_web_clean,
+            agency_head_position=agency_head_clean,
+            signatory_approved_by=agency_head_clean,
+            signatory_prepared_by="Chief Information Officer",
+            preparer_position="Chief Information Officer",
+            is_active=True,
+            is_archived=False,
+            authoring_cycle_duration=3,
+            scope_choice="Department-Wide",
+            scope_json={"with_regional_offices": True, "with_bureaus": False}
+        )
+        db.add(narrative)
+        db.flush()
+    else:
+        narrative.is_active = True
+        narrative.is_archived = False
+        narrative.issp_period_from = start_y
+        narrative.issp_period_to = end_y
+        narrative.authoring_cycle_duration = 3
+        if payload.agency_name:
+            narrative.agency_name = payload.agency_name
+        if payload.agency_website_url:
+            narrative.agency_website_url = payload.agency_website_url
+        if payload.agency_head_position:
+            narrative.agency_head_position = payload.agency_head_position
+            narrative.signatory_approved_by = payload.agency_head_position
+        db.flush()
+
+    # Update system_settings active cycle key
+    active_setting = db.query(SystemSetting).filter(SystemSetting.key == "issp_active_cycle").first()
+    if not active_setting:
+        db.add(SystemSetting(key="issp_active_cycle", value=period_str))
+    else:
+        active_setting.value = period_str
+
+    # Initialize dynamic inflation rates for the 3 years (0% base year, 3% Y2, 5% Y3)
+    inflation_map = {
+        str(start_y): 0.0,
+        str(start_y + 1): 3.0,
+        str(start_y + 2): 5.0
+    }
+    inflation_setting = db.query(SystemSetting).filter(SystemSetting.key == "inflation_rates_by_year").first()
+    if not inflation_setting:
+        db.add(SystemSetting(key="inflation_rates_by_year", value=json.dumps(inflation_map)))
+    else:
+        inflation_setting.value = json.dumps(inflation_map)
+
+    # Initialize 3-year Budget Ceilings for all departments if missing
+    departments = db.query(Department).all()
+    for d in departments:
+        ceiling = db.query(BudgetCeiling).filter(
+            BudgetCeiling.department_id == d.id,
+            BudgetCeiling.issp_period == period_str
+        ).first()
+        if not ceiling:
+            db.add(BudgetCeiling(
+                department_id=d.id,
+                issp_period=period_str,
+                allocated_capex=Decimal("25000000.00"),
+                allocated_mooe=Decimal("15000000.00"),
+                annual_allocations={
+                    str(start_y): {"capex": 8333333.33, "mooe": 5000000.00},
+                    str(start_y + 1): {"capex": 8333333.33, "mooe": 5000000.00},
+                    str(start_y + 2): {"capex": 8333333.34, "mooe": 5000000.00}
+                }
+            ))
+
+    log_audit_event(
+        db=db,
+        action="CYCLE_ACTIVATED_3YEAR",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        ip_address=request.client.host if request.client else None,
+        new_value={"period": period_str, "start_year": start_y, "end_year": end_y}
+    )
+
+    db.commit()
+    return {
+        "status": "success",
+        "message": f"Activated 3-year cycle FY {period_str}.",
+        "active_cycle": period_str,
+        "years": [start_y, start_y + 1, start_y + 2]
+    }
+
+
+@router.post("/narratives/{issp_period}/archive-and-delete")
+def archive_and_delete_planning_cycle(
+    issp_period: str,
+    request: Request,
+    notes: Optional[str] = Query(None, description="Optional deletion/archive reason"),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Safely archives and deletes an ISSP planning cycle:
+    1. Verifies/compiles completed PDF and Word (.docx) snapshots and freezes them in storage.
+    2. Records the archived document paths in `issp_plan_archives`.
+    3. Deletes all associated child records and the MasterNarrative.
+    4. Automatically updates active settings to the most recent remaining plan.
+    """
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        raise HTTPException(status_code=404, detail=f"Planning cycle '{issp_period}' not found.")
+
+    start_y = narrative.issp_period_from or 2026
+    end_y = narrative.issp_period_to or (start_y + 2)
+    agency = narrative.agency_name or getattr(settings, "DEFAULT_AGENCY_NAME", "Agency")
+
+    # 1. Compile final PDF and DOCX if they haven't been compiled yet
+    final_pdf_url = narrative.final_pdf_vault_url
+    final_docx_url = narrative.final_docx_vault_url
+    grand_total = Decimal("0.00")
+
+    try:
+        parity = calculate_financial_summaries(db, issp_period, only_approved=True)
+        grand_total = Decimal(str(parity.get("certified_grand_total", "0.00")))
+    except Exception as e:
+        logger.debug(f"Could not calculate grand total for archive: {e}")
+
+    try:
+        if not final_pdf_url:
+            try:
+                pdf_res = compile_issp_document.apply(args=[{"issp_period_years": issp_period, "export_format": "pdf"}]).result
+                if isinstance(pdf_res, dict) and "file_url" in pdf_res:
+                    final_pdf_url = pdf_res["file_url"]
+            except Exception:
+                target_func = getattr(compile_issp_document, "__wrapped__", compile_issp_document)
+                pdf_res = target_func(None, {"issp_period_years": issp_period, "export_format": "pdf"})
+                if isinstance(pdf_res, dict) and "file_url" in pdf_res:
+                    final_pdf_url = pdf_res["file_url"]
+
+        if not final_docx_url:
+            try:
+                docx_res = compile_issp_document.apply(args=[{"issp_period_years": issp_period, "export_format": "docx"}]).result
+                if isinstance(docx_res, dict) and "file_url" in docx_res:
+                    final_docx_url = docx_res["file_url"]
+            except Exception:
+                target_func = getattr(compile_issp_document, "__wrapped__", compile_issp_document)
+                docx_res = target_func(None, {"issp_period_years": issp_period, "export_format": "docx"})
+                if isinstance(docx_res, dict) and "file_url" in docx_res:
+                    final_docx_url = docx_res["file_url"]
+    except Exception as comp_err:
+        logger.warning(f"Pre-deletion document compilation notice for {issp_period}: {comp_err}")
+
+    # 2. Commit archive record to permanent ledger
+    archive_entry = IsspPlanArchive(
+        issp_period=issp_period,
+        agency_name=agency,
+        start_year=start_y,
+        end_year=end_y,
+        certified_grand_total=grand_total,
+        pdf_vault_url=final_pdf_url,
+        docx_vault_url=final_docx_url,
+        archived_by_user=admin.get("email", "admin"),
+        notes=notes or "Archived prior to plan deletion"
+    )
+    db.add(archive_entry)
+    db.flush()
+
+    # 3. Clean up all relational entities tied to this cycle
+    try:
+        db.query(Proposal).filter(Proposal.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(BudgetCeiling).filter(BudgetCeiling.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(ExistingInventory).filter(ExistingInventory.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(IctProject).filter(IctProject.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(InformationSystem).filter(InformationSystem.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(NeedsAssessment).filter(NeedsAssessment.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(NetworkInfrastructure).filter(NetworkInfrastructure.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(CybersecurityControl).filter(CybersecurityControl.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(DRBCPMetric).filter(DRBCPMetric.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(HumanCapital).filter(HumanCapital.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(IctStaffPosition).filter(IctStaffPosition.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(StakeholderAnalysis).filter(StakeholderAnalysis.issp_period == issp_period).delete(synchronize_session=False)
+        db.query(CrossAgencyProject).filter(CrossAgencyProject.issp_period == issp_period).delete(synchronize_session=False)
+
+        was_active = narrative.is_active
+        db.delete(narrative)
+
+        # 4. If deleted plan was active, re-activate the latest remaining plan or provision a fresh 3-year cycle
+        new_active = None
+        if was_active:
+            latest = db.query(MasterNarrative).order_by(MasterNarrative.issp_period_to.desc()).first()
+            if latest:
+                latest.is_active = True
+                new_active = latest.issp_period
+            else:
+                new_active = get_default_dynamic_cycle()
+
+            active_setting = db.query(SystemSetting).filter(SystemSetting.key == "issp_active_cycle").first()
+            if active_setting:
+                active_setting.value = new_active
+            else:
+                db.add(SystemSetting(key="issp_active_cycle", value=new_active))
+
+        log_audit_event(
+            db=db,
+            action="CYCLE_ARCHIVED_AND_DELETED",
+            module="GOVERNANCE",
+            user_id=admin["id"],
+            ip_address=request.client.host if request.client else None,
+            old_value={"deleted_cycle": issp_period, "pdf_url": final_pdf_url, "docx_url": final_docx_url},
+            new_value={"new_active_cycle": new_active}
+        )
+
+        db.commit()
+        return {
+            "status": "success",
+            "message": f"Cycle '{issp_period}' was archived and purged from active operations.",
+            "archived_pdf_url": final_pdf_url,
+            "archived_docx_url": final_docx_url,
+            "new_active_cycle": new_active
+        }
+    except Exception as err:
+        db.rollback()
+        logger.error(f"Archive and delete failure for '{issp_period}': {err}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete and archive cycle: {str(err)}")
+
+
+@router.get("/archives", response_model=List[Dict[str, Any]])
+@router.get("/governance/archives", response_model=List[Dict[str, Any]], include_in_schema=False)
+def get_issp_plan_archives(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """Retrieves all permanently preserved historical plan archives."""
+    archives = db.query(IsspPlanArchive).order_by(IsspPlanArchive.archived_at.desc()).all()
+    return [
+        {
+            "id": a.id,
+            "issp_period": a.issp_period,
+            "agency_name": a.agency_name,
+            "start_year": a.start_year,
+            "end_year": a.end_year,
+            "certified_grand_total": float(a.certified_grand_total),
+            "pdf_vault_url": a.pdf_vault_url,
+            "docx_vault_url": a.docx_vault_url,
+            "archived_at": a.archived_at.isoformat() if a.archived_at else None,
+            "archived_by_user": a.archived_by_user,
+            "notes": a.notes
+        }
+        for a in archives
+    ]
+
 
 @router.get("/narratives/{issp_period}", response_model=MasterNarrativeResponse)
 def get_master_narrative(
@@ -1315,7 +1604,6 @@ def get_egov_checklists_default(issp_period: Optional[str] = Query(None), db: Se
     return db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == period).order_by(EGovernmentChecklist.id.asc()).all()
 
 
-# Filtered model_dump prevents 'is_proposed_equivalent' TypeError
 @router.post("/narratives/{issp_period}/egov-checklists", response_model=EGovernmentChecklistResponse, status_code=status.HTTP_201_CREATED)
 def create_egov_checklist_by_cycle(issp_period: str, payload: EGovernmentChecklistCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     dumped = {k: v for k, v in payload.model_dump().items() if hasattr(EGovernmentChecklist, k)}
@@ -1326,7 +1614,6 @@ def create_egov_checklist_by_cycle(issp_period: str, payload: EGovernmentCheckli
     return item
 
 
-# Filtered model_dump prevents 'is_proposed_equivalent' TypeError
 @router.post("/egov-checklists", response_model=EGovernmentChecklistResponse, status_code=status.HTTP_201_CREATED)
 def create_egov_checklist_default(payload: EGovernmentChecklistCreate, issp_period: Optional[str] = Query(None), db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     period = issp_period or get_active_issp_period(db)
@@ -1338,7 +1625,6 @@ def create_egov_checklist_default(payload: EGovernmentChecklistCreate, issp_peri
     return item
 
 
-# Filtered model_dump prevents 'is_proposed_equivalent' TypeError
 @router.put("/egov-checklists/{id}", response_model=EGovernmentChecklistResponse)
 def update_egov_checklist(id: int, payload: EGovernmentChecklistUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     item = db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).first()
@@ -2531,8 +2817,6 @@ def delete_ict_project(
 # ==========================================================
 # 9. REVISED PROJECT LINKING & REAL-TIME COST RECALCULATION
 # ==========================================================
-
-# app/admin/router.py (Replace update_project_links around line 1550)
 
 @router.post("/ict-projects/{project_id}/links")
 def update_project_links(
@@ -3879,8 +4163,6 @@ def admin_create_proposal(
     return db_proposal
 
 
-# app/admin/router.py (Replace approve_proposal around line 1974)
-
 @router.put("/proposals/{proposal_id}/approve")
 def approve_proposal(
     proposal_id: uuid.UUID,
@@ -3906,7 +4188,6 @@ def approve_proposal(
 
     # All approved proposals must be bound to an ICT Project
     if not proposal.project_id:
-        # Match project by strategic category, or assign default project for that category
         matched_proj = db.query(IctProject).filter(
             IctProject.issp_period == proposal.issp_period,
             func.lower(cast(IctProject.project_category, String)) == func.lower(cast(proposal.strategic_category, String))
@@ -4224,7 +4505,7 @@ def reset_planning_cycle(
     try:
         deleted_count = db.query(Proposal).filter(
             Proposal.issp_period == issp_period,
-            func.lower(cast(Proposal.status, String)) == ["draft", "returned"]
+            func.lower(cast(Proposal.status, String)).in_(["draft", "returned"])
         ).delete(synchronize_session=False)
 
         db.query(InformationSystem).filter(

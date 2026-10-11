@@ -116,20 +116,18 @@ export default function UnifiedProposals() {
 
   const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
   
-  // Dynamic Planning Horizon Sequence (Extracts cycle range dynamically; zero hardcoding)
+  // Dynamic Planning Horizon Sequence: strictly computes 3-year statutory cycle without static year hardcoding
   const activeYears = useMemo(() => {
     if (planningYears && planningYears.length > 0) return planningYears;
     if (activeCycle && activeCycle.includes("-")) {
       const parts = activeCycle.split("-");
       const start = parseInt(parts[0], 10);
-      const end = parseInt(parts[1], 10);
-      if (!isNaN(start) && !isNaN(end) && end >= start) {
-        const span = [];
-        for (let y = start; y <= end; y++) span.push(y);
-        return span;
+      if (!isNaN(start)) {
+        return [start, start + 1, start + 2];
       }
     }
-    return [2028, 2029, 2030];
+    const currentYear = new Date().getFullYear();
+    return [currentYear, currentYear + 1, currentYear + 2];
   }, [planningYears, activeCycle]);
 
   const formatPHP = (val) => {
@@ -295,8 +293,13 @@ export default function UnifiedProposals() {
     }
   }, [location.state, catalog, handleCatalogItemChange, justification]);
 
-  // Derived Quantities & Total Cost
-  const calculatedTotalQty = Object.values(yearlyQuantities).reduce((a, b) => a + (parseInt(b, 10) || 0), 0);
+  // Derived Quantities & Total Cost scoped strictly to active horizon years
+  const calculatedTotalQty = useMemo(() => {
+    return activeYears.reduce((sum, yr) => {
+      return sum + (parseInt(yearlyQuantities[String(yr)], 10) || 0);
+    }, 0);
+  }, [activeYears, yearlyQuantities]);
+
   const calculatedTotalOutlay = (parseFloat(unitCost) || 0) * calculatedTotalQty;
 
   const resetForm = () => {
@@ -330,7 +333,7 @@ export default function UnifiedProposals() {
   // Replicate first year quantity across all years in horizon
   const handleReplicateAllYears = () => {
     const firstYear = activeYears[0];
-    const baseQty = yearlyQuantities[String(firstYear)] || 1;
+    const baseQty = parseInt(yearlyQuantities[String(firstYear)], 10) || 1;
     const replicated = {};
     activeYears.forEach(y => {
       replicated[String(y)] = baseQty;
@@ -374,11 +377,22 @@ export default function UnifiedProposals() {
         defaultCat = "Continuing Costs/Expenses";
       }
 
+      // Build clean multi-year quantities containing both year keys and ordinals
+      const cleanYearlyQuantities = {};
+      activeYears.forEach((year, idx) => {
+        const qty = parseInt(yearlyQuantities[String(year)], 10) || 0;
+        cleanYearlyQuantities[String(year)] = Math.max(0, qty);
+        cleanYearlyQuantities[`Year ${idx + 1}`] = Math.max(0, qty);
+      });
+
       const payload = {
         item_select: itemSelect,
         item_name: itemName.trim(),
         unit_cost: costNum,
-        yearly_quantities: yearlyQuantities,
+        year_1_qty: cleanYearlyQuantities[String(activeYears[0])] || 0,
+        year_2_qty: cleanYearlyQuantities[String(activeYears[1])] || 0,
+        year_3_qty: cleanYearlyQuantities[String(activeYears[2])] || 0,
+        yearly_quantities: cleanYearlyQuantities,
         justification: justification.trim() || null,
         needs_assessment_id: needsAssessmentId || null,
         created_by_students: isTurnover,
@@ -1283,11 +1297,11 @@ export default function UnifiedProposals() {
                                 Program Alignment: Pending Review
                               </span>
                             )}
-                            {p.project_rel?.project_title ? (
+                            {p.project_rel?.project_title || p.project_title ? (
                               <>
                                 <span>&bull;</span>
                                 <span className="text-purple-600 dark:text-purple-400 font-semibold">
-                                  Portfolio Project: {p.project_rel.project_title}
+                                  Portfolio Project: {p.project_rel?.project_title || p.project_title}
                                 </span>
                               </>
                             ) : (
@@ -1477,7 +1491,7 @@ export default function UnifiedProposals() {
                               </button>
                               <button
                                 onClick={() => handleDelete(p.id, p.item_name)}
-                                className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 rounded-lg text-slate-500 cursor-pointer transition-colors"
+                                className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-955/40 dark:hover:text-rose-400 rounded-lg text-slate-500 cursor-pointer transition-colors"
                                 title="Delete proposal draft"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />

@@ -1205,6 +1205,37 @@ export const resetCycle = async (token, cycle) => {
   return handleResponse(res, "Failed to reset planning cycle");
 };
 
+export const configureThreeYearCycle = async (token, startYear, agencyName = "") => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/cycles/configure-3year`, {
+    method: "POST",
+    headers: getHeaders(token),
+    body: JSON.stringify({
+      start_year: parseInt(startYear, 10),
+      agency_name: agencyName || undefined
+    })
+  });
+  return handleResponse(res, "Failed to configure 3-year planning cycle");
+};
+
+export const archiveAndDeleteCycle = async (token, cycle, notes = "") => {
+  const params = new URLSearchParams();
+  if (notes) params.append("notes", notes);
+  const qs = params.toString();
+  const url = `${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/archive-and-delete${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to archive and delete planning cycle");
+};
+
+export const getPlanArchives = async (token) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/archives`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load archived plans");
+};
+
 export const uploadDiagram = async (token, cycle, category, file, extraData = {}) => {
   const formData = new FormData();
   formData.append("file", file);

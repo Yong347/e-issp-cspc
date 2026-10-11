@@ -98,9 +98,19 @@ from app.database.models import (
     SafeEnumStr,
     SafeEnumType
 )
+
+try:
+    from app.database.models import IsspPlanArchive
+except ImportError:
+    IsspPlanArchive = None
+
 from app.config import settings
 from app.services.issp_engine import ISSPSingularityEngine
-from app.utils.helpers import calculate_financial_summaries
+from app.utils.helpers import (
+    calculate_financial_summaries,
+    get_default_dynamic_cycle,
+    get_active_issp_period
+)
 
 logging.basicConfig(level=logging.INFO, format="[ISSP SEEDER] %(asctime)s - %(levelname)s: %(message)s", force=True)
 logger = logging.getLogger(__name__)
@@ -306,14 +316,23 @@ def align_database_schemas(engine):
     """
     Defensively inspects target database tables at runtime.
     1. Purges legacy document tree tables and converts old native enums to VARCHAR.
-    2. Synchronizes missing columns on master_narratives, information_systems, and other tables.
-    3. Releases NOT NULL constraints on issp_core.created_by_students and issp_core.outcome_id.
+    2. Synchronizes missing columns and sets dynamic defaults across multi-year horizon tables.
+    3. Guarantees ON DELETE CASCADE from master_narratives to issp_core, budget_ceilings, etc.
+    4. Ensures the presence of issp_plan_archives table for pre-deletion archival.
+    5. Releases NOT NULL constraints on issp_core.created_by_students and issp_core.outcome_id.
     """
     logger.info("Running defensive schema alignment and data sanitization...")
     is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
     bool_false = "0" if is_sqlite else "false"
     bool_true = "1" if is_sqlite else "true"
     uuid_type = "VARCHAR(36)"
+
+    # Compute default 3-year statutory horizon dynamically
+    default_period = getattr(settings, "DEFAULT_ISSP_CYCLE", None) or get_default_dynamic_cycle()
+    parts = default_period.split("-")
+    start_year = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else datetime.now(timezone.utc).year
+    end_year = start_year + 2
+    default_period = f"{start_year}-{end_year}"
 
     def safe_exec(connection, sql_statement, params=None):
         try:
@@ -546,6 +565,30 @@ def align_database_schemas(engine):
                 END $$;
             """))
 
+            # Ensure issp_core.issp_period foreign key cascades on delete when archiving plans
+            safe_exec(conn, text("""
+                DO $$
+                DECLARE
+                    r RECORD;
+                BEGIN
+                    FOR r IN (
+                        SELECT constraint_name, table_name
+                        FROM information_schema.table_constraints
+                        WHERE table_name = 'issp_core' AND constraint_type = 'FOREIGN KEY'
+                    ) LOOP
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.key_column_usage
+                            WHERE constraint_name = r.constraint_name AND column_name = 'issp_period'
+                        ) THEN
+                            EXECUTE 'ALTER TABLE issp_core DROP CONSTRAINT ' || quote_ident(r.constraint_name);
+                            EXECUTE 'ALTER TABLE issp_core ADD CONSTRAINT ' || quote_ident(r.constraint_name) || ' FOREIGN KEY (issp_period) REFERENCES master_narratives(issp_period) ON UPDATE CASCADE ON DELETE CASCADE';
+                        END IF;
+                    END LOOP;
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END $$;
+            """))
+
         safe_exec(conn, text("""
             UPDATE issp_core 
             SET payload = '{}' 
@@ -676,6 +719,27 @@ def align_database_schemas(engine):
         inspector = inspect(conn)
         table_names = inspector.get_table_names()
 
+        # 0. Ensure 'issp_plan_archives' table exists for pre-deletion archival
+        if "issp_plan_archives" not in table_names:
+            logger.info("Defensive Sync: Creating 'issp_plan_archives' table if missing.")
+            id_col_type = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "SERIAL PRIMARY KEY"
+            safe_exec(conn, text(f"""
+                CREATE TABLE IF NOT EXISTS issp_plan_archives (
+                    id {id_col_type},
+                    issp_period VARCHAR(50) NOT NULL,
+                    agency_name VARCHAR(255) NOT NULL,
+                    start_year INTEGER NOT NULL,
+                    end_year INTEGER NOT NULL,
+                    certified_grand_total NUMERIC(15, 2) DEFAULT 0.00 NOT NULL,
+                    pdf_vault_url VARCHAR(500),
+                    docx_vault_url VARCHAR(500),
+                    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    archived_by_user VARCHAR(255),
+                    notes TEXT
+                );
+            """))
+            safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_issp_plan_archives_issp_period ON issp_plan_archives (issp_period);"))
+
         # 1. Patch 'master_narratives' table
         if "master_narratives" in table_names:
             narrative_cols = [c['name'] for c in inspector.get_columns('master_narratives')]
@@ -736,7 +800,7 @@ def align_database_schemas(engine):
         if "organizational_outcomes" in table_names:
             oo_cols = [c['name'] for c in inspector.get_columns('organizational_outcomes')]
             columns_to_sync_oo = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "issp_period": f"VARCHAR(50) DEFAULT '{default_period}'",
                 "type_label": "VARCHAR(100) DEFAULT 'Organizational Outcome'",
                 "outcome_name": "VARCHAR(255)",
                 "program_name": "VARCHAR(255)",
@@ -753,7 +817,7 @@ def align_database_schemas(engine):
         if "strategic_concerns" in table_names:
             sc_cols = [c['name'] for c in inspector.get_columns('strategic_concerns')]
             columns_to_sync_sc = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "issp_period": f"VARCHAR(50) DEFAULT '{default_period}'",
                 "outcome_id": "INTEGER",
                 "mfo": "VARCHAR(255)",
                 "critical_system": "VARCHAR(255)",
@@ -769,7 +833,7 @@ def align_database_schemas(engine):
         if "ict_projects" in table_names:
             proj_cols = [c['name'] for c in inspector.get_columns('ict_projects')]
             columns_to_sync_proj = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "issp_period": f"VARCHAR(50) DEFAULT '{default_period}'",
                 "system_id": f"{uuid_type}",
                 "project_title": "VARCHAR(255) DEFAULT ''",
                 "project_category": "VARCHAR(100) DEFAULT 'Internal ICT Projects'",
@@ -786,8 +850,8 @@ def align_database_schemas(engine):
                 "harmonizes_pegif": f"BOOLEAN DEFAULT {bool_false}",
                 "harmonizes_cross_collaboration": f"BOOLEAN DEFAULT {bool_false}",
                 "harmonizes_scalability": f"BOOLEAN DEFAULT {bool_false}",
-                "duration_start_year": "INTEGER DEFAULT 2026",
-                "duration_end_year": "INTEGER DEFAULT 2028",
+                "duration_start_year": f"INTEGER DEFAULT {start_year}",
+                "duration_end_year": f"INTEGER DEFAULT {end_year}",
                 "annual_deliverables": "JSON DEFAULT '{}'",
                 "year_1_deliverables": "TEXT DEFAULT ''",
                 "year_2_deliverables": "TEXT DEFAULT ''",
@@ -841,7 +905,7 @@ def align_database_schemas(engine):
             inv_cols = [c['name'] for c in inspector.get_columns('existing_inventory')]
             columns_to_sync_inv = {
                 "department_id": "INTEGER",
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "issp_period": f"VARCHAR(50) DEFAULT '{default_period}'",
                 "replacement_proposal_id": f"{uuid_type}",
                 "exact_model": "VARCHAR(200)",
                 "specs": "TEXT",
@@ -865,7 +929,7 @@ def align_database_schemas(engine):
         if "information_systems" in table_names:
             sys_cols = [c['name'] for c in inspector.get_columns('information_systems')]
             columns_to_sync_sys = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "issp_period": f"VARCHAR(50) DEFAULT '{default_period}'",
                 "strategic_concern_id": f"{uuid_type}",
                 "department_id": "INTEGER",
                 "needs_assessment_id": f"{uuid_type}",
@@ -984,7 +1048,7 @@ def align_database_schemas(engine):
         if "needs_assessments" in table_names:
             na_cols = [c['name'] for c in inspector.get_columns('needs_assessments')]
             columns_to_sync_na = {
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "issp_period": f"VARCHAR(50) DEFAULT '{default_period}'",
                 "is_aggregated": f"BOOLEAN DEFAULT {bool_false}",
                 "strategic_concern_id": f"{uuid_type}"
             }
@@ -1060,7 +1124,7 @@ def align_database_schemas(engine):
             columns_to_sync_bc = {
                 "allocated_capex": "NUMERIC(15, 2) DEFAULT 0.00",
                 "allocated_mooe": "NUMERIC(15, 2) DEFAULT 0.00",
-                "issp_period": "VARCHAR(50) DEFAULT '2026-2028'",
+                "issp_period": f"VARCHAR(50) DEFAULT '{default_period}'",
                 "annual_allocations": "JSON DEFAULT '{}'"
             }
             for col_name, col_def in columns_to_sync_bc.items():
@@ -1071,11 +1135,21 @@ def align_database_schemas(engine):
 def bootstrap_metadata(db):
     """
     Seeds the complete singular relational graph across Parts I, II, III, IV, and Annexes.
-    Guarantees strict four-way financial parity and dynamic provenance without SUC hardcoding.
+    Guarantees strict four-way financial parity and dynamic provenance without static year assumptions.
     Every proposal is bound to an active ICT Project so that project-governed categorizations
     and four-way financial parity reconcile with zero discrepancies.
     """
-    baseline_period = getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
+    # Dynamically compute statutory 3-year horizon from settings or current calendar year
+    configured_cycle = getattr(settings, "DEFAULT_ISSP_CYCLE", None) or get_default_dynamic_cycle()
+    parts = configured_cycle.split("-")
+    start_year = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else datetime.now(timezone.utc).year
+    end_year = start_year + 2
+    baseline_period = f"{start_year}-{end_year}"
+
+    y1_str = str(start_year)
+    y2_str = str(start_year + 1)
+    y3_str = str(start_year + 2)
+
     agency_name = getattr(settings, "DEFAULT_AGENCY_NAME", "Department of Information and Communications Technology")
     agency_website = getattr(settings, "DEFAULT_AGENCY_WEBSITE", "https://dict.gov.ph")
     head_title = getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Secretary")
@@ -1137,7 +1211,7 @@ def bootstrap_metadata(db):
         ("issp_active_cycle", baseline_period),
         ("capitalization_threshold", "50000.00"),
         ("major_outlay_review_threshold", "2000000.00"),
-        ("inflation_rates_by_year", json.dumps({"2026": 0.0, "2027": 3.0, "2028": 5.0})),
+        ("inflation_rates_by_year", json.dumps({y1_str: 0.0, y2_str: 3.0, y3_str: 5.0})),
         ("hardware_replacement_buffer_units", "3"),
         ("canvas_expiration_warning_days", "14")
     ]
@@ -1289,8 +1363,8 @@ def bootstrap_metadata(db):
         narrative = MasterNarrative(
             issp_period=baseline_period,
             agency_name=agency_name,
-            issp_period_from=2026,
-            issp_period_to=2028,
+            issp_period_from=start_year,
+            issp_period_to=end_year,
             agency_website_url=agency_website,
             agency_logo_url=None,
             dict_logo_url=None,
@@ -1325,7 +1399,8 @@ def bootstrap_metadata(db):
             focal_contact_no="09300000000",
             signatory_approved_by=head_title,
             agency_head_position=head_title,
-            drbcp_approval_date="March 15, 2026",
+            drbcp_approval_date=f"March 15, {start_year}",
+            authoring_cycle_duration=3,
             annual_ict_budget=Decimal("45000000.00"),
             org_chart_url=None,
             existing_ict_org_url=None,
@@ -1340,6 +1415,9 @@ def bootstrap_metadata(db):
         db.add(narrative)
         db.flush()
     else:
+        narrative.issp_period_from = start_year
+        narrative.issp_period_to = end_year
+        narrative.authoring_cycle_duration = 3
         if "cspc" in (narrative.agency_name or "").lower() or not narrative.agency_name or "testtt" in (narrative.agency_name or "").lower():
             narrative.agency_name = agency_name
         if "cspc" in (narrative.agency_website_url or "").lower() or not narrative.agency_website_url:
@@ -1358,7 +1436,7 @@ def bootstrap_metadata(db):
         narrative.drbcp_recovery_strategy_text = drbcp_recovery_strategy_default
         narrative.drbcp_sop_phases_text = drbcp_sop_phases_default
         narrative.drbcp_compliance_narrative_text = drbcp_compliance_narrative_default
-        narrative.drbcp_approval_date = "March 15, 2026"
+        narrative.drbcp_approval_date = f"March 15, {start_year}"
         db.flush()
 
     # -------------------------------------------------------------
@@ -2139,15 +2217,15 @@ def bootstrap_metadata(db):
             harmonizes_pegif=True,
             harmonizes_cross_collaboration=True,
             harmonizes_scalability=True,
-            duration_start_year=2026,
-            duration_end_year=2028,
+            duration_start_year=start_year,
+            duration_end_year=end_year,
             annual_deliverables={
                 "Year 1": "GovCloud infrastructure provisioning, database migration, and security penetration testing.",
                 "Year 2": "eGovPay payment gateway integration and automated citizen verification module deployment.",
                 "Year 3": "Full nationwide disaster recovery drill, high-availability testing, and staff training.",
-                "2026": "GovCloud infrastructure provisioning, database migration, and security penetration testing.",
-                "2027": "eGovPay payment gateway integration and automated citizen verification module deployment.",
-                "2028": "Full nationwide disaster recovery drill, high-availability testing, and staff training."
+                y1_str: "GovCloud infrastructure provisioning, database migration, and security penetration testing.",
+                y2_str: "eGovPay payment gateway integration and automated citizen verification module deployment.",
+                y3_str: "Full nationwide disaster recovery drill, high-availability testing, and staff training."
             },
             year_1_deliverables="GovCloud infrastructure provisioning, database migration, and security penetration testing.",
             year_2_deliverables="eGovPay payment gateway integration and automated citizen verification module deployment.",
@@ -2182,15 +2260,15 @@ def bootstrap_metadata(db):
             harmonizes_pegif=True,
             harmonizes_cross_collaboration=True,
             harmonizes_scalability=True,
-            duration_start_year=2026,
-            duration_end_year=2028,
+            duration_start_year=start_year,
+            duration_end_year=end_year,
             annual_deliverables={
                 "Year 1": "Joint Memorandum Circular (JMC) signing, PeGIF API gateway architecture, and data exchange staging.",
                 "Year 2": "Secure NGDX data pipeline integration and multi-agency test runs.",
                 "Year 3": "Production deployment and automated cross-agency verification.",
-                "2026": "Joint Memorandum Circular (JMC) signing, PeGIF API gateway architecture, and data exchange staging.",
-                "2027": "Secure NGDX data pipeline integration and multi-agency test runs.",
-                "2028": "Production deployment and automated cross-agency verification."
+                y1_str: "Joint Memorandum Circular (JMC) signing, PeGIF API gateway architecture, and data exchange staging.",
+                y2_str: "Secure NGDX data pipeline integration and multi-agency test runs.",
+                y3_str: "Production deployment and automated cross-agency verification."
             },
             year_1_deliverables="Joint Memorandum Circular (JMC) signing, PeGIF API gateway architecture, and data exchange staging.",
             year_2_deliverables="Secure NGDX data pipeline integration and multi-agency test runs.",
@@ -2227,15 +2305,15 @@ def bootstrap_metadata(db):
             harmonizes_pegif=False,
             harmonizes_cross_collaboration=False,
             harmonizes_scalability=True,
-            duration_start_year=2026,
-            duration_end_year=2028,
+            duration_start_year=start_year,
+            duration_end_year=end_year,
             annual_deliverables={
                 "Year 1": "Procurement and deployment of 10 enterprise laptops and initial rollout of 60 office productivity cloud licenses.",
                 "Year 2": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
                 "Year 3": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
-                "2026": "Procurement and deployment of 10 enterprise laptops and initial rollout of 60 office productivity cloud licenses.",
-                "2027": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
-                "2028": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses."
+                y1_str: "Procurement and deployment of 10 enterprise laptops and initial rollout of 60 office productivity cloud licenses.",
+                y2_str: "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
+                y3_str: "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses."
             },
             year_1_deliverables="Procurement and deployment of 10 enterprise laptops and initial rollout of 60 office productivity cloud licenses.",
             year_2_deliverables="Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
@@ -2270,15 +2348,15 @@ def bootstrap_metadata(db):
             harmonizes_pegif=True,
             harmonizes_cross_collaboration=False,
             harmonizes_scalability=True,
-            duration_start_year=2026,
-            duration_end_year=2028,
+            duration_start_year=start_year,
+            duration_end_year=end_year,
             annual_deliverables={
                 "Year 1": "GovCloud DR standby environment activation and initial database replication configuration.",
                 "Year 2": "Continuation of GovCloud standby subscription and execution of annual failover drill.",
                 "Year 3": "Continuation of GovCloud standby subscription and failover verification.",
-                "2026": "GovCloud DR standby environment activation and initial database replication configuration.",
-                "2027": "Continuation of GovCloud standby subscription and execution of annual failover drill.",
-                "2028": "Continuation of GovCloud standby subscription and failover verification."
+                y1_str: "GovCloud DR standby environment activation and initial database replication configuration.",
+                y2_str: "Continuation of GovCloud standby subscription and execution of annual failover drill.",
+                y3_str: "Continuation of GovCloud standby subscription and failover verification."
             },
             year_1_deliverables="GovCloud DR standby environment activation and initial database replication configuration.",
             year_2_deliverables="Continuation of GovCloud standby subscription and execution of annual failover drill.",
@@ -2314,7 +2392,7 @@ def bootstrap_metadata(db):
             "indicator": "Percentage of citizen services adopting online digital processing modules",
             "baseline": "35%",
             "target": "100% adoption",
-            "annual_targets": {"2026": "50%", "2027": "80%", "2028": "100%"},
+            "annual_targets": {y1_str: "50%", y2_str: "80%", y3_str: "100%", "Year 1": "50%", "Year 2": "80%", "Year 3": "100%"},
             "collection_method": "Automated database audit logs",
             "responsibility": "Public Frontline Services and Operations Division"
         },
@@ -2325,7 +2403,7 @@ def bootstrap_metadata(db):
             "indicator": "Average public service transaction completion duration",
             "baseline": "3 working days",
             "target": "Under 15 minutes",
-            "annual_targets": {"2026": "1 working day", "2027": "2 hours", "2028": "Under 15 minutes"},
+            "annual_targets": {y1_str: "1 working day", y2_str: "2 hours", y3_str: "Under 15 minutes", "Year 1": "1 working day", "Year 2": "2 hours", "Year 3": "Under 15 minutes"},
             "collection_method": "Application APM analytics",
             "responsibility": "Information and Communications Technology Division (ICTD)"
         },
@@ -2336,7 +2414,7 @@ def bootstrap_metadata(db):
             "indicator": "PeGIF-compliant API endpoints deployed and registered on NGDX",
             "baseline": "0 endpoints",
             "target": "5 secure API gateways",
-            "annual_targets": {"2026": "1 gateway", "2027": "3 gateways", "2028": "5 gateways"},
+            "annual_targets": {y1_str: "1 gateway", y2_str: "3 gateways", y3_str: "5 gateways", "Year 1": "1 gateway", "Year 2": "3 gateways", "Year 3": "5 gateways"},
             "collection_method": "API gateway transaction audit logs",
             "responsibility": "Information and Communications Technology Division (ICTD)"
         },
@@ -2347,7 +2425,7 @@ def bootstrap_metadata(db):
             "indicator": "Percentage of administrative personnel equipped with compliant mobile workstations",
             "baseline": "40%",
             "target": "100%",
-            "annual_targets": {"2026": "65%", "2027": "85%", "2028": "100%"},
+            "annual_targets": {y1_str: "65%", y2_str: "85%", y3_str: "100%", "Year 1": "65%", "Year 2": "85%", "Year 3": "100%"},
             "collection_method": "Property and inventory asset audit reports",
             "responsibility": "Administrative and Financial Management Service"
         },
@@ -2358,7 +2436,7 @@ def bootstrap_metadata(db):
             "indicator": "GovCloud standby failover drill verification and uptime index",
             "baseline": "95.0% uptime",
             "target": "99.9% uptime with sub-4-hour RTO",
-            "annual_targets": {"2026": "99.0%", "2027": "99.5%", "2028": "99.9%"},
+            "annual_targets": {y1_str: "99.0%", y2_str: "99.5%", y3_str: "99.9%", "Year 1": "99.0%", "Year 2": "99.5%", "Year 3": "99.9%"},
             "collection_method": "GovCloud monitoring telemetry and annual DR drill audit logs",
             "responsibility": "Information and Communications Technology Division (ICTD)"
         }
@@ -2397,7 +2475,7 @@ def bootstrap_metadata(db):
             "expenditure_class": "Capital Outlay",
             "item_key": "laptop_enterprise",
             "unit_cost": Decimal("70000.00"),
-            "yearly_quantities": {"2026": 10, "2027": 5, "2028": 5},
+            "yearly_quantities": {y1_str: 10, y2_str: 5, y3_str: 5, "Year 1": 10, "Year 2": 5, "Year 3": 5},
             "justification": "Required enterprise mobile workstations for technical analysts managing core digital infrastructure.",
             "system_development_status": "N/A",
             "is_in_house_turnover": False,
@@ -2420,7 +2498,7 @@ def bootstrap_metadata(db):
             "expenditure_class": "Maintenance and Other Operating Expenses",
             "item_key": "office_suite_cloud",
             "unit_cost": Decimal("8500.00"),
-            "yearly_quantities": {"2026": 60, "2027": 60, "2028": 60},
+            "yearly_quantities": {y1_str: 60, y2_str: 60, y3_str: 60, "Year 1": 60, "Year 2": 60, "Year 3": 60},
             "justification": "Annual institutional productivity software licenses across administrative operational divisions.",
             "system_development_status": "N/A",
             "is_in_house_turnover": False,
@@ -2443,7 +2521,7 @@ def bootstrap_metadata(db):
             "expenditure_class": "Maintenance and Other Operating Expenses",
             "item_key": "other",
             "unit_cost": Decimal("1500000.00"),
-            "yearly_quantities": {"2026": 1, "2027": 1, "2028": 0},
+            "yearly_quantities": {y1_str: 1, y2_str: 1, y3_str: 0, "Year 1": 1, "Year 2": 1, "Year 3": 0},
             "justification": "Specialized cloud engineering contractor to execute microservices containerization and load testing.",
             "system_development_status": "For Enhancement",
             "is_in_house_turnover": False,
@@ -2466,7 +2544,7 @@ def bootstrap_metadata(db):
             "expenditure_class": "Maintenance and Other Operating Expenses",
             "item_key": "other",
             "unit_cost": Decimal("400000.00"),
-            "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1},
+            "yearly_quantities": {y1_str: 1, y2_str: 1, y3_str: 1, "Year 1": 1, "Year 2": 1, "Year 3": 1},
             "justification": "Specialized API consultant to implement and certify secure NGDX national gateways.",
             "system_development_status": "N/A",
             "is_in_house_turnover": False,
@@ -2489,7 +2567,7 @@ def bootstrap_metadata(db):
             "expenditure_class": "Maintenance and Other Operating Expenses",
             "item_key": "other",
             "unit_cost": Decimal("500000.00"),
-            "yearly_quantities": {"2026": 1, "2027": 1, "2028": 1},
+            "yearly_quantities": {y1_str: 1, y2_str: 1, y3_str: 1, "Year 1": 1, "Year 2": 1, "Year 3": 1},
             "justification": "Mandatory cloud standby failover instances ensuring sub-4-hour RTO for mission-critical portals.",
             "system_development_status": "N/A",
             "is_in_house_turnover": False,
@@ -2719,9 +2797,9 @@ def bootstrap_metadata(db):
     # -------------------------------------------------------------
     logger.info("Seeding departmental budget ceilings with annual allocations...")
     annual_alloc_default = {
-        "2026": {"capex": 8333333.33, "mooe": 5000000.00},
-        "2027": {"capex": 8333333.33, "mooe": 5000000.00},
-        "2028": {"capex": 8333333.34, "mooe": 5000000.00}
+        y1_str: {"capex": 8333333.33, "mooe": 5000000.00},
+        y2_str: {"capex": 8333333.33, "mooe": 5000000.00},
+        y3_str: {"capex": 8333333.34, "mooe": 5000000.00}
     }
     for d_name, d_inst in dept_instances.items():
         existing_ceiling = db.query(BudgetCeiling).filter(
@@ -2771,7 +2849,7 @@ def bootstrap_metadata(db):
     instructions_to_seed = [
         {"step_number": 1, "instruction_text": "Accomplish Part I (Agency Profile & Strategic Context) citing the specific enabling statutory charter or executive issuance."},
         {"step_number": 2, "instruction_text": "Audit and document Part II (Current ICT Assessment) ensuring that strategic concerns link directly to Organizational Outcomes (OO/MFO/SO)."},
-        {"step_number": 3, "instruction_text": "Establish Part III (Proposed ICT Strategy) ensuring Privacy Impact Assessments (PIA) are scheduled for all systems processing personal data."},
+        {"step_number": 3, "instruction_text": "Establish Part III (Proposed ICT Strategy) ensuring Privacy Impact Assessments (PIA) are scheduled for all systems processing personal data [1]."},
         {"step_number": 4, "instruction_text": "Enforce DBM Capitalization Thresholds and multi-year physical deployment targets under Part IV.A resource tables."},
         {"step_number": 5, "instruction_text": "Assert strict four-way mathematical parity across Part IV.B Summary of Investment tables (Grand Total B.1 == B.2 == B.3 == B.4)."}
     ]

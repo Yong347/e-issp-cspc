@@ -1,14 +1,18 @@
 // frontend/src/context/CycleContext.jsx
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { API_BASE_URL } from '../api/apiClient';
 
 const CycleContext = createContext(null);
 
 export function CycleProvider({ children }) {
-  const [activeCycle, setActiveCycleState] = useState("2026-2028");
-  const [planningYears, setPlanningYears] = useState([2026, 2027, 2028]);
-  const [fromYear, setFromYear] = useState(2026);
-  const [toYear, setToYear] = useState(2028);
+  // Dynamically derive current calendar year to eliminate static year hardcoding
+  const currentYear = useMemo(() => new Date().getFullYear(), []);
+
+  // Standard statutory 3-year horizon state: [Y1, Y2, Y3] where Y3 = Y1 + 2
+  const [activeCycle, setActiveCycleState] = useState(`${currentYear}-${currentYear + 2}`);
+  const [planningYears, setPlanningYears] = useState([currentYear, currentYear + 1, currentYear + 2]);
+  const [fromYear, setFromYear] = useState(currentYear);
+  const [toYear, setToYear] = useState(currentYear + 2);
 
   const [agencyName, setAgencyName] = useState(
     import.meta.env?.VITE_DEFAULT_AGENCY_NAME || 
@@ -24,52 +28,43 @@ export function CycleProvider({ children }) {
   const [cycleLoading, setCycleLoading] = useState(true);
 
   /**
-   * Computes an arbitrary sequence of fiscal years for any horizon span (1 to N years).
-   * Supports:
-   * - 1-Year Annual Update (e.g., "2028" -> [2028])
-   * - 2-Year Amendment (e.g., "2028-2029" -> [2028, 2029])
-   * - Standard 3-Year Cycle (e.g., "2026-2028" -> [2026, 2027, 2028])
-   * - 5-Year Strategic Horizon (e.g., "2028-2032" -> [2028, 2029, 2030, 2031, 2032])
+   * Enforces the statutory 3-year planning horizon constraint:
+   * End Year is strictly calculated as Start Year + 2.
+   * Horizon sequence is always [start, start + 1, start + 2].
    */
-  const computeYearsFromPeriod = (period, startHint = null, endHint = null) => {
-    if (!period) return { start: 2026, end: 2028, years: [2026, 2027, 2028] };
-
-    const parts = String(period).trim().split("-");
-    let start = startHint !== null && startHint !== undefined ? parseInt(startHint, 10) : parseInt(parts[0], 10);
-    let end = endHint !== null && endHint !== undefined 
-      ? parseInt(endHint, 10) 
-      : (parts.length > 1 ? parseInt(parts[1], 10) : start);
-
-    if (isNaN(start)) start = 2026;
-    if (isNaN(end)) end = start;
-
-    if (start > end) {
-      const temp = start;
-      start = end;
-      end = temp;
+  const compute3YearWindow = useCallback((startYearOrPeriod) => {
+    let start = currentYear;
+    if (typeof startYearOrPeriod === "number") {
+      start = startYearOrPeriod;
+    } else if (typeof startYearOrPeriod === "string") {
+      const parsed = parseInt(startYearOrPeriod.split("-")[0].trim(), 10);
+      if (!isNaN(parsed)) start = parsed;
     }
 
-    const years = [];
-    for (let y = start; y <= end; y++) {
-      years.push(y);
-    }
-
-    return { start, end, years };
-  };
+    const end = start + 2;
+    return {
+      period: `${start}-${end}`,
+      years: [start, start + 1, start + 2],
+      start,
+      end
+    };
+  }, [currentYear]);
 
   /**
-   * Dynamically sets the active cycle and recalculates the planning years sequence.
+   * Dynamically sets the active cycle and guarantees strict 3-year horizon alignment.
    */
-  const setActiveCycle = useCallback((period, customFrom = null, customTo = null) => {
+  const setActiveCycle = useCallback((periodOrStart, customFrom = null) => {
+    const startInput = customFrom !== null && customFrom !== undefined ? customFrom : periodOrStart;
+    const { period, years, start, end } = compute3YearWindow(startInput);
+
     setActiveCycleState(period);
-    const { start, end, years } = computeYearsFromPeriod(period, customFrom, customTo);
+    setPlanningYears(years);
     setFromYear(start);
     setToYear(end);
-    setPlanningYears(years);
-  }, []);
+  }, [compute3YearWindow]);
 
   /**
-   * Updates agency co-branding and seals, clearing values if null.
+   * Updates agency branding, seals, and executive leadership titles dynamically.
    */
   const setAgencyBranding = useCallback((branding) => {
     if (!branding) return;
@@ -82,6 +77,7 @@ export function CycleProvider({ children }) {
 
   /**
    * Fetches active cycle metadata, statutory period bounds, and agency seals from the backend.
+   * Auto-computes the 3-year window directly from the server response.
    */
   const fetchActiveCycle = useCallback(async () => {
     setCycleLoading(true);
@@ -89,16 +85,16 @@ export function CycleProvider({ children }) {
       const res = await fetch(`${API_BASE_URL}/api/auth/active-cycle`);
       if (res.ok) {
         const data = await res.json();
-        if (data.issp_period) {
-          setActiveCycleState(data.issp_period);
-          const { start, end, years } = computeYearsFromPeriod(
-            data.issp_period,
-            data.from_year,
-            data.to_year
-          );
+        if (data.issp_period || data.from_year) {
+          const start = parseInt(data.from_year, 10) || 
+                        parseInt(String(data.issp_period).split("-")[0], 10) || 
+                        currentYear;
+
+          const { period, years, end } = compute3YearWindow(start);
+          setActiveCycleState(period);
+          setPlanningYears(years);
           setFromYear(start);
           setToYear(end);
-          setPlanningYears(years);
         }
         if (data.agency_name) {
           setAgencyName(data.agency_name);
@@ -111,11 +107,11 @@ export function CycleProvider({ children }) {
         setBagongPilipinasLogoUrl(data.bagong_pilipinas_logo_url || null);
       }
     } catch (e) {
-      console.error("Failed to load active cycle and agency branding:", e);
+      console.warn("Could not load active cycle dynamically:", e);
     } finally {
       setCycleLoading(false);
     }
-  }, []);
+  }, [compute3YearWindow, currentYear]);
 
   useEffect(() => {
     fetchActiveCycle();

@@ -6,7 +6,7 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — CENTRAL UTILITIES & GOVERNANCE HELPERS
 Core Capabilities:
 - Document Security, Traversal Guards & Transparent Archive Key Resolution
 - Dialect-Agnostic GUID/UUID & Native JSON Sanitization for COA Audit Trails
-- Dynamic Planning Cycle & Horizon Arithmetic (1 to N-Year Elastic Horizon)
+- Dynamic Planning Cycle & Statutory 3-Year Horizon (Zero Hardcoding)
 - Compounded Multi-Year Annual Inflation Rate & Unit Cost Calculation
 - DBM Capitalization Thresholding & Dynamic UACS Accounting Engine
 - Annex 1 Hardware Obsolescence Quota & Anti-Loop Replacement Enforcement
@@ -270,13 +270,26 @@ def get_dict_from_payload(payload: Any) -> dict:
 
 
 # =========================================================================
-# 2. DYNAMIC PLANNING CYCLE & HORIZON UTILITIES (1 to N Years)
+# 2. DYNAMIC PLANNING CYCLE & STATUTORY 3-YEAR HORIZON UTILITIES
 # =========================================================================
+
+def get_default_dynamic_cycle() -> str:
+    """
+    Computes a statutory 3-year ISSP cycle starting from the current calendar year.
+    Example: 2027 -> '2027-2029'. Eliminates static hardcoded strings.
+    """
+    current_year = datetime.now(timezone.utc).year
+    return f"{current_year}-{current_year + 2}"
+
 
 def get_active_issp_period(db: Optional[Session] = None) -> str:
     """
     Queries the database for the active planning cycle configured by the Administrator.
-    Falls back to system settings, latest narrative cycle, or default settings if unset.
+    Priority:
+    1. Active MasterNarrative (is_active == True)
+    2. system_settings (key == 'issp_active_cycle')
+    3. Latest configured MasterNarrative
+    4. Dynamically calculated 3-year cycle from current calendar year
     """
     from app.database.models import MasterNarrative, SystemSetting
 
@@ -300,12 +313,12 @@ def get_active_issp_period(db: Optional[Session] = None) -> str:
             if setting_period and str(setting_period).strip():
                 return str(setting_period).strip()
 
-            latest_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
+            latest_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period_to.desc()).first()
             if latest_narrative and latest_narrative.issp_period:
                 return latest_narrative.issp_period
         except Exception as e:
             session.rollback()
-            logger.warning(f"Query check: Failed to fetch MasterNarrative issp_period: {str(e)}")
+            logger.debug(f"Query check: Failed to fetch active issp_period: {str(e)}")
         finally:
             if close_session:
                 try:
@@ -313,14 +326,13 @@ def get_active_issp_period(db: Optional[Session] = None) -> str:
                 except Exception:
                     pass
 
-    return getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
+    return getattr(settings, "DEFAULT_ISSP_CYCLE", None) or get_default_dynamic_cycle()
 
 
 def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = None) -> List[int]:
     """
-    Resolves the exact sequence of calendar years [start_year, ..., end_year]
-    for any configured cycle horizon (e.g., 2-year amendment, standard 3-year plan,
-    or 5-year strategic roadmap).
+    Resolves the exact sequence of calendar years [Y1, Y2, Y3] for the active statutory 3-year cycle.
+    Enforces start_year <= end_year and defaults dynamically if unconfigured.
     """
     start_year = None
     end_year = None
@@ -332,16 +344,17 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
             issp_period = getattr(narrative, "issp_period", None)
 
     if not start_year or not end_year:
-        period_str = str(issp_period or getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")).strip()
+        period_str = str(issp_period or get_active_issp_period()).strip()
         parts = period_str.split("-")
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             start_year = int(parts[0])
             end_year = int(parts[1])
         elif len(parts) == 1 and parts[0].isdigit():
             start_year = int(parts[0])
-            end_year = int(parts[0])
+            end_year = start_year + 2
         else:
-            start_year, end_year = 2026, 2028
+            current_year = datetime.now(timezone.utc).year
+            start_year, end_year = current_year, current_year + 2
 
     if start_year > end_year:
         start_year, end_year = end_year, start_year
@@ -352,7 +365,7 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
 def validate_active_years_alignment(db: Optional[Session], submitted_years: List[Any]) -> str:
     """
     Validates that the keys of a submitted year-by-year dictionary 
-    match the active planning period years exactly across any horizon span (1 to N years).
+    match the active planning period years exactly across the 3-year horizon.
     """
     from app.database.models import MasterNarrative
 
@@ -371,7 +384,7 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
         try:
             active_narrative = session.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
             if not active_narrative:
-                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
+                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period_to.desc()).first()
         except Exception as e:
             logger.debug(f"MasterNarrative query note in validate_active_years_alignment: {e}")
         finally:
@@ -381,7 +394,7 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
                 except Exception:
                     pass
 
-    target_period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
+    target_period = active_narrative.issp_period if active_narrative else get_active_issp_period(session)
     year_range = get_cycle_year_range(active_narrative, issp_period=target_period)
     expected_years = [str(y) for y in year_range]
     submitted_years_str = [str(y).strip() for y in submitted_years]
@@ -396,9 +409,11 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
 
 def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any], is_submitting: bool = False) -> Tuple[str, Dict[str, int]]:
     """
-    Standardizes physical target inputs across arbitrary planning horizons (1 to N years)
-    without zeroing out user data. Seamlessly parses calendar years ('2028'),
-    ordinal labels ('Year 1', 'year_1'), or integer indices ('1').
+    Standardizes physical target inputs across the statutory 3-year planning horizon without zeroing out user data.
+    Maps:
+      Year 1 -> Y_start
+      Year 2 -> Y_start + 1
+      Year 3 -> Y_start + 2
     Maintains both calendar year and ordinal keys in the returned dictionary for downstream compatibility.
     """
     from app.database.models import MasterNarrative
@@ -418,7 +433,7 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
         try:
             active_narrative = session.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
             if not active_narrative:
-                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period.desc()).first()
+                active_narrative = session.query(MasterNarrative).order_by(MasterNarrative.issp_period_to.desc()).first()
         except Exception as e:
             logger.debug(f"MasterNarrative lookup note in align_and_validate_years: {e}")
         finally:
@@ -428,10 +443,30 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 except Exception:
                     pass
 
-    period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
-    year_range = get_cycle_year_range(active_narrative, issp_period=period)
-    expected_years = [str(y) for y in year_range]
-    aligned_data = {year: 0 for year in expected_years}
+    if active_narrative:
+        start_y = active_narrative.issp_period_from or datetime.now(timezone.utc).year
+        period = active_narrative.issp_period
+    else:
+        period = get_active_issp_period(session)
+        try:
+            start_y = int(period.split("-")[0].strip())
+        except Exception:
+            start_y = datetime.now(timezone.utc).year
+
+    # Statutory 3-year sequence
+    y1_str = str(start_y)
+    y2_str = str(start_y + 1)
+    y3_str = str(start_y + 2)
+    expected_years = [y1_str, y2_str, y3_str]
+
+    aligned_data = {
+        y1_str: 0,
+        y2_str: 0,
+        y3_str: 0,
+        "Year 1": 0,
+        "Year 2": 0,
+        "Year 3": 0
+    }
     valid_mapped_keys = set()
 
     sanitized_input: Dict[str, int] = {}
@@ -444,29 +479,38 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 qty_val = 0
             sanitized_input[k_str] = max(0, qty_val)
 
-    # 1. Direct calendar year match (e.g. "2026", "2027", "2028")
-    for yr in expected_years:
-        if yr in sanitized_input:
-            aligned_data[yr] = sanitized_input[yr]
-            valid_mapped_keys.add(yr)
+    # 1. Direct calendar year matches
+    if y1_str in sanitized_input:
+        aligned_data[y1_str] = sanitized_input[y1_str]
+        valid_mapped_keys.add(y1_str)
+    if y2_str in sanitized_input:
+        aligned_data[y2_str] = sanitized_input[y2_str]
+        valid_mapped_keys.add(y2_str)
+    if y3_str in sanitized_input:
+        aligned_data[y3_str] = sanitized_input[y3_str]
+        valid_mapped_keys.add(y3_str)
 
-    # 2. Parse ordinal keys ("Year 1", "year 1", "year_1", "Y1", "1", etc.)
-    for k_str, qty in sanitized_input.items():
-        if k_str in valid_mapped_keys:
-            continue
-        digits = re.findall(r'\d+', k_str)
-        if digits:
-            num = int(digits[0])
-            # Check if it's a 4-digit calendar year in expected_years
-            if str(num) in expected_years:
-                aligned_data[str(num)] = qty
-                valid_mapped_keys.add(k_str)
-            # Check if it's a 1-based index (e.g., Year 1, Year 2)
-            elif 1 <= num <= len(expected_years):
-                target_yr = expected_years[num - 1]
-                if aligned_data[target_yr] == 0:
-                    aligned_data[target_yr] = qty
-                valid_mapped_keys.add(k_str)
+    # 2. Parse ordinal keys ("Year 1", "Year 2", "Year 3", "Y1", etc.) if calendar years were 0
+    if aligned_data[y1_str] == 0:
+        for k_alt in ["Year 1", "year 1", "year_1", "Y1", "1"]:
+            if k_alt in sanitized_input:
+                aligned_data[y1_str] = sanitized_input[k_alt]
+                valid_mapped_keys.add(k_alt)
+                break
+
+    if aligned_data[y2_str] == 0:
+        for k_alt in ["Year 2", "year 2", "year_2", "Y2", "2"]:
+            if k_alt in sanitized_input:
+                aligned_data[y2_str] = sanitized_input[k_alt]
+                valid_mapped_keys.add(k_alt)
+                break
+
+    if aligned_data[y3_str] == 0:
+        for k_alt in ["Year 3", "year 3", "year_3", "Y3", "3"]:
+            if k_alt in sanitized_input:
+                aligned_data[y3_str] = sanitized_input[k_alt]
+                valid_mapped_keys.add(k_alt)
+                break
 
     # 3. Fallback: Sequential 4-digit years matching
     submitted_4digit_years = sorted([int(d[0]) for d in [re.findall(r'^\d{4}$', k) for k in sanitized_input.keys()] if d])
@@ -477,15 +521,16 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 aligned_data[year] = sanitized_input.get(orig_key, 0)
                 valid_mapped_keys.add(orig_key)
 
-    # Mirror ordinal labels ('Year 1', 'Year 2', ...) for template and reporting engines
-    for idx, yr in enumerate(expected_years):
-        aligned_data[f"Year {idx + 1}"] = aligned_data.get(yr, 0)
+    # Mirror ordinal labels ('Year 1', 'Year 2', 'Year 3') for compilation templates
+    aligned_data["Year 1"] = aligned_data[y1_str]
+    aligned_data["Year 2"] = aligned_data[y2_str]
+    aligned_data["Year 3"] = aligned_data[y3_str]
 
     if is_submitting:
         if sanitized_input and not valid_mapped_keys and not any(k in expected_years for k in sanitized_input):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Validation Failed: Submitted years {list(sanitized_input.keys())} do not match active cycle {expected_years}."
+                detail=f"Validation Failed: Submitted years {list(sanitized_input.keys())} do not match active 3-year cycle {expected_years}."
             )
 
     return period, aligned_data
@@ -552,8 +597,7 @@ def get_inflation_rate_for_year(connection_or_db: Any, cal_year: int, start_year
     """
     Determines the inflation percentage multiplier for any specific calendar year.
     Year 1 (cal_year <= start_year) is unadjusted (0.00%).
-    Year 2+ retrieves the admin-configured percentage from system_settings with canonical DICT fallbacks.
-    Dynamically scales for horizons of 2, 3, 4, 5, or more years.
+    Year 2 (idx = 1) is 3.0% by standard, Year 3 (idx = 2) is 5.0% by standard.
     """
     if cal_year <= start_year:
         return Decimal("0.00")
@@ -566,7 +610,7 @@ def get_inflation_rate_for_year(connection_or_db: Any, cal_year: int, start_year
         if str(cal_year) in rates_map:
             rate_percent = Decimal(str(rates_map[str(cal_year)]))
         else:
-            # DICT Guidelines standard fallback: 3% for Y2, 5% for Y3, +2% compounding per year thereafter
+            # DICT Guidelines standard: 3% for Y2, 5% for Y3, +2% compounding per year thereafter
             idx = cal_year - start_year
             if idx == 1:
                 rate_percent = Decimal("3.0")
@@ -600,9 +644,9 @@ def get_adjusted_unit_cost_for_year(connection_or_db: Any, base_cost: Decimal, c
     return (base_dec * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-# =========================================================================
+# ==========================================================
 # 4. DYNAMIC CAPITALIZATION & UACS RESOLUTION
-# =========================================================================
+# ==========================================================
 
 def classify_uacs_and_expenditure(
     item_name: str,

@@ -9,6 +9,8 @@ import {
   activateCycle,
   resetCycle,
   evaluateLifecycleRollover,
+  configureThreeYearCycle,
+  archiveAndDeleteCycle,
   getHumanCapitals,
   createHumanCapital,
   updateHumanCapital,
@@ -134,6 +136,9 @@ export default function NarrativeManager() {
   const { activeCycle, fetchActiveCycle } = useCycle();
   const isMountedRef = useRef(true);
 
+  // Dynamic calendar year initialization
+  const currentCalendarYear = useMemo(() => new Date().getFullYear(), []);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -156,9 +161,10 @@ export default function NarrativeManager() {
   // Lifecycle Rollover Modal State
   const [rolloverModal, setRolloverModal] = useState({ isOpen: false, data: null });
 
-  // Tab 1: Dynamic Cycle & Scope State
-  const [startYear, setStartYear] = useState("2028");
-  const [endYear, setEndYear] = useState("2030");
+  // Tab 1: Dynamic Cycle & Scope State (Strict 3-Year Horizon: Start -> Start + 2)
+  const [startYear, setStartYear] = useState(String(currentCalendarYear));
+  const [endYear, setEndYear] = useState(String(currentCalendarYear + 2));
+  const [newStartYearInput, setNewStartYearInput] = useState(currentCalendarYear);
   const [isAmendment, setIsAmendment] = useState(false);
   const [amendmentNumber, setAmendmentNumber] = useState("1st");
 
@@ -318,6 +324,10 @@ export default function NarrativeManager() {
       if (parts.length === 2) {
         setStartYear(parts[0]);
         setEndYear(parts[1]);
+        const s = parseInt(parts[0], 10);
+        if (!isNaN(s)) {
+          setNewStartYearInput(s);
+        }
       }
     }
   }, [activeCycle]);
@@ -634,8 +644,8 @@ export default function NarrativeManager() {
     setSuccess(null);
     setSubmitting(true);
 
-    const safeStart = parseInt(startYear, 10) || 2028;
-    const safeEnd = parseInt(endYear, 10) || (safeStart + 2);
+    const safeStart = parseInt(startYear, 10) || currentCalendarYear;
+    const safeEnd = safeStart + 2; // Strict 3-Year Horizon Enforcement
     const { scope_choice, scope_json } = resolveScopePayload();
 
     const cleanCio = (cioName.trim() || "Chief Information Officer");
@@ -706,32 +716,81 @@ export default function NarrativeManager() {
     setSuccess(null);
 
     const start = parseInt(startYear, 10);
-    const end = parseInt(endYear, 10);
-
-    if (isNaN(start) || isNaN(end) || start > end) {
-      setError("Please specify valid planning years (Start Year <= End Year).");
+    if (isNaN(start) || start < 2020 || start > 2050) {
+      setError("Please specify a valid start year between 2020 and 2050.");
       return;
     }
 
-    const span = end - start + 1;
-    if (span < 1 || span > 20) {
-      setError(`ISSP planning horizons must span between 1 and 20 years (Current span: ${span} years).`);
-      return;
-    }
-
+    const end = start + 2; // Strict 3-Year Horizon Enforcement
     setSubmitting(true);
     const targetCycle = `${start}-${end}`;
 
     try {
       await activateCycle(token, targetCycle);
       if (isMountedRef.current) {
-        setSuccess(`Planning cycle updated and activated to: FY ${targetCycle} (${span}-Year Horizon)`);
+        setSuccess(`Planning cycle updated and activated to: FY ${targetCycle} (Statutory 3-Year Horizon)`);
       }
       await fetchActiveCycle();
     } catch (err) {
       if (isMountedRef.current) setError(err.message || "Failed to activate planning cycle.");
     } finally {
       if (isMountedRef.current) setSubmitting(false);
+    }
+  };
+
+  // 1. ADD / CONFIGURE 3-YEAR PLAN HANDLER
+  const handleConfigure3YearCycle = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    setSubmitting(true);
+    try {
+      const res = await configureThreeYearCycle(token, newStartYearInput, agencyName);
+      if (isMountedRef.current) {
+        setSuccess(res.message || `Activated statutory 3-year cycle starting ${newStartYearInput}.`);
+      }
+      if (fetchActiveCycle) await fetchActiveCycle();
+      loadAllData();
+    } catch (err) {
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to configure statutory 3-year cycle.");
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
+    }
+  };
+
+  // 2. ARCHIVE & DELETE ACTIVE PLAN HANDLER
+  const handleArchiveAndDeleteCurrentPlan = async () => {
+    const confirmMsg = 
+      `CRITICAL ACTION:\n` +
+      `Are you sure you want to archive and delete cycle '${activeCycle}'?\n\n` +
+      `1. A final certified PDF and Word (.docx) file will be compiled and permanently saved to the Document Archive.\n` +
+      `2. All draft line items, systems, and metrics for this cycle will be removed.\n` +
+      `3. The system will activate the next available plan.`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    setSubmitting(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await archiveAndDeleteCycle(token, activeCycle, "Archived by Admin request");
+      if (isMountedRef.current) {
+        setSuccess(res.message || `Cycle '${activeCycle}' successfully archived and removed.`);
+      }
+      if (fetchActiveCycle) await fetchActiveCycle();
+      loadAllData();
+    } catch (err) {
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to archive and delete plan.");
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -931,7 +990,7 @@ export default function NarrativeManager() {
       await deleteStakeholder(token, id);
       fetchStakeholders();
     } catch (err) { 
-      if (isMountedRef.current) setError(err.message || "Failed to delete stakeholder record."); 
+      if (isMountedRef.current) setError(err.message || "Failed to remove stakeholder group."); 
     }
   };
 
@@ -1001,7 +1060,7 @@ export default function NarrativeManager() {
     }
   };
 
-  const calculatedSpan = (parseInt(endYear, 10) || 2030) - (parseInt(startYear, 10) || 2028) + 1;
+  const calculatedSpan = 3; // Statutory 3-year horizon enforced
   const totalIT = humanCapitals.reduce((acc, h) => acc + (h.it_positions_count || 0), 0);
   const totalNonIT = humanCapitals.reduce((acc, h) => acc + (h.non_it_positions_count || 0), 0);
   const totalMale = humanCapitals.reduce((acc, h) => acc + (h.male_count || 0), 0);
@@ -1091,6 +1150,52 @@ export default function NarrativeManager() {
           {/* TAB 1: PLANNING SCOPE & DICT COVER PAGE */}
           {activeTab === "cycle" && (
             <div className="space-y-6 animate-fadeIn">
+              
+              {/* 1. Add / Configure Statutory 3-Year Plan */}
+              <div className="p-5 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
+                <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-2">
+                  <div>
+                    <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                      Activate New Statutory 3-Year Planning Cycle
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Enter the start year. The system automatically enforces a 3-year horizon ({newStartYearInput} &rarr; {parseInt(newStartYearInput, 10) + 2}).
+                    </p>
+                  </div>
+                  <span className="font-mono font-bold text-blue-600 text-xs">
+                    FY {newStartYearInput}-{parseInt(newStartYearInput, 10) + 2}
+                  </span>
+                </div>
+
+                <form onSubmit={handleConfigure3YearCycle} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Start Year:</label>
+                    <input
+                      type="number"
+                      min="2020"
+                      max="2050"
+                      required
+                      value={newStartYearInput}
+                      onChange={e => setNewStartYearInput(parseInt(e.target.value, 10) || currentCalendarYear)}
+                      className="w-24 p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-center font-mono font-bold text-slate-900 dark:text-white"
+                    />
+                  </div>
+
+                  <div className="text-[11px] text-slate-600 dark:text-slate-400 font-mono">
+                    &rarr; End Year auto-set to: <strong>{parseInt(newStartYearInput, 10) + 2}</strong>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="sm:ml-auto px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs cursor-pointer shadow-sm transition-all"
+                  >
+                    Activate 3-Year Cycle
+                  </button>
+                </form>
+              </div>
+
+              {/* 2. Main Narrative Parameters Form */}
               <form onSubmit={handleSaveNarratives} className="space-y-4">
                 <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5 font-serif">
                   <CalendarRange className="w-4 h-4 text-blue-600 dark:text-blue-400" />
@@ -1301,21 +1406,37 @@ export default function NarrativeManager() {
                   <div>
                     <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Start Fiscal Year</label>
                     <input
-                      type="number" required value={startYear} onChange={e => setStartYear(e.target.value)}
+                      type="number" 
+                      required 
+                      value={startYear} 
+                      onChange={e => {
+                        const val = e.target.value;
+                        setStartYear(val);
+                        const s = parseInt(val, 10);
+                        if (!isNaN(s)) {
+                          setEndYear(String(s + 2));
+                          setNewStartYearInput(s);
+                        }
+                      }}
                       className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-center font-bold text-sm outline-none"
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">End Fiscal Year</label>
+                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">End Fiscal Year (Auto-Computed: Start + 2)</label>
                     <input
-                      type="number" required value={endYear} onChange={e => setEndYear(e.target.value)}
-                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-center font-bold text-sm outline-none"
+                      type="number" 
+                      required 
+                      readOnly
+                      value={endYear} 
+                      className="w-full p-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-300 font-mono text-center font-bold text-sm outline-none cursor-not-allowed"
                     />
                   </div>
                 </div>
 
                 <div className="p-3 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl flex justify-between items-center text-[10px]">
-                  <span className="text-slate-600 dark:text-slate-400">Planning Horizon: <strong className="text-blue-600 dark:text-blue-400 font-mono">{calculatedSpan}-Year Strategic Cycle</strong></span>
+                  <span className="text-slate-600 dark:text-slate-400">
+                    Planning Horizon: <strong className="text-blue-600 dark:text-blue-400 font-mono">Statutory 3-Year Strategic Cycle (FY {startYear}&ndash;{endYear})</strong>
+                  </span>
                   <button
                     type="button" onClick={handleActivateCycle} disabled={submitting}
                     className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-white font-bold cursor-pointer transition-colors shadow-xs"
@@ -1332,6 +1453,7 @@ export default function NarrativeManager() {
                 </button>
               </form>
 
+              {/* 3. Automated Cycle Rollover & Official Archival Engine */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
                 <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-2">
                   <div className="flex items-center gap-2 text-slate-900 dark:text-white font-bold font-serif">
@@ -1367,21 +1489,48 @@ export default function NarrativeManager() {
                 </div>
               </div>
 
-              <div className="p-4 bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/40 rounded-2xl space-y-2 shadow-xs">
-                <div className="flex items-center gap-2 text-rose-700 dark:text-rose-400 font-bold">
-                  <ShieldAlert className="w-4 h-4 text-rose-600 dark:text-rose-400" />
-                  <span>Cycle Redefinition &amp; Safe-Reset</span>
+              {/* 4. Pre-Deletion Archival and Permanent Deletion Action */}
+              <div className="p-5 bg-rose-50/70 dark:bg-rose-955/20 border border-rose-300 dark:border-rose-900/60 rounded-2xl space-y-3 shadow-xs">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 text-rose-800 dark:text-rose-300 font-bold text-xs">
+                      <ShieldAlert className="w-4 h-4 text-rose-600" />
+                      <span>Archive &amp; Delete Active Planning Cycle (FY {activeCycle})</span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed max-w-2xl">
+                      This compiles the completed <strong>PDF</strong> and <strong>Word (.docx)</strong> documents for cycle <strong>FY {activeCycle}</strong> and permanently stores them in the Document Archive before cleaning the database.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleArchiveAndDeleteCurrentPlan}
+                    disabled={submitting}
+                    className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-sm transition-all shrink-0"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>Archive &amp; Delete Plan</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 5. Safe Draft Reset Option */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-2xl space-y-2 shadow-xs">
+                <div className="flex items-center gap-2 text-slate-800 dark:text-slate-200 font-bold">
+                  <RotateCcw className="w-4 h-4 text-amber-500" />
+                  <span>Cycle Drafts Redefinition &amp; Safe-Reset</span>
                 </div>
                 <p className="text-slate-500 dark:text-slate-400 text-xs leading-relaxed">
-                  Resetting the active cycle purges unapproved proposals and reinitializes clean planning bounds for '{activeCycle}'.
+                  Resetting the active cycle purges unapproved proposals and reinitializes clean planning bounds for '{activeCycle}' without archiving documents.
                 </p>
                 <button
                   type="button" onClick={handleResetCycle} disabled={submitting}
-                  className="px-3 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors shadow-sm"
+                  className="px-3 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 rounded-xl font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
                 >
-                  <Trash2 className="w-3.5 h-3.5" /> <span>Execute Safe Reset</span>
+                  <RotateCcw className="w-3.5 h-3.5" /> <span>Execute Safe Reset</span>
                 </button>
               </div>
+
             </div>
           )}
 
