@@ -296,28 +296,21 @@ def render_schematic_page(
 
 
 def resolve_proposal_category(itm: Proposal) -> str:
-    proj = itm.project_rel
+    """
+    In DICT ISSP methodology, categorization is strictly governed by the 
+    parent ICT Project or designated standalone operational bucket.
+    """
+    proj = getattr(itm, "project_rel", None)
     if proj and getattr(proj, "project_category", None):
         return str(getattr(proj.project_category, "value", proj.project_category)).strip()
     
+    strat = str(getattr(itm.strategic_category, "value", itm.strategic_category or "")).strip()
+    if strat:
+        return strat
+
     cat_lower = str(getattr(itm.category, "value", itm.category or "")).strip().lower()
-    name_lower = (itm.item_name or "").strip().lower()
-    strat_lower = str(getattr(itm.strategic_category, "value", itm.strategic_category or "")).strip().lower()
-
-    if cat_lower == "subscription" or any(k in name_lower for k in ["subscription", "cloud license", "saas", "cloud standby"]):
+    if cat_lower in ["subscription", "services"]:
         return "Continuing Costs/Expenses"
-    
-    if strat_lower in ["continuing costs/expenses", "continuing costs"]:
-        return "Continuing Costs/Expenses"
-
-    if cat_lower in ["services"] or any(k in name_lower for k in ["contractor", "migration", "development", "consulting"]):
-        return "Internal ICT Projects"
-
-    if strat_lower in ["internal ict projects", "internal ict project"]:
-        return "Internal ICT Projects"
-
-    if strat_lower in ["cross-agency ict projects", "cross-agency ict project"]:
-        return "Cross-Agency ICT Projects"
 
     return "Office Productivity"
 
@@ -414,23 +407,18 @@ def compile_issp_document(self, metadata: dict):
         items = []
         for itm in raw_approved_items:
             resolved_cat = resolve_proposal_category(itm)
-            is_proj_cat = resolved_cat in ["Internal ICT Projects", "Cross-Agency ICT Projects"] or "project" in resolved_cat.lower()
-            
-            if is_proj_cat:
-                if itm.project_id is not None:
-                    items.append(itm)
-                else:
-                    continue
+            if itm.project_id is not None:
+                items.append(itm)
             else:
                 is_capital_outlay = (
                     Decimal(str(itm.total_cost or 0)) >= cap_threshold 
                     or "(co)" in str(itm.uacs_object_code or "").lower()
                     or "capital" in str(getattr(itm.expenditure_class, 'value', itm.expenditure_class or '')).lower()
                 )
-                if is_capital_outlay and itm.project_id is None:
+                is_project_cat = "project" in resolved_cat.lower() or resolved_cat in ["Internal ICT Projects", "Cross-Agency ICT Projects"]
+                if is_capital_outlay or is_project_cat:
                     continue
-                else:
-                    items.append(itm)
+                items.append(itm)
 
         inventory = db.query(ExistingInventory).filter(
             or_(
@@ -870,20 +858,25 @@ def generate_complete_issp_html(
     running_header_logo = agency_logo
 
     agency_name_clean = clean_text(narrative.agency_name, settings.DEFAULT_AGENCY_NAME)
-    default_web = getattr(settings, "DEFAULT_AGENCY_WEBSITE", "www.cspc.edu.ph")
+    default_web = getattr(settings, "DEFAULT_AGENCY_WEBSITE", "https://agency.gov.ph")
     agency_website_clean = clean_text(narrative.agency_website_url, default_web).replace("https://", "").replace("http://", "").rstrip("/")
-    default_contact = getattr(settings, "DEFAULT_AGENCY_CONTACT", "(054) 288-2572")
+    default_contact = getattr(settings, "DEFAULT_AGENCY_CONTACT", "")
 
     standalone_metrics = [m for m in performance_metrics if not m.project_id]
 
-    if " POLYTECHNIC" in agency_name_clean.upper():
-        agency_header_name = agency_name_clean.upper().replace(" POLYTECHNIC", "\A ")
-    elif " STATE " in agency_name_clean.upper():
-        agency_header_name = agency_name_clean.upper().replace(" STATE ", "\A ")
-    elif " UNIVERSITY" in agency_name_clean.upper():
-        agency_header_name = agency_name_clean.upper().replace(" UNIVERSITY", "\A ")
-    else:
-        agency_header_name = agency_name_clean.upper()
+    # Non-destructive running header title formatting
+    agency_header_name = agency_name_clean.upper()
+
+    # Dynamic Signatory Names with non-hardcoded fallbacks
+    cio_display_name = clean_text(
+        getattr(narrative, 'signatory_prepared_by', None) or getattr(narrative, 'cio_name', None), 
+        "CHIEF INFORMATION OFFICER"
+    ).upper()
+
+    head_display_name = clean_text(
+        getattr(narrative, 'signatory_approved_by', None) or getattr(narrative, 'head_of_agency_name', None), 
+        clean_text(getattr(narrative, 'agency_head_position', None), getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "HEAD OF AGENCY"))
+    ).upper()
 
     css = f"""
     <style>
@@ -896,30 +889,30 @@ def generate_complete_issp_html(
                 font-size: 8.5pt;
                 font-weight: bold;
                 color: #0f172a;
-                white-space: pre-wrap;
+                white-space: nowrap;
                 text-align: left;
                 vertical-align: middle;
                 background-image: url("{running_header_logo}");
-                background-size: 36px 36px;
+                background-size: 32px 32px;
                 background-repeat: no-repeat;
                 background-position: left center;
-                padding-left: 44px;
+                padding-left: 40px;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 38px;
+                height: 36px;
             }}
             @top-right {{
                 content: "INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 9.5pt;
+                font-size: 8.5pt;
                 font-weight: bold;
                 color: #0f172a;
                 text-align: right;
                 vertical-align: middle;
-                white-space: pre-wrap;
+                white-space: nowrap;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 38px;
+                height: 36px;
             }}
             @bottom-right {{
                 content: "Page " counter(page);
@@ -985,30 +978,30 @@ def generate_complete_issp_html(
                 font-size: 8.5pt;
                 font-weight: bold;
                 color: #0f172a;
-                white-space: pre-wrap;
+                white-space: nowrap;
                 text-align: left;
                 vertical-align: middle;
                 background-image: url("{running_header_logo}");
-                background-size: 36px 36px;
+                background-size: 32px 32px;
                 background-repeat: no-repeat;
                 background-position: left center;
-                padding-left: 44px;
+                padding-left: 40px;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 38px;
+                height: 36px;
             }}
             @top-right {{
                 content: "INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 9.5pt;
+                font-size: 8.5pt;
                 font-weight: bold;
                 color: #0f172a;
                 text-align: right;
                 vertical-align: middle;
-                white-space: pre-wrap;
+                white-space: nowrap;
                 padding-bottom: 4px;
                 border-bottom: 1.5px solid #cbd5e1;
-                height: 38px;
+                height: 36px;
             }}
             @bottom-right {{
                 content: "Page " counter(page);
@@ -1226,18 +1219,6 @@ def generate_complete_issp_html(
     is_amend = bool(getattr(narrative, "is_amendment", False))
     amend_num = getattr(narrative, "amendment_number", "1st") or "1st"
 
-    raw_cio = clean_text(getattr(narrative, 'cio_name', None) or getattr(narrative, 'signatory_prepared_by', ''))
-    if not raw_cio or raw_cio.lower() in ["chief information officer", "cio", "none", "null", "undefined"]:
-        cio_display_name = "REY T. CORTEZ, MIT"
-    else:
-        cio_display_name = raw_cio.upper()
-
-    raw_head = clean_text(getattr(narrative, 'head_of_agency_name', None) or getattr(narrative, 'signatory_approved_by', ''))
-    if not raw_head or raw_head.lower() in ["head of agency", "agency head", "college president", "president", "none", "null", "undefined"]:
-        head_display_name = "AMADO A. OLIVA JR, PhD."
-    else:
-        head_display_name = raw_head.upper()
-
     is_dept_wide = "department" in raw_scope or not raw_scope
     is_dept_co = ("central office" in raw_scope or "head office" in raw_scope) and not is_dept_wide
     is_dept_co_only = is_dept_co and not has_reg and not has_bur
@@ -1253,7 +1234,7 @@ def generate_complete_issp_html(
             <p style="font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1.2px; margin: 0; color: #475569; line-height: 1.4; font-family: sans-serif;">
                 Republic of the Philippines<br/>
                 <strong style="color: #0f172a; font-size: 14pt; font-family: 'Palatino Linotype', serif;">{agency_name_clean.upper()}</strong><br/>
-                <span style="font-size: 9pt; color: #64748b;">{clean_text(getattr(narrative, 'agency_address', None), 'Nabua, Camarines Sur')}</span>
+                <span style="font-size: 9pt; color: #64748b;">{clean_text(getattr(narrative, 'agency_address', None), 'Central Office, Philippines')}</span>
             </p>
         </div>
 
@@ -2298,7 +2279,7 @@ def generate_complete_issp_html(
     # --- 8. PART IV.B: SUMMARY OF INVESTMENTS ---
     def render_matrix_table(title: str, matrix_dict: dict, section_id: str = ""):
         col_headers_th = "".join(f'<th class="right font-mono">{y}</th>' for y in year_headers)
-        total_header_label = f"{len(years_range)}-Year Total (PHP)" if len(years_range) > 0 else "Total Amount (PHP)"
+        total_header_label = f"{len(years_range)}-YEAR TOTAL (PHP)" if len(years_range) > 0 else "TOTAL AMOUNT (PHP)"
         is_uacs_table = "B.4" in title or "OBJECT OF EXPENDITURE" in title.upper()
 
         table_rows = ""

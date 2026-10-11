@@ -2848,21 +2848,21 @@ export default function FrameworkChecklists() {
                   <label className="text-[9.5px] uppercase font-bold text-slate-500">MTPD (Hours)</label>
                   <input
                     type="number" min="1" required value={biaForm.mtpd_hours} onChange={e => setBiaForm({ ...biaForm, mtpd_hours: e.target.value })}
-                    className="w-full p-2 text-center bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg font-bold"
+                    className="w-full p-2 text-center bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg font-bold"
                   />
                 </div>
                 <div className="space-y-1">
                   <label className="text-[9.5px] uppercase font-bold text-blue-600">RTO (Hours)</label>
                   <input
                     type="number" min="0" required value={biaForm.rto_hours} onChange={e => setBiaForm({ ...biaForm, rto_hours: e.target.value })}
-                    className="w-full p-2 text-center bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg font-bold text-blue-600"
+                    className="w-full p-2 text-center bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg font-bold text-blue-600"
                   />
                 </div>
                 <div className="space-y-1">
                   <label className="text-[9.5px] uppercase font-bold text-emerald-600">RPO (Hours)</label>
                   <input
                     type="number" min="0" required value={biaForm.rpo_hours} onChange={e => setBiaForm({ ...biaForm, rpo_hours: e.target.value })}
-                    className="w-full p-2 text-center bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg font-bold text-emerald-600"
+                    className="w-full p-2 text-center bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg font-bold text-emerald-600"
                   />
                 </div>
               </div>
@@ -2913,7 +2913,7 @@ export default function FrameworkChecklists() {
                 <input
                   type="text" required value={drMetricForm.indicator} onChange={e => setDrMetricForm({ ...drMetricForm, indicator: e.target.value })}
                   placeholder="e.g. System Availability, RTO Compliance Rate, Backup Success"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl font-semibold text-slate-900 dark:text-white"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl font-semibold text-slate-900 dark:text-white"
                 />
               </div>
 
@@ -2922,7 +2922,7 @@ export default function FrameworkChecklists() {
                 <input
                   type="text" required value={drMetricForm.target_metric} onChange={e => setDrMetricForm({ ...drMetricForm, target_metric: e.target.value })}
                   placeholder="e.g. 99.9% Uptime, Recovery within 4 hours, 100% daily snapshots"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl font-mono text-emerald-600 font-bold"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl font-mono text-emerald-600 font-bold"
                 />
               </div>
 
@@ -2959,7 +2959,7 @@ export default function FrameworkChecklists() {
                 <input
                   type="text" required value={stakeholderForm.stakeholder_group} onChange={e => setStakeholderForm({ ...stakeholderForm, stakeholder_group: e.target.value })}
                   placeholder="e.g. General Citizens and Service Applicants"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl font-semibold"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl font-semibold text-slate-900 dark:text-white"
                 />
               </div>
 
@@ -2968,7 +2968,7 @@ export default function FrameworkChecklists() {
                 <textarea
                   rows={2} value={stakeholderForm.transaction_processed_incoming} onChange={e => setStakeholderForm({ ...stakeholderForm, transaction_processed_incoming: e.target.value })}
                   placeholder="e.g. Online service inquiries, application submissions, and electronic fee settlement"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl resize-none text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl resize-none text-xs text-slate-900 dark:text-white"
                 />
               </div>
 
@@ -2985,7 +2985,7 @@ export default function FrameworkChecklists() {
                         setStakeholderForm({ ...stakeholderForm, complexity_incoming: e.target.value });
                       }
                     }}
-                    className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg cursor-pointer"
+                    className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg cursor-pointer text-slate-900 dark:text-white"
                   >
                     {COMPLEXITY_PRESETS.map(p => (
                       <option key={p} value={p}>{p}</option>
@@ -2997,7 +2997,7 @@ export default function FrameworkChecklists() {
                     value={stakeholderForm.complexity_incoming}
                     onChange={e => setStakeholderForm({ ...stakeholderForm, complexity_incoming: e.target.value })}
                     placeholder="e.g. Simple to Complex, Highly Technical..."
-                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-xs"
+                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-xs text-slate-900 dark:text-white"
                   />
                 </div>
               </div>
@@ -3007,7 +3007,7 @@ export default function FrameworkChecklists() {
                 <textarea
                   rows={2} value={stakeholderForm.transaction_processed_outgoing} onChange={e => setStakeholderForm({ ...stakeholderForm, transaction_processed_outgoing: e.target.value })}
                   placeholder="e.g. Official E-Certificates, clearances, regulatory statements, and receipts"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl resize-none text-xs"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl resize-none text-xs text-slate-900 dark:text-white"
                 />
               </div>
 
@@ -3024,7 +3024,7 @@ export default function FrameworkChecklists() {
                         setStakeholderForm({ ...stakeholderForm, complexity_outgoing: e.target.value });
                       }
                     }}
-                    className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg cursor-pointer"
+                    className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg cursor-pointer text-slate-900 dark:text-white"
                   >
                     {COMPLEXITY_PRESETS.map(p => (
                       <option key={p} value={p}>{p}</option>
@@ -3036,7 +3036,7 @@ export default function FrameworkChecklists() {
                     value={stakeholderForm.complexity_outgoing}
                     onChange={e => setStakeholderForm({ ...stakeholderForm, complexity_outgoing: e.target.value })}
                     placeholder="e.g. Simple, Simple to Highly Technical..."
-                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-xs"
+                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-xs text-slate-900 dark:text-white"
                   />
                 </div>
               </div>
@@ -3082,7 +3082,7 @@ export default function FrameworkChecklists() {
                   value={devStrategyForm.code}
                   onChange={e => setDevStrategyForm({ ...devStrategyForm, code: e.target.value })}
                   placeholder="e.g. SAAS_HYBRID or CLOUD_NATIVE"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl font-mono uppercase text-slate-900 dark:text-white outline-none focus:border-blue-500"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl font-mono uppercase text-slate-900 dark:text-white outline-none focus:border-blue-500"
                 />
               </div>
 
@@ -3094,7 +3094,7 @@ export default function FrameworkChecklists() {
                   value={devStrategyForm.display_name}
                   onChange={e => setDevStrategyForm({ ...devStrategyForm, display_name: e.target.value })}
                   placeholder="e.g. Software-as-a-Service (SaaS) Hybrid Integration"
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl font-semibold text-slate-900 dark:text-white outline-none focus:border-blue-500"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl font-semibold text-slate-900 dark:text-white outline-none focus:border-blue-500"
                 />
               </div>
 
@@ -3105,7 +3105,7 @@ export default function FrameworkChecklists() {
                   value={devStrategyForm.description}
                   onChange={e => setDevStrategyForm({ ...devStrategyForm, description: e.target.value })}
                   placeholder="Provide scope guidelines on when this technical development strategy is utilized..."
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none resize-none"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none resize-none text-xs"
                 />
               </div>
 

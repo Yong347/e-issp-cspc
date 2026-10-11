@@ -347,6 +347,26 @@ def clean_uacs_title(uacs_str: str) -> str:
     return cleaned or val
 
 
+def resolve_proposal_category(itm: Any) -> str:
+    """
+    In DICT ISSP methodology, categorization is strictly governed by the 
+    parent ICT Project or designated standalone operational bucket.
+    """
+    proj = getattr(itm, "project_rel", None)
+    if proj and getattr(proj, "project_category", None):
+        return clean_str(getattr(proj.project_category, "value", proj.project_category))
+    
+    strat = clean_str(getattr(itm, "strategic_category", ""))
+    if strat:
+        return strat
+
+    cat_lower = clean_str(getattr(itm, "category", "")).lower()
+    if cat_lower in ["subscription", "services"]:
+        return "Continuing Costs/Expenses"
+
+    return "Office Productivity"
+
+
 def render_schematic_box(doc, title: str, subtitle: str, section_label: str, img_url: Optional[str] = None):
     """
     Renders an official schematic exhibit in Word format.
@@ -796,7 +816,7 @@ def create_issp_docx(
     sec1.footer.paragraphs[0].text = ""
 
     issp_period = clean_str(narrative.issp_period, "2026-2028")
-    agency_name = clean_str(narrative.agency_name, "National Government Agency")
+    agency_name = clean_str(narrative.agency_name, getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency"))
     
     start_year = getattr(narrative, "issp_period_from", None)
     end_year = getattr(narrative, "issp_period_to", None)
@@ -815,20 +835,14 @@ def create_issp_docx(
             
     planning_years = list(range(start_year, end_year + 1))
 
-    # Resolve Signatories cleanly (preserving actual human names)
+    # Resolve Signatories cleanly (preserving user-entered names without hardcoded human names)
     raw_cio = clean_str(getattr(narrative, "signatory_prepared_by", None) or getattr(narrative, "cio_name", None))
-    if not raw_cio or raw_cio.lower() in ["chief information officer", "cio", "none", "null"]:
-        cio_name = "REY T. CORTEZ, MIT"
-    else:
-        cio_name = raw_cio
+    cio_name = raw_cio if raw_cio else "CHIEF INFORMATION OFFICER"
 
     raw_head = clean_str(getattr(narrative, "signatory_approved_by", None) or getattr(narrative, "head_of_agency_name", None))
-    if not raw_head or raw_head.lower() in ["head of agency", "agency head", "college president", "president", "none", "null"]:
-        head_name = "AMADO A. OLIVA JR, PHD."
-    else:
-        head_name = raw_head
+    head_name = raw_head if raw_head else clean_str(getattr(narrative, "agency_head_position", None), getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency")).upper()
 
-    head_title = clean_str(getattr(narrative, "agency_head_position", None), "College President")
+    head_title = clean_str(getattr(narrative, "agency_head_position", None), getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency"))
 
     # Resolve relationships defensively if optional lists are omitted
     hc_list = human_capitals or getattr(narrative, "human_capitals_relation", []) or []
@@ -889,10 +903,12 @@ def create_issp_docx(
     r_agency.font.bold = True
     r_agency.font.color.rgb = RGBColor(15, 23, 42)
 
-    r_loc = p_rep.add_run(f"{clean_str(getattr(narrative, 'agency_address', None), 'Nabua, Camarines Sur')}\n")
-    r_loc.font.name = "Palatino Linotype"
-    r_loc.font.size = Pt(8.0)
-    r_loc.font.color.rgb = RGBColor(100, 116, 139)
+    agency_addr = clean_str(getattr(narrative, 'agency_address', None), "")
+    if agency_addr:
+        r_loc = p_rep.add_run(f"{agency_addr}\n")
+        r_loc.font.name = "Palatino Linotype"
+        r_loc.font.size = Pt(8.0)
+        r_loc.font.color.rgb = RGBColor(100, 116, 139)
 
     r_plan = p_rep.add_run("INFORMATION SYSTEMS STRATEGIC PLAN (ISSP)\n")
     r_plan.font.name = "Palatino Linotype"
@@ -1098,20 +1114,13 @@ def create_issp_docx(
         except Exception as e:
             logger.debug(f"Running header logo add note: {e}")
 
-    # Column 1: Institutional Name across two balanced lines
+    # Column 1: Institutional Name (Full name preserved intact; NO string replacement or word dropping)
     agency_clean_str = clean_str(
         narrative.agency_name, 
-        getattr(settings, "DEFAULT_AGENCY_NAME", "CAMARINES SUR POLYTECHNIC COLLEGES")
+        getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency")
     ).upper()
 
-    if " POLYTECHNIC" in agency_clean_str:
-        agency_header_name = agency_clean_str.replace(" POLYTECHNIC", "\nPOLYTECHNIC")
-    elif " STATE " in agency_clean_str:
-        agency_header_name = agency_clean_str.replace(" STATE ", "\nSTATE ")
-    elif " UNIVERSITY" in agency_clean_str:
-        agency_header_name = agency_clean_str.replace(" UNIVERSITY", "\nUNIVERSITY")
-    else:
-        agency_header_name = agency_clean_str
+    agency_header_name = agency_clean_str
 
     p_inst = c_inst.paragraphs[0]
     p_inst.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -1120,7 +1129,7 @@ def create_issp_docx(
     p_inst.paragraph_format.line_spacing = 1.05
     r_inst = p_inst.add_run(agency_header_name)
     r_inst.font.name = "Palatino Linotype"
-    r_inst.font.size = Pt(8.0)
+    r_inst.font.size = Pt(8.5)
     r_inst.font.bold = True
     r_inst.font.color.rgb = RGBColor(15, 23, 42)
 
@@ -1351,15 +1360,20 @@ def create_issp_docx(
     p_b.add_run("B. Organizational Structure\n").font.bold = True
     p_b.add_run("B.1. Chief Information Officer (CIO) & ISSP Focal Person\n").font.bold = True
 
+    cio_tel = clean_str(getattr(narrative, "preparer_tel", None) or getattr(narrative, "cio_contact_no", None), "N/A")
+    cio_email_val = clean_str(getattr(narrative, "preparer_email", None) or getattr(narrative, "cio_email", None), "cio@agency.gov.ph")
+    cio_pos_val = clean_str(getattr(narrative, "preparer_position", None) or getattr(narrative, "cio_plantilla_position", None), "Chief Information Officer")
+    cio_unit_val = clean_str(getattr(narrative, "cio_organizational_unit", None), "ICT Management Office")
+
     cio_table = doc.add_table(rows=5, cols=2)
     cio_table.style = 'Table Grid'
     set_table_borders(cio_table)
     cio_rows = [
         ("Chief Information Officer (CIO):", cio_name),
-        ("Plantilla Position:", clean_str(narrative.preparer_position or narrative.cio_plantilla_position, "Director, ICT Management Office")),
-        ("Organizational Unit:", clean_str(narrative.cio_organizational_unit, "Management Information Systems / ICT Center")),
-        ("Email Address:", clean_str(narrative.preparer_email or narrative.cio_email, "cio@agency.gov.ph")),
-        ("Contact Telephone:", clean_str(narrative.preparer_tel or narrative.cio_contact_no, "(054) 288-4224"))
+        ("Plantilla Position:", cio_pos_val),
+        ("Organizational Unit:", cio_unit_val),
+        ("Email Address:", cio_email_val),
+        ("Contact Telephone:", cio_tel)
     ]
     for idx, (label, val) in enumerate(cio_rows):
         row = cio_table.rows[idx]
@@ -1388,7 +1402,7 @@ def create_issp_docx(
             ("Designated Position:", clean_str(getattr(narrative, 'focal_position', None), "Head, Systems and Infrastructure Administration")),
             ("Organizational Unit:", clean_str(getattr(narrative, 'focal_organizational_unit', None), "ICT Management Service")),
             ("Email Address:", clean_str(getattr(narrative, 'focal_email', None), "focal@agency.gov.ph")),
-            ("Contact Number:", clean_str(getattr(narrative, 'focal_contact_no', None), "(054) 288-4224"))
+            ("Contact Number:", clean_str(getattr(narrative, 'focal_contact_no', None), "N/A"))
         ]
         for idx, (label, val) in enumerate(focal_rows):
             row = focal_table.rows[idx]
@@ -1931,7 +1945,7 @@ def create_issp_docx(
         if clean_str(getattr(itm, "status", "")).lower() != "approved":
             continue
 
-        strat_cat = clean_str(getattr(itm, "strategic_category", "")).lower()
+        strat_cat = resolve_proposal_category(itm).lower()
         cost_val = Decimal(str(getattr(itm, "total_cost", 0) or 0))
         uacs_code = clean_str(getattr(itm, "uacs_object_code", "")).lower()
         exp_class = clean_str(getattr(itm, "expenditure_class", "")).lower()
@@ -1952,6 +1966,15 @@ def create_issp_docx(
         ("Cross-Agency ICT Projects", True),
         ("Continuing Costs/Expenses", False)
     ]
+
+    # Discover any active custom strategic categories dynamically
+    seen_cats = {c[0].lower() for c in canonical_categories}
+    active_categories_list = list(canonical_categories)
+    for itm in prop_items:
+        resolved_c = resolve_proposal_category(itm)
+        if resolved_c and resolved_c.lower() not in seen_cats:
+            seen_cats.add(resolved_c.lower())
+            active_categories_list.append((resolved_c, True))
 
     for yr_idx, yr in enumerate(planning_years):
         if yr_idx > 0:
@@ -1983,18 +2006,11 @@ def create_issp_docx(
         total_yr_cost = Decimal("0.00")
 
         year_cat_items = {}
-        for cat_name, is_proj_linked in canonical_categories:
+        for cat_name, is_proj_linked in active_categories_list:
             matched_items = []
             for itm in prop_items:
-                strat_name = clean_str(getattr(itm, "strategic_category", "")).lower()
-                is_match = False
-                if is_proj_linked:
-                    is_match = cat_name.lower() in strat_name
-                else:
-                    if "office" in cat_name.lower():
-                        is_match = "office" in strat_name or not any(k in strat_name for k in ["project", "continuing"])
-                    else:
-                        is_match = "continuing" in strat_name
+                strat_name = resolve_proposal_category(itm).lower()
+                is_match = (cat_name.lower() == strat_name)
 
                 if is_match:
                     q_map = itm.yearly_quantities or {}
@@ -2141,6 +2157,8 @@ def create_issp_docx(
         ("B.4. OBJECT OF EXPENDITURE (UACS ACCOUNT LEDGER)", p_data.get("b4_object_of_expenditure", {}), "UACS Account Title")
     ]
 
+    total_col_header = f"{len(planning_years)}-Year Total (PHP)" if len(planning_years) > 0 else "Total Outlay"
+
     for title_mat, matrix_dict, col_label in tables_to_render:
         p_t = doc.add_paragraph()
         p_t.paragraph_format.space_before = Pt(4)
@@ -2173,7 +2191,7 @@ def create_issp_docx(
                 hdr_cells[i + 1].paragraphs[0].runs[0].font.bold = True
                 hdr_cells[i + 1].paragraphs[0].runs[0].font.size = Pt(7.5)
 
-            hdr_cells[-1].text = "Total Outlay"
+            hdr_cells[-1].text = total_col_header
             set_cell_shading(hdr_cells[-1], "F1F5F9")
             set_cell_margins(hdr_cells[-1], top=40, bottom=40, left=60, right=60)
             hdr_cells[-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -2210,7 +2228,7 @@ def create_issp_docx(
                 set_cell_margins(row_cells[-1], top=35, bottom=35, left=60, right=60)
                 if is_grand:
                     set_cell_shading(row_cells[-1], "E2E8F0")
-                    row_cells[-1].paragraphs[0].runs[0].font.bold = True
+                    row_cells[idx + 1].paragraphs[0].runs[0].font.bold = True
         else:
             doc.add_paragraph("Table matrix not generated.")
 
@@ -2535,7 +2553,7 @@ def create_issp_docx(
     p_d4.add_run("4. Technical Recovery Strategy\n").font.bold = True
 
     strat_text = strip_html_tags(getattr(narrative, "drbcp_recovery_strategy_text", None) or getattr(narrative, "drbcp_recovery_strategy_html", None)) or (
-        "Daily database snapshots transferred to an off-site secondary facility (>30km). Real-time operational failover configured for frontline student and financial services."
+        "Daily database snapshots transferred to an off-site secondary facility (>30km). Real-time operational failover configured for mission-critical frontline citizen and administrative services."
     )
     doc.add_paragraph(strat_text)
 

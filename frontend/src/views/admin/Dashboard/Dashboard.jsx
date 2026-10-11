@@ -97,6 +97,25 @@ export default function AdminDashboard() {
   const [alertError, setAlertError] = useState(null);
   const [alertSuccess, setAlertSuccess] = useState(null);
 
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (alertSuccess) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setAlertSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [alertSuccess]);
+
+  useEffect(() => {
+    if (alertError) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setAlertError(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [alertError]);
+
   const addSystemLog = useCallback((text, type = "") => {
     const now = new Date();
     const timeStr = now.toTimeString().split(" ")[0];

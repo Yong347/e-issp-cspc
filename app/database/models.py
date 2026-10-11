@@ -631,9 +631,9 @@ class DictAssetCategory(str, enum.Enum):
     OTHERS_SOFTWARE = "Others (ICT Software)"
 
 
-# =========================================================================
+# ==========================================================
 # ADMINISTRATIVE STRUCTURE MODELS
-# =========================================================================
+# ==========================================================
 
 class Department(Base):
     __tablename__ = "departments"
@@ -669,8 +669,8 @@ class User(Base):
 class MasterNarrative(Base):
     """
     DICT ISSP v.2026 Part I Narrative, Profile & Governance Root.
-    Purged of raw HTML strings, artificial signature image uploads, and obsolete diagram columns.
-    Signatories follow official DICT printed sign-off specifications.
+    Uses configurable, non-hardcoded defaults for agency leadership and signatories,
+    preserving human names and institutional titles entered by users.
     Explicitly tracks both final_pdf_vault_url and final_docx_vault_url for independent export retrieval.
     """
     __tablename__ = "master_narratives"
@@ -697,9 +697,8 @@ class MasterNarrative(Base):
     dict_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     bagong_pilipinas_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Signatory Information (Formal Physical Sign-off Lines)
-    # Stored directly as the full signatory person's name (e.g. "Rey T. Cortez, MIT")
-    signatory_prepared_by: Mapped[str] = mapped_column(String(200), default="Rey T. Cortez, MIT", nullable=False)
+    # Signatory Information (Uses generic defaults, preserving user-edited personal names)
+    signatory_prepared_by: Mapped[str] = mapped_column(String(200), default="Chief Information Officer", nullable=False)
     preparer_position: Mapped[Optional[str]] = mapped_column(String(200), default="Chief Information Officer", nullable=True)
     cio_organizational_unit: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     preparer_tel: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
@@ -712,8 +711,7 @@ class MasterNarrative(Base):
     focal_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     focal_contact_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
-    # Stored directly as the full agency head person's name (e.g. "Amado A. Oliva Jr, PhD.")
-    signatory_approved_by: Mapped[str] = mapped_column(String(200), default="Amado A. Oliva Jr, PhD.", nullable=False)
+    signatory_approved_by: Mapped[str] = mapped_column(String(200), default=settings.DEFAULT_AGENCY_HEAD_TITLE, nullable=False)
     agency_head_position: Mapped[Optional[str]] = mapped_column(String(200), default=settings.DEFAULT_AGENCY_HEAD_TITLE, nullable=True)
     drbcp_approval_date: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
@@ -1106,6 +1104,14 @@ class EGovernmentChecklist(Base):
     is_connected_to_portal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     master_narrative: Mapped["MasterNarrative"] = relationship("MasterNarrative", back_populates="egov_checklists_relation")
+
+    @property
+    def is_proposed_equivalent(self) -> bool:
+        return self.is_proposed_development
+
+    @is_proposed_equivalent.setter
+    def is_proposed_equivalent(self, val: bool) -> None:
+        self.is_proposed_development = bool(val)
 
 
 # =========================================================================
@@ -1961,10 +1967,10 @@ def enforce_master_narrative_integrity(mapper, connection, target: MasterNarrati
     if not target.agency_name:
         target.agency_name = settings.DEFAULT_AGENCY_NAME
 
-    # Preserve actual signatory person names without overwriting with generic system job titles
+    # Respect user inputs without reverting to hardcoded personal names
     cio_clean = (target.signatory_prepared_by or "").strip()
-    if not cio_clean or cio_clean.lower() in ["chief information officer", "cio", "none", "null"]:
-        target.signatory_prepared_by = "Rey T. Cortez, MIT"
+    if not cio_clean:
+        target.signatory_prepared_by = target.preparer_position or "Chief Information Officer"
     else:
         target.signatory_prepared_by = cio_clean
 
@@ -1972,8 +1978,8 @@ def enforce_master_narrative_integrity(mapper, connection, target: MasterNarrati
         target.preparer_position = "Chief Information Officer"
 
     head_clean = (target.signatory_approved_by or "").strip()
-    if not head_clean or head_clean.lower() in ["head of agency", "agency head", "college president", "president", "none", "null"]:
-        target.signatory_approved_by = "Amado A. Oliva Jr, PhD."
+    if not head_clean:
+        target.signatory_approved_by = target.agency_head_position or settings.DEFAULT_AGENCY_HEAD_TITLE
     else:
         target.signatory_approved_by = head_clean
 
@@ -2150,7 +2156,7 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     Enforces dynamic multi-year physical targets and calculates total_cost
     as the exact sum of annual inflation-adjusted outlays.
     Handles calendar years ('2028') and ordinal labels ('Year 1') robustly without zeroing out values.
-    Guarantees standard capitalized formatting on status, category, and expenditure_class.
+    Respects parent project category inheritance without forcibly overriding valid strategic categories.
     """
     from app.utils.helpers import get_adjusted_unit_cost_for_year
 
@@ -2246,10 +2252,11 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     elif "serv" in cat_raw: target.category = "Services"
     else: target.category = "Hardware"
 
-    if not target.strategic_category or not target.strategic_category.strip():
+    # Synchronize category with parent project if bound, or respect existing category
+    if target.project_rel and getattr(target.project_rel, "project_category", None):
+        target.strategic_category = str(getattr(target.project_rel.project_category, "value", target.project_rel.project_category)).strip()
+    elif not target.strategic_category or not target.strategic_category.strip():
         target.strategic_category = "Office Productivity"
-    if target.project_id and target.strategic_category == "Office Productivity":
-        target.strategic_category = "Internal ICT Projects"
         
     if not target.office_location: target.office_location = "Central Office"
     if not target.fund_source: target.fund_source = "General Appropriations Act (GAA)"

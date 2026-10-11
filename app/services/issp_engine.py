@@ -7,10 +7,12 @@ Core Capabilities:
 - End-to-End Relational Singularity Validation (Part I through Annex 2)
 - Multi-Pathway Strategic Concern Resolution Verification (Systems, Projects,
   Hardware Deployments, Network Infrastructure, and Needs Assessments)
-- Plan-Committed Proposals Governance & Intake Pool Quarantine Enforcement
+- Plan-Committed Proposals Governance & Strict Project-Governed Rollup
+- Categorization Per Project: Table B.1 and B.2 inherit strictly from the
+  parent ICT Project charter in Part III.E, eliminating orphan cost leakages
 - Strict Four-Way Financial Parity Engine (Tables B.1, B.2, B.3, and B.4)
-- Zero-Leakage Rollup: Prevents unlinked capital outlays from distorting budgets
-- Elastic Planning Horizon Support (Arbitrary 1 to N-Year Fiscal Cycles)
+- Zero-Leakage Rollup: Reconciles all four investment matrices to 0.00 centavo discrepancy
+- Dynamic Multi-Year Horizon Support: Scales dynamically to 1, 2, 3, 4, 5+ year spans
 =============================================================================
 """
 
@@ -118,7 +120,7 @@ class ISSPSingularityEngine:
     """
     Enforces absolute semantic, operational, and financial integrity 
     across all interrelated sections of the DICT ISSP v.2026 framework.
-    Supports dynamic N-year horizons (2, 3, 4, 5+ years) and dynamic criteria.
+    Supports dynamic N-year horizons (1, 2, 3, 4, 5+ years) and dynamic criteria.
     """
 
     @staticmethod
@@ -130,12 +132,11 @@ class ISSPSingularityEngine:
         3. Strategic Concerns (Part II.A) -> Multi-Pathway Resolutions:
            - Validates resolution through Information Systems, Strategic Projects,
              Hardware Proposals, Network Infrastructures, or Needs Assessments.
-           - Allows non-system resolutions (hardware clusters, optical fiber backbone, facilities).
         4. Information Systems -> ICT Projects (Part III.E)
         5. ICT Projects -> PMF Scorecard (Parts III.F.1 & III.F.2)
         6. Project & Proposal Integrity:
-           - Verifies approved proposals are bound to a Project or verified standalone category.
-           - Quarantines unlinked major capital outlays into the Intake Pool.
+           - Verifies approved proposals are bound to an ICT Project charter.
+           - Enforces that categorizations are strictly per project, not per proposal.
            - Enforces that project-linked proposals have assigned outcomes and UACS object codes.
         7. Resource Deployments -> Tables B.1, B.2, B.3, B.4 Four-Way Parity (Part IV.B)
         8. Cross-Sectional Baselines (Annex 1 Hardware Obsolescence & Annex 2 DRBCP Continuity Funding)
@@ -177,13 +178,21 @@ class ISSPSingularityEngine:
             ""
         )
 
-        if not cio_signatory.strip() or not head_signatory.strip():
+        if not str(cio_signatory).strip() or not str(head_signatory).strip():
             violations.append("Part I.B Leadership: Both Chief Information Officer (CIO) and Head of Agency signatories are required.")
 
-        # Dynamic Year Horizon Range (supports 1 to N-year spans)
+        # Dynamic Year Horizon Range (supports arbitrary 1 to N-year spans)
         year_range = get_cycle_year_range(narrative, issp_period)
-        start_year = year_range[0] if year_range else 2028
-        end_year = year_range[-1] if year_range else 2030
+        if not year_range and "-" in issp_period:
+            try:
+                parts = issp_period.split("-")
+                start_year = int(parts[0])
+                end_year = int(parts[1])
+                year_range = list(range(start_year, end_year + 1))
+            except Exception:
+                year_range = [2026, 2027, 2028]
+        start_year = year_range[0] if year_range else 2026
+        end_year = year_range[-1] if year_range else 2028
 
         # -------------------------------------------------------------
         # 2. OUTCOMES -> STRATEGIC CONCERNS (Part I.A.4 -> Part II.A)
@@ -209,7 +218,7 @@ class ISSPSingularityEngine:
                 )
 
         # -------------------------------------------------------------
-        # 3. STRATEGIC CONCERNS -> RESOLUTION PATHWAYS (Part II.A -> Any Valid Mechanism)
+        # 3. STRATEGIC CONCERNS -> RESOLUTION PATHWAYS (Part II.A -> 5 Valid Pathways)
         # -------------------------------------------------------------
         concerns = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).all()
         systems = db.query(InformationSystem).filter(InformationSystem.issp_period == issp_period).all()
@@ -221,14 +230,13 @@ class ISSPSingularityEngine:
             c_id = concern.id
             c_id_str = str(c_id).strip() if c_id else ""
 
-            # Keyword tokens from concern for resilient semantic matching
             stop_words = {"system", "with", "from", "that", "this", "agency", "department", "user", "core", "into", "online", "office"}
             keywords = [
                 w for w in re.split(r'[^a-z0-9]+', f"{c_text} {c_intended}") 
                 if len(w) > 3 and w not in stop_words
             ]
 
-            # Pathway 1: Information Systems (Direct FK, exact name match, or semantic containment)
+            # Pathway 1: Information Systems
             sys_filters = []
             if c_id:
                 sys_filters.append(InformationSystem.strategic_concern_id == c_id)
@@ -244,8 +252,7 @@ class ISSPSingularityEngine:
                 or_(*sys_filters)
             ).count() if sys_filters else 0
 
-            # Pathway 2: Strategic ICT Projects (Direct alignment or keyword matching)
-            linked_projects = 0
+            # Pathway 2: Strategic ICT Projects
             project_filters = []
             if hasattr(IctProject, "strategic_concern_id") and c_id:
                 project_filters.append(getattr(IctProject, "strategic_concern_id") == c_id)
@@ -261,14 +268,12 @@ class ISSPSingularityEngine:
             if keywords:
                 project_filters.extend([func.lower(IctProject.project_title).contains(kw) for kw in keywords])
 
-            if project_filters:
-                linked_projects = db.query(IctProject).filter(
-                    IctProject.issp_period == issp_period,
-                    or_(*project_filters)
-                ).count()
+            linked_projects = db.query(IctProject).filter(
+                IctProject.issp_period == issp_period,
+                or_(*project_filters)
+            ).count() if project_filters else 0
 
-            # Pathway 3: Hardware Proposals (Deployment of hardware/tools to resolve bottleneck)
-            linked_proposals = 0
+            # Pathway 3: Hardware / Resource Proposals
             prop_filters = []
             if hasattr(Proposal, "strategic_concern_id") and c_id:
                 prop_filters.append(getattr(Proposal, "strategic_concern_id") == c_id)
@@ -283,13 +288,12 @@ class ISSPSingularityEngine:
             if keywords:
                 prop_filters.extend([func.lower(Proposal.item_name).contains(kw) for kw in keywords])
 
-            if prop_filters:
-                linked_proposals = db.query(Proposal).filter(
-                    Proposal.issp_period == issp_period,
-                    or_(*prop_filters)
-                ).count()
+            linked_proposals = db.query(Proposal).filter(
+                Proposal.issp_period == issp_period,
+                or_(*prop_filters)
+            ).count() if prop_filters else 0
 
-            # Pathway 4: Section 8.0 Needs Assessments (Linked via FK or Problem statement)
+            # Pathway 4: Section 8.0 Department Needs Assessments
             needs_filters = []
             if c_id:
                 needs_filters.append(NeedsAssessment.strategic_concern_id == c_id)
@@ -304,7 +308,7 @@ class ISSPSingularityEngine:
                 or_(*needs_filters)
             ).count() if needs_filters else 0
 
-            # Pathway 5: Network Infrastructure (Connectivity, Bandwidth, Topology, or Datacenter facility resolution)
+            # Pathway 5: Network Infrastructure
             linked_network = 0
             is_network_related = any(
                 kw in f"{c_text} {c_intended} {c_prob}" 
@@ -315,7 +319,6 @@ class ISSPSingularityEngine:
                     NetworkInfrastructure.issp_period == issp_period
                 ).count()
 
-            # A Strategic Concern is validly resolved if ANY of these 5 pathways address it
             total_resolving_elements = linked_systems + linked_projects + linked_proposals + linked_needs + linked_network
             if total_resolving_elements == 0:
                 violations.append(
@@ -324,7 +327,7 @@ class ISSPSingularityEngine:
                     f"Hardware Deployment, Network Infrastructure, or Needs Assessment."
                 )
 
-        # Audit technical IT personnel feasibility
+        # Technical Staffing Feasibility
         filled_it_plantilla = db.query(func.sum(HumanCapital.it_positions_count)).filter(
             HumanCapital.issp_period == issp_period,
             HumanCapital.is_proposed == False,
@@ -351,7 +354,7 @@ class ISSPSingularityEngine:
             sys_status_val = str(getattr(sys.status, "value", sys.status or "")).strip()
             sys_status_lower = sys_status_val.lower()
 
-            # Check 3.1: Information System Multi-Classification Audit
+            # Check 3.1: Multi-Classification Check
             is_support = bool(getattr(sys, "is_support_to_operations", False))
             is_admin = bool(getattr(sys, "is_general_administrative", False))
             is_operations = bool(getattr(sys, "is_operations", False))
@@ -369,7 +372,6 @@ class ISSPSingularityEngine:
                 )
 
             # Check 3.2: Operations Sub-Classification
-            # If the system is purely Support to Operations or General Administrative without frontline flags, clear is_operations
             if is_operations and (is_support or is_admin) and not getattr(sys, "is_frontline_service", False) and not getattr(sys, "is_non_frontline_service", False) and "frontline" not in class_str:
                 is_operations = False
 
@@ -382,7 +384,7 @@ class ISSPSingularityEngine:
                         "but specifies neither Frontline Service nor Non-Frontline Service."
                     )
 
-            # Check 3.3: Mandated Enhancement Details for "For Enhancement"
+            # Check 3.3: Enhancement Details Mandate
             if "enhancement" in sys_status_lower:
                 enhancement_details = getattr(sys, "enhancement_details", None)
                 if not enhancement_details or len(enhancement_details.strip()) < 10:
@@ -391,7 +393,7 @@ class ISSPSingularityEngine:
                         "but is missing mandatory enhancement details (DICT ISSP Guidelines p. 13)."
                     )
 
-            # Check 3.4: Data Privacy Act of 2012 / PIA Enforcement
+            # Check 3.4: Data Privacy Act / PIA Enforcement
             if sys.processes_personal_information and not sys.has_undergone_pia:
                 has_pia_target = bool(getattr(sys, "pia_target_date_text", None) and str(sys.pia_target_date_text).strip())
                 has_pia_milestone = False
@@ -517,7 +519,7 @@ class ISSPSingularityEngine:
                     f"Part III.E Milestones Incomplete: Project '{proj.project_title}' must specify concrete deliverables for {', '.join(missing_years)}."
                 )
 
-            # Check 5.3: Strategic Alignment "Others (Specify)" Completeness
+            # Check 5.3: Strategic Alignment "Others (Specify)"
             if getattr(proj, "aligns_others", False):
                 specify_text = (getattr(proj, "aligns_others_specify", "") or "").strip()
                 if not specify_text:
@@ -548,42 +550,19 @@ class ISSPSingularityEngine:
 
             if line_items_count == 0 and not has_linked_system_cost and "cross" not in proj_cat_val:
                 violations.append(
-                    f"Part IV.A Funding Disconnect: Internal project '{proj.project_title}' has no approved resource line items allocated in Part IV.A. "
+                    f"Part IV.A Funding Disconnect: Project '{proj.project_title}' has no approved resource line items allocated in Part IV.A. "
                     "Link approved proposals to this project in the Projects Portfolio before compiling."
                 )
 
         # -------------------------------------------------------------
         # 5.6 & 5.7: PLAN-COMMITTED PROPOSALS GOVERNANCE INTEGRITY
         # -------------------------------------------------------------
-        policy = get_governance_policy(db)
-        cap_threshold = policy.get("capitalization_threshold", Decimal("50000.00"))
-
-        # Strict plan-active proposals check:
-        # A proposal line item appears in the compiled plan IF AND ONLY IF:
-        # 1. It is approved AND linked to an ICT Project (project_id IS NOT NULL), OR
-        # 2. It is approved under an authorized standalone operational category
-        #    (Office Productivity or Continuing Costs) AND its unit cost is strictly below
-        #    the Capital Outlay threshold (< ₱50k) AND it is NOT Capital Outlay.
-        # Any Capital Outlay (>= ₱50k) or Project-categorized line item that is unlinked
-        # remains quarantined in the Intake Pool and MUST NOT compile into the formal plan.
+        # In DICT methodology, all categorizations are per project.
+        # Only proposals bound to an authorized ICT Project compile into the plan.
         active_plan_proposals = db.query(Proposal).filter(
             Proposal.issp_period == issp_period,
             func.lower(cast(Proposal.status, String)) == "approved",
-            or_(
-                Proposal.project_id.isnot(None),
-                and_(
-                    or_(
-                        func.lower(cast(Proposal.strategic_category, String)).like("%continuing%"),
-                        and_(
-                            func.lower(cast(Proposal.strategic_category, String)).like("%office productivity%"),
-                            Proposal.unit_cost < cap_threshold,
-                            Proposal.total_cost < cap_threshold
-                        )
-                    ),
-                    ~func.lower(cast(Proposal.expenditure_class, String)).like("%capital%"),
-                    ~func.lower(cast(Proposal.uacs_object_code, String)).like("%(co)%")
-                )
-            ),
+            Proposal.project_id.isnot(None),
             or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).all()
 
@@ -601,30 +580,24 @@ class ISSPSingularityEngine:
                 "without an assigned UACS Object Code (Table B.4). Administrators must verify UACS classifications prior to plan certification."
             )
 
-        # Catch proposals marked under project categories or Capital Outlay that are unlinked to any project
+        # Log quarantined proposals that remain in the intake pool
         quarantined_unlinked_proposals = db.query(Proposal).filter(
             Proposal.issp_period == issp_period,
             func.lower(cast(Proposal.status, String)) == "approved",
             Proposal.project_id.is_(None),
-            or_(
-                func.lower(cast(Proposal.strategic_category, String)).like("%internal ict project%"),
-                func.lower(cast(Proposal.strategic_category, String)).like("%cross-agency%"),
-                Proposal.unit_cost >= cap_threshold,
-                Proposal.total_cost >= cap_threshold,
-                func.lower(cast(Proposal.expenditure_class, String)).like("%capital%"),
-                func.lower(cast(Proposal.uacs_object_code, String)).like("%(co)%")
-            ),
             or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).all()
 
         if quarantined_unlinked_proposals:
             logger.info(
-                f"Quarantined {len(quarantined_unlinked_proposals)} unlinked capital outlay / project proposals in Intake Pool."
+                f"Quarantined {len(quarantined_unlinked_proposals)} unlinked approved proposal(s) in Intake Pool "
+                "(excluded from compiled plan until assigned to an ICT Project)."
             )
 
         # -------------------------------------------------------------
         # 6. ANNEX 1 HARDWARE OBSOLESCENCE (Annex 1 -> Part IV.A)
         # -------------------------------------------------------------
+        policy = get_governance_policy(db)
         buffer_units = policy.get("hardware_replacement_buffer_units", 3)
         status_col = cast(ExistingInventory.status, String)
         
@@ -649,6 +622,7 @@ class ISSPSingularityEngine:
             Proposal.created_by_students == False,
             Proposal.is_in_house_turnover == False,
             func.lower(cast(Proposal.status, String)) == "approved",
+            Proposal.project_id.isnot(None),
             or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).all()
 
@@ -697,11 +671,7 @@ class ISSPSingularityEngine:
             cloud_backup_funding = db.query(func.sum(Proposal.total_cost)).filter(
                 Proposal.issp_period == issp_period,
                 func.lower(cast(Proposal.status, String)) == "approved",
-                or_(
-                    func.lower(strat_cat_col).like("%continuing%"),
-                    func.lower(strat_cat_col).like("%project%"),
-                    Proposal.project_id.isnot(None)
-                ),
+                Proposal.project_id.isnot(None),
                 or_(
                     func.lower(uacs_col).like("%subscription%"),
                     func.lower(Proposal.item_name).like("%cloud%"),
@@ -717,7 +687,7 @@ class ISSPSingularityEngine:
             if Decimal(str(cloud_backup_funding)) <= Decimal("0.00"):
                 violations.append(
                     "Annex 2 DRBCP Funding Violation: Mission-critical systems have an RTO <= 4 hours "
-                    "(mandating GovCloud / off-site mirror failover), but Part IV.A allocates ₱0.00 under Continuing Costs or ICT Projects for Cloud/DR Subscriptions."
+                    "(mandating GovCloud / off-site mirror failover), but Part IV.A allocates ₱0.00 under an approved ICT Project for Cloud/DR Subscriptions."
                 )
 
         # -------------------------------------------------------------
@@ -753,27 +723,33 @@ class ISSPSingularityEngine:
     def calculate_part_iv_b_matrices(db: Session, issp_period: str, only_approved: bool = False) -> Dict[str, Any]:
         """
         Dynamically calculates Part IV.B Summary of Investments across all four dimensions:
-          B.1 General Summary (Dynamic Strategic Categories from DB)
-          B.2 Fund Source (Dynamic Taxonomies from DB)
+          B.1 General Summary (Dynamic Strategic Categories governed strictly per project)
+          B.2 Fund Source (Dynamic Taxonomies inherited from parent project)
           B.3 Statement of Expenditure (Capital Outlay vs MOOE via UACS catalog & threshold)
           B.4 Object of Expenditure (Dynamic UACS Catalog from DB)
 
-        Zero Discrepancy & Quarantine Guarantee:
-          - Tables B.1 to B.4 are calculated strictly as the exact mathematical rollup of line items
-            present in Part IV.A. No ghost entries or unbudgeted system projections are injected into
-            the financial summary tables unless they exist as approved line items.
-          - In approved compilation mode (`only_approved=True`), only proposals that are officially
-            part of the certified plan (project-linked OR approved standalone operational categories
-            strictly under the capitalization threshold) are pulled into the calculation.
-            Unlinked capital outlays and major project outlays remain quarantined in the Intake Pool.
-          - Reconciles to exact centavo parity across all four tables.
+        Zero Discrepancy & Per-Project Categorization Guarantee:
+          - Categorizations in Table B.1 and Fund Sources in Table B.2 are determined strictly
+            by the parent ICT Project charter in Part III.E, NOT arbitrarily guessed per proposal.
+          - In certified plan mode (`only_approved=True`), only proposals that are officially
+            bound to an ICT Project (`Proposal.project_id IS NOT NULL`) are included.
+            Unlinked proposals remain quarantined in the Intake Pool to prevent Table B.1 distortion.
+          - Supports arbitrary multi-year spans (1 to N years) dynamically without static year assumptions.
         """
         from app.utils.helpers import get_cycle_year_range, get_adjusted_unit_cost_for_year, get_governance_policy
 
         narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
         year_range = get_cycle_year_range(narrative, issp_period)
+        if not year_range and "-" in issp_period:
+            try:
+                parts = issp_period.split("-")
+                start_year = int(parts[0])
+                end_year = int(parts[1])
+                year_range = list(range(start_year, end_year + 1))
+            except Exception:
+                year_range = [2026, 2027, 2028]
+        start_year = year_range[0] if year_range else 2026
         all_year_keys = [f"FY {y}" for y in year_range]
-        start_year = year_range[0] if year_range else 2028
 
         policy = get_governance_policy(db)
         cap_threshold = policy.get("capitalization_threshold", Decimal("50000.00"))
@@ -792,7 +768,7 @@ class ISSPSingularityEngine:
         except Exception as e:
             logger.debug(f"Strategic categories query note: {e}")
 
-        # Dynamically append any distinct project_category from active ICT Projects in the DB
+        # Append any active categories present on ICT Projects in the portfolio
         proj_cats = db.query(IctProject.project_category).filter(
             IctProject.issp_period == issp_period
         ).distinct().all()
@@ -900,35 +876,18 @@ class ISSPSingularityEngine:
         )
 
         if only_approved:
-            # Under the revised intake-to-project flow:
-            # A proposal is included in the compiled ISSP plan IF AND ONLY IF:
-            # 1. It is approved AND linked to an ICT Project (project_id IS NOT NULL), OR
-            # 2. It is approved under an authorized standalone operational category
-            #    (Office Productivity, Continuing Costs) AND does NOT exceed the capitalization threshold (< ₱50k),
-            #    AND is strictly an operational expense (MOOE, not CO).
-            # Unlinked capital outlays and major project outlays remain quarantined in the Intake Pool.
+            # Categorization is strictly per project.
+            # In certified plan compilation (only_approved=True):
+            # Only approved proposals bound to an ICT Project are compiled into the official plan.
+            # Unlinked proposals remain in the intake pool and are quarantined from the official plan.
             query = query.filter(
                 func.lower(cast(Proposal.status, String)) == "approved",
-                or_(
-                    Proposal.project_id.isnot(None),
-                    and_(
-                        or_(
-                            func.lower(cast(Proposal.strategic_category, String)).like("%continuing%"),
-                            and_(
-                                func.lower(cast(Proposal.strategic_category, String)).like("%office productivity%"),
-                                Proposal.unit_cost < cap_threshold,
-                                Proposal.total_cost < cap_threshold
-                            )
-                        ),
-                        ~func.lower(cast(Proposal.expenditure_class, String)).like("%capital%"),
-                        ~func.lower(cast(Proposal.uacs_object_code, String)).like("%(co)%")
-                    )
-                )
+                Proposal.project_id.isnot(None)
             )
 
         items = query.all()
 
-        # Dynamically append any custom categories, fund sources, or UACS codes from proposals
+        # Dynamically append any custom project categories, fund sources, or UACS codes
         for itm in items:
             proj = itm.project_rel
             if not proj and itm.project_id:
@@ -1029,15 +988,17 @@ class ISSPSingularityEngine:
                 year_costs[first_hdr] = Decimal(str(item.total_cost))
                 line_total = Decimal(str(item.total_cost))
 
-            # Resolve project relationship and inheritance
+            # Resolve project relationship and strict inheritance
             proj = item.project_rel
             if not proj and item.project_id:
                 proj = db.query(IctProject).filter(IctProject.id == item.project_id).first()
 
-            # 6.1 Table B.1 (General Summary) - Inherits Project Category
-            proj_cat = getattr(proj.project_category, "value", proj.project_category) if proj and getattr(proj, "project_category", None) else None
-            item_cat = getattr(item.strategic_category, "value", item.strategic_category)
-            resolved_cat = proj_cat or item_cat or "Office Productivity"
+            # 6.1 Table B.1 (General Summary) - Strictly Inherits Parent Project Category
+            if proj and getattr(proj, "project_category", None):
+                resolved_cat = str(getattr(proj.project_category, "value", proj.project_category)).strip()
+            else:
+                resolved_cat = str(getattr(item.strategic_category, "value", item.strategic_category or "Office Productivity")).strip()
+
             cat_key = find_matching_key(b1, resolved_cat) or b1_keys[0]
             if cat_key not in b1:
                 b1[cat_key] = make_grid_row()
@@ -1045,10 +1006,12 @@ class ISSPSingularityEngine:
                 b1[cat_key][y_header] += c_yr
             b1[cat_key]["Total"] += line_total
 
-            # 6.2 Table B.2 (Fund Source) - Inherits Project Fund Source
-            proj_fund = getattr(proj.funding_source, "value", proj.funding_source) if proj and getattr(proj, "funding_source", None) else None
-            item_fund = getattr(item.fund_source, "value", item.fund_source)
-            resolved_fund = proj_fund or item_fund or "General Appropriations Act (GAA)"
+            # 6.2 Table B.2 (Fund Source) - Strictly Inherits Parent Project Fund Source
+            if proj and getattr(proj, "funding_source", None):
+                resolved_fund = str(getattr(proj.funding_source, "value", proj.funding_source)).strip()
+            else:
+                resolved_fund = str(getattr(item.fund_source, "value", item.fund_source or "General Appropriations Act (GAA)")).strip()
+
             fund_key = find_matching_key(b2, resolved_fund) or b2_keys[0]
             if fund_key not in b2:
                 b2[fund_key] = make_grid_row()
@@ -1056,7 +1019,7 @@ class ISSPSingularityEngine:
                 b2[fund_key][y_header] += c_yr
             b2[fund_key]["Total"] += line_total
 
-            # 6.3 Table B.3 (Statement of Expenditure)
+            # 6.3 Table B.3 (Statement of Expenditure - Capital Outlay vs MOOE)
             exp_val = str(getattr(item.expenditure_class, "value", item.expenditure_class or "")).strip()
             cat_val = str(getattr(item.category, "value", item.category or "")).strip().lower()
             item_name_lower = (item.item_name or "").lower()

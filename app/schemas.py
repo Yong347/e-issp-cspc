@@ -489,6 +489,7 @@ class EGovernmentChecklistUpdate(BaseModel):
     has_other_payment_platform: Optional[bool] = None
     is_manual: Optional[bool] = None
     is_proposed_development: Optional[bool] = None
+    is_proposed_equivalent: Optional[bool] = Field(default=None, description="Alias for is_proposed_development")
     proposed_development_name: Optional[str] = None
     total_employees: Optional[str] = None
     active_pnpki_count: Optional[str] = None
@@ -502,6 +503,14 @@ class EGovernmentChecklistUpdate(BaseModel):
         if v is None:
             return None
         return deserialize_list_if_string(v)
+
+    @model_validator(mode='after')
+    def sync_proposal_flags(self) -> 'EGovernmentChecklistUpdate':
+        if self.is_proposed_equivalent is not None and self.is_proposed_development is None:
+            self.is_proposed_development = self.is_proposed_equivalent
+        elif self.is_proposed_equivalent and not self.is_proposed_development:
+            self.is_proposed_development = self.is_proposed_equivalent
+        return self
 
 
 class EGovernmentChecklistResponse(EGovernmentChecklistCreate):
@@ -791,19 +800,28 @@ class IctProjectCreate(BaseModel):
                 if "cross" in k_lower or "collaboration" in k_lower or "jmc" in k_lower: self.harmonizes_cross_collaboration = b_val
                 if "scalability" in k_lower or "sustainability" in k_lower or "spar" in k_lower or "prexc" in k_lower: self.harmonizes_scalability = b_val
 
+        # Synchronize annual deliverables bidirectionally with year-by-year keys
         if not self.annual_deliverables:
             deliverables = {}
-            if self.year_1_deliverables: deliverables["Year 1"] = self.year_1_deliverables
-            if self.year_2_deliverables: deliverables["Year 2"] = self.year_2_deliverables
-            if self.year_3_deliverables: deliverables["Year 3"] = self.year_3_deliverables
+            start_yr = self.duration_start_year or 2026
+            if self.year_1_deliverables:
+                deliverables["Year 1"] = self.year_1_deliverables
+                deliverables[str(start_yr)] = self.year_1_deliverables
+            if self.year_2_deliverables:
+                deliverables["Year 2"] = self.year_2_deliverables
+                deliverables[str(start_yr + 1)] = self.year_2_deliverables
+            if self.year_3_deliverables:
+                deliverables["Year 3"] = self.year_3_deliverables
+                deliverables[str(start_yr + 2)] = self.year_3_deliverables
             self.annual_deliverables = deliverables
         else:
-            if not self.year_1_deliverables and "Year 1" in self.annual_deliverables:
-                self.year_1_deliverables = self.annual_deliverables["Year 1"]
-            if not self.year_2_deliverables and "Year 2" in self.annual_deliverables:
-                self.year_2_deliverables = self.annual_deliverables["Year 2"]
-            if not self.year_3_deliverables and "Year 3" in self.annual_deliverables:
-                self.year_3_deliverables = self.annual_deliverables["Year 3"]
+            start_yr_str = str(self.duration_start_year or 2026)
+            if not self.year_1_deliverables:
+                self.year_1_deliverables = self.annual_deliverables.get("Year 1") or self.annual_deliverables.get(start_yr_str) or ""
+            if not self.year_2_deliverables:
+                self.year_2_deliverables = self.annual_deliverables.get("Year 2") or self.annual_deliverables.get(str(int(start_yr_str) + 1)) or ""
+            if not self.year_3_deliverables:
+                self.year_3_deliverables = self.annual_deliverables.get("Year 3") or self.annual_deliverables.get(str(int(start_yr_str) + 2)) or ""
         return self
 
 
@@ -1090,10 +1108,6 @@ class ProposalCreatePayload(BaseModel):
             self.is_in_house_turnover = False
             self.created_by_students = False
 
-        # Auto-align strategic category if linked to an internal project
-        if self.project_id and self.strategic_category == "Office Productivity":
-            self.strategic_category = "Internal ICT Projects"
-
         # Synchronize yearly quantities across any planning horizon
         if self.yearly_quantities and len(self.yearly_quantities) > 0:
             years_sorted = sorted([k for k in self.yearly_quantities.keys() if str(k).isdigit()])
@@ -1267,9 +1281,6 @@ class AdminOverridePayload(BaseModel):
             self.created_by_students = self.is_in_house_turnover
         elif self.created_by_students is not None and self.is_in_house_turnover is None:
             self.is_in_house_turnover = self.created_by_students
-
-        if self.project_id and self.strategic_category == "Office Productivity":
-            self.strategic_category = "Internal ICT Projects"
 
         return self
 
@@ -1996,6 +2007,21 @@ class HarmonizationCriterionResponse(BaseModel):
     name: str
     is_mandatory: bool = False
     description: Optional[str] = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def populate_criteria_name(cls, data: Any) -> Any:
+        if hasattr(data, 'criteria_name') and not getattr(data, 'name', None):
+            return {
+                "id": getattr(data, 'id', None),
+                "name": getattr(data, 'criteria_name', None),
+                "is_mandatory": getattr(data, 'is_mandatory', False),
+                "description": getattr(data, 'description', None)
+            }
+        elif isinstance(data, dict) and 'criteria_name' in data and 'name' not in data:
+            data['name'] = data['criteria_name']
+        return data
+
     model_config = ConfigDict(from_attributes=True)
 
 

@@ -8,13 +8,13 @@ import {
   createIctProject, 
   updateIctProject, 
   deleteIctProject, 
-  updateProjectLinks,
-  getInformationSystems,
-  getPolicySettings,
-  getPerformanceMetrics,
-  getProposalsQueue,
-  getStrategicCategories,
-  getHarmonizationCriteria
+  updateProjectLinks, 
+  getInformationSystems, 
+  getPolicySettings, 
+  getPerformanceMetrics, 
+  getProposalsQueue, 
+  getStrategicCategories, 
+  getHarmonizationCriteria 
 } from "../../../api/admin";
 import CompilerSyncButton from "../../../components/common/CompilerSyncButton";
 import { 
@@ -31,31 +31,31 @@ import {
   CheckSquare, 
   ExternalLink, 
   ShieldCheck, 
-  Target,
-  Layers,
-  AlertCircle,
-  CheckCircle,
-  Database,
-  Network,
-  Info,
-  Calendar,
-  Sparkles,
-  SlidersHorizontal,
-  ShieldAlert,
-  Filter,
-  ArrowUpRight,
-  Lock,
-  Share2,
-  Check,
-  RotateCcw,
-  Eye,
-  FileText,
-  ChevronDown,
-  ChevronUp,
-  Link2,
-  Unlink,
-  Table,
-  Tag
+  Target, 
+  Layers, 
+  AlertCircle, 
+  CheckCircle, 
+  Database, 
+  Network, 
+  Info, 
+  Calendar, 
+  Sparkles, 
+  SlidersHorizontal, 
+  ShieldAlert, 
+  Filter, 
+  ArrowUpRight, 
+  Lock, 
+  Share2, 
+  Check, 
+  RotateCcw, 
+  Eye, 
+  FileText, 
+  ChevronDown, 
+  ChevronUp, 
+  Link2, 
+  Unlink, 
+  Table, 
+  Tag 
 } from "lucide-react";
 
 // Default Canonical Harmonization Framework Criteria (DICT ISSP Guidelines v.2026)
@@ -194,14 +194,18 @@ export default function InternalProjectsManager() {
   // Auto-dismiss temporary alerts
   useEffect(() => {
     if (success) {
-      const timer = setTimeout(() => setSuccess(null), 5000);
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
       return () => clearTimeout(timer);
     }
   }, [success]);
 
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => setError(null), 8000);
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 8000);
       return () => clearTimeout(timer);
     }
   }, [error]);
@@ -837,6 +841,10 @@ export default function InternalProjectsManager() {
         matchesCategory = catLower === "internal ict projects" || (catLower.includes("internal") && !catLower.includes("cross"));
       } else if (categoryFilter === "Cross-Agency ICT Projects") {
         matchesCategory = catLower.includes("cross");
+      } else if (categoryFilter === "Continuing Costs/Expenses") {
+        matchesCategory = catLower.includes("continuing");
+      } else if (categoryFilter === "Office Productivity") {
+        matchesCategory = catLower.includes("office");
       } else if (categoryFilter !== "All") {
         matchesCategory = catLower === categoryFilter.toLowerCase();
       }
@@ -1092,8 +1100,10 @@ export default function InternalProjectsManager() {
           {[
             { id: "Internal ICT Projects", label: "Internal (III.E.1)" },
             { id: "Cross-Agency ICT Projects", label: "Cross-Agency (III.E.2)" },
+            { id: "Continuing Costs/Expenses", label: "Continuing Costs" },
+            { id: "Office Productivity", label: "Office Productivity" },
             ...strategicCategories
-              .filter(sc => !["Internal ICT Projects", "Cross-Agency ICT Projects"].includes(sc.name))
+              .filter(sc => !["Internal ICT Projects", "Cross-Agency ICT Projects", "Continuing Costs/Expenses", "Office Productivity"].includes(sc.name))
               .map(sc => ({ id: sc.name, label: sc.name })),
             { id: "All", label: "All Portfolio" }
           ].map(tab => (
@@ -1231,6 +1241,10 @@ export default function InternalProjectsManager() {
                       <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono ${
                         isCross
                           ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20"
+                          : (proj.project_category || "").toLowerCase().includes("continuing")
+                          ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
+                          : (proj.project_category || "").toLowerCase().includes("office")
+                          ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20"
                           : "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20"
                       }`}>
                         {proj.project_category}
@@ -1243,7 +1257,7 @@ export default function InternalProjectsManager() {
                             ? "bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-955/40 dark:text-amber-400 dark:border-amber-900"
                             : "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20"
                         }`}>
-                          <ShieldAlert className="w-3 h-3" />
+                          <ShieldAlert className="w-3.5 h-3.5" />
                           <span>Outlay &ge; ₱2M Review Gate</span>
                         </span>
                       )}
@@ -1254,7 +1268,7 @@ export default function InternalProjectsManager() {
                           ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20"
                           : "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/10 dark:text-rose-400 dark:border-rose-500/20 animate-pulse"
                       }`}>
-                        <Target className="w-3 h-3" />
+                        <Target className="w-3.5 h-3.5" />
                         <span>{pmfCount > 0 ? `${pmfCount} PMF KPIs` : "0 KPIs (Compiler Blocker)"}</span>
                       </span>
 
@@ -1310,7 +1324,7 @@ export default function InternalProjectsManager() {
                       </button>
                       <button
                         onClick={() => handleDelete(proj.id, proj.project_title)}
-                        className="p-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 dark:hover:text-rose-400 rounded-lg text-slate-500 cursor-pointer"
+                        className="p-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-955/40 dark:hover:text-rose-400 rounded-lg text-slate-500 cursor-pointer"
                         title="Delete Project"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1392,7 +1406,7 @@ export default function InternalProjectsManager() {
                         onClick={() => handleOpenLinkModal(proj)}
                         className="px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-750 hover:border-blue-500 rounded-lg text-blue-600 dark:text-blue-400 font-bold text-[9.5px] cursor-pointer flex items-center gap-1 shadow-2xs"
                       >
-                        <Plus className="w-3 h-3" />
+                        <Plus className="w-3.5 h-3.5" />
                         <span>Manage Items</span>
                       </button>
                     </div>
@@ -1443,7 +1457,7 @@ export default function InternalProjectsManager() {
                                     className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
                                     title="Unlink System from Project"
                                   >
-                                    <Unlink className="w-3 h-3" />
+                                    <Unlink className="w-3.5 h-3.5" />
                                   </button>
                                 </td>
                               </tr>
@@ -1479,7 +1493,7 @@ export default function InternalProjectsManager() {
                                     className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
                                     title="Unlink Line Item from Project (Returns to Intake Pool)"
                                   >
-                                    <Unlink className="w-3 h-3" />
+                                    <Unlink className="w-3.5 h-3.5" />
                                   </button>
                                 </td>
                               </tr>
@@ -1969,20 +1983,23 @@ export default function InternalProjectsManager() {
                       to="/admin/categorizations"
                       className="text-[9px] text-blue-600 dark:text-blue-400 hover:underline font-mono"
                     >
-                      + Add New Category
+                      + Manage Categories
                     </Link>
                   </div>
                   <select
-                    value={form.project_category} onChange={e => setForm({ ...form, project_category: e.target.value })}
+                    value={form.project_category} 
+                    onChange={e => setForm({ ...form, project_category: e.target.value })}
                     className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 cursor-pointer outline-none focus:border-blue-500 font-semibold text-xs"
                   >
                     <option value="Internal ICT Projects">Internal ICT Projects (Part III.E.1)</option>
                     <option value="Cross-Agency ICT Projects">Cross-Agency ICT Projects (Part III.E.2)</option>
+                    <option value="Continuing Costs/Expenses">Continuing Costs/Expenses (Recurring Ops)</option>
+                    <option value="Office Productivity">Office Productivity (Client Endpoints)</option>
                     {strategicCategories
-                      .filter(sc => !["Internal ICT Projects", "Cross-Agency ICT Projects"].includes(sc.name))
+                      .filter(sc => !["Internal ICT Projects", "Cross-Agency ICT Projects", "Continuing Costs/Expenses", "Office Productivity"].includes(sc.name))
                       .map(sc => (
                         <option key={sc.id || sc.code} value={sc.name}>
-                          {sc.name} {sc.is_project_linked ? "(Project-Linked)" : ""}
+                          {sc.name}
                         </option>
                       ))}
                   </select>

@@ -66,7 +66,11 @@ import {
   SlidersHorizontal,
   RotateCcw,
   ArrowRight,
-  CheckSquare
+  CheckSquare,
+  Zap,
+  Cloud,
+  Coins,
+  Target
 } from "lucide-react";
 
 // Presets for Standard Public-Sector Stakeholder Groups
@@ -151,7 +155,7 @@ export default function NarrativeManager() {
   // Lifecycle Rollover Modal State
   const [rolloverModal, setRolloverModal] = useState({ isOpen: false, data: null });
 
-  // Tab 1: Dynamic Cycle & Scope State (Default FY 2028-2030)
+  // Tab 1: Dynamic Cycle & Scope State
   const [startYear, setStartYear] = useState("2028");
   const [endYear, setEndYear] = useState("2030");
   const [isAmendment, setIsAmendment] = useState(false);
@@ -175,8 +179,8 @@ export default function NarrativeManager() {
   // Tab 3: Part III.B Dynamic Enterprise Architecture Narrative
   const [eaNarrative, setEaNarrative] = useState("");
 
-  // Tab 4: Part I.B.1 Signatories & Leadership Structure (Actual Full Human Names)
-  const [cioName, setCioName] = useState("REY T. CORTEZ, MIT");
+  // Tab 4: Part I.B.1 Signatories & Leadership Structure (Clean User State - Zero Hardcoded Names)
+  const [cioName, setCioName] = useState("");
   const [cioPosition, setCioPosition] = useState("Chief Information Officer");
   const [cioUnit, setCioUnit] = useState("ICT Management Service");
   const [cioEmail, setCioEmail] = useState("");
@@ -188,7 +192,7 @@ export default function NarrativeManager() {
   const [focalEmail, setFocalEmail] = useState("");
   const [focalContact, setFocalContact] = useState("");
 
-  const [headOfAgencyName, setHeadOfAgencyName] = useState("AMADO A. OLIVA JR, PhD.");
+  const [headOfAgencyName, setHeadOfAgencyName] = useState("");
   const [agencyHeadPosition, setAgencyHeadPosition] = useState(defaultAgencyHeadTitle);
 
   // Tab 5: Part I.B.2 Human Capital Staffing Matrix
@@ -228,14 +232,38 @@ export default function NarrativeManager() {
     topology_description: ""
   });
 
-  // Tab 8: Annex 2 Disaster Recovery & Continuity (Narrative Core)
+  // Tab 8: Annex 2 Disaster Recovery & Continuity (Dynamic Interactive Architecture)
   const [drbcpApprovalDate, setDrbcpApprovalDate] = useState("");
   const [drAffectedAssets, setDrAffectedAssets] = useState([]);
   const [newAssetGroup, setNewAssetGroup] = useState("");
   const [newAssetDetails, setNewAssetDetails] = useState("");
-  const [drRecoveryStrategy, setDrRecoveryStrategy] = useState("");
-  const [drSopPhases, setDrSopPhases] = useState("");
 
+  // Section 4: 4 Interactive Pillars of Technical Recovery
+  const [sec4OffsiteBackup, setSec4OffsiteBackup] = useState(
+    "Daily encrypted database snapshots are transferred to a secure secondary facility located >30km away."
+  );
+  const [sec4CloudFailover, setSec4CloudFailover] = useState(
+    "Mission-critical public service, registry, and e-payment microservices are replicated in real time to DICT GovCloud."
+  );
+  const [sec4Redundancy, setSec4Redundancy] = useState(
+    "Dual-ISP providers configured in active-passive load distribution preventing single points of failure."
+  );
+  const [sec4DataSync, setSec4DataSync] = useState(
+    "Asynchronous database replication ensures an RPO limit of 1 hour during operational disruptions."
+  );
+
+  // Section 5: 3 Interactive Operational SOP Phases
+  const [sec5Phase1, setSec5Phase1] = useState(
+    "Automated monitoring alerts evaluate disaster scale; Incident Commander activates DRBCP within 1 hour if localized RTO cannot be maintained."
+  );
+  const [sec5Phase2, setSec5Phase2] = useState(
+    "DRT redirected to GovCloud DR standby instance; DNS records updated; clean database backups verified and mounted."
+  );
+  const [sec5Phase3, setSec5Phase3] = useState(
+    "Primary data center infrastructure restored; synchronize transactional state delta from DR site during off-peak maintenance window."
+  );
+
+  // Section 6: MITHI Res. 2025-01 / SPAR Compliance Policies (4 Pillars)
   const [sec6CyberIntegration, setSec6CyberIntegration] = useState(
     "Formal cyber-incident response and ransomware recovery procedures are established to sanitize compromised clusters before restoration."
   );
@@ -246,7 +274,7 @@ export default function NarrativeManager() {
     "Annual review schedule or immediate audit trigger upon significant infrastructure migration or architecture modification."
   );
   const [sec6BudgetSupport, setSec6BudgetSupport] = useState(
-    "Continuing costs for GovCloud standby compute, off-site storage, and leased circuits are allocated in Part IV.A of the ISSP."
+    "Continuing costs for GovCloud standby compute, off-site storage, and leased circuits are allocated under Continuing Costs in Part IV.A of the ISSP."
   );
 
   // Tab 9: Read-Only Checklists Overview Data (EGP, Cyber, DRT, BIA, KPIs)
@@ -293,6 +321,67 @@ export default function NarrativeManager() {
     }
   }, [activeCycle]);
 
+  // Section 4 Parsing & Serialization
+  const parseSection4Text = (rawStr) => {
+    if (!rawStr || typeof rawStr !== "string") return;
+    const clean = stripHtml(rawStr);
+    const lines = clean.split("\n").map(l => l.trim()).filter(Boolean);
+
+    lines.forEach(line => {
+      if (/backup/i.test(line)) {
+        const val = line.replace(/^(?:\d+\.|\*|-)?\s*(?:Off-site Backup(?:\s*Management)?):?\s*/i, "").trim();
+        if (val) setSec4OffsiteBackup(val);
+      } else if (/cloud failover|govcloud/i.test(line)) {
+        const val = line.replace(/^(?:\d+\.|\*|-)?\s*(?:Cloud Failover(?:\s*\(GovCloud\))?):?\s*/i, "").trim();
+        if (val) setSec4CloudFailover(val);
+      } else if (/redundancy|dual-isp|isp/i.test(line)) {
+        const val = line.replace(/^(?:\d+\.|\*|-)?\s*(?:Redundancy):?\s*/i, "").trim();
+        if (val) setSec4Redundancy(val);
+      } else if (/synchronization|rpo|replication/i.test(line)) {
+        const val = line.replace(/^(?:\d+\.|\*|-)?\s*(?:Data Synchronization):?\s*/i, "").trim();
+        if (val) setSec4DataSync(val);
+      }
+    });
+  };
+
+  const buildSection4Text = () => {
+    return [
+      `1. Off-site Backup Management: ${sec4OffsiteBackup.trim()}`,
+      `2. Cloud Failover (GovCloud): ${sec4CloudFailover.trim()}`,
+      `3. Redundancy: ${sec4Redundancy.trim()}`,
+      `4. Data Synchronization: ${sec4DataSync.trim()}`
+    ].join("\n");
+  };
+
+  // Section 5 Parsing & Serialization
+  const parseSection5Text = (rawStr) => {
+    if (!rawStr || typeof rawStr !== "string") return;
+    const clean = stripHtml(rawStr);
+    const lines = clean.split("\n").map(l => l.trim()).filter(Boolean);
+
+    lines.forEach(line => {
+      if (/Phase\s*(?:I\b|1\b)|Detection/i.test(line)) {
+        const val = line.replace(/^Phase\s*(?:I|1):?\s*(?:Detection and Declaration|Detection & Declaration)?:?\s*/i, "").trim();
+        if (val) setSec5Phase1(val);
+      } else if (/Phase\s*(?:II\b|2\b)|Activation/i.test(line)) {
+        const val = line.replace(/^Phase\s*(?:II|2):?\s*(?:Activation and Execution|Activation & Execution)?:?\s*/i, "").trim();
+        if (val) setSec5Phase2(val);
+      } else if (/Phase\s*(?:III\b|3\b)|Failback/i.test(line)) {
+        const val = line.replace(/^Phase\s*(?:III|3):?\s*(?:Failback(?:\s*\(Normal Operations\))?)?:?\s*/i, "").trim();
+        if (val) setSec5Phase3(val);
+      }
+    });
+  };
+
+  const buildSection5Text = () => {
+    return [
+      `Phase I: Detection and Declaration: ${sec5Phase1.trim()}`,
+      `Phase II: Activation and Execution: ${sec5Phase2.trim()}`,
+      `Phase III: Failback (Normal Operations): ${sec5Phase3.trim()}`
+    ].join("\n");
+  };
+
+  // Section 6 Parsing & Serialization
   const parseSection6Text = (rawStr) => {
     if (!rawStr || typeof rawStr !== "string") return;
     const clean = stripHtml(rawStr);
@@ -410,18 +499,26 @@ export default function NarrativeManager() {
 
       setDrbcpApprovalDate(data.drbcp_approval_date || "");
       setDrAffectedAssets(Array.isArray(data.drbcp_affected_assets_json) ? data.drbcp_affected_assets_json : []);
-      setDrRecoveryStrategy(data.drbcp_recovery_strategy_text || stripHtml(data.drbcp_recovery_strategy_html) || "");
-      setDrSopPhases(data.drbcp_sop_phases_text || stripHtml(data.drbcp_sop_phases_html) || "");
+      
+      const sec4Val = data.drbcp_recovery_strategy_text || data.drbcp_recovery_strategy_html;
+      if (sec4Val) {
+        parseSection4Text(sec4Val);
+      }
+
+      const sec5Val = data.drbcp_sop_phases_text || data.drbcp_sop_phases_html;
+      if (sec5Val) {
+        parseSection5Text(sec5Val);
+      }
 
       const sec6Val = data.drbcp_compliance_narrative_text || data.drbcp_compliance_narrative_html;
       if (sec6Val) {
         parseSection6Text(sec6Val);
       }
 
-      // Hydrate Signatories: Ensure clean human full names without generic title fallbacks
+      // Dynamic Signatory Names: Use user-provided names, clean empty values, zero hardcoded names
       const rawCio = (data.cio_name || data.signatory_prepared_by || "").trim();
-      if (!rawCio || ["chief information officer", "cio", "none", "null"].includes(rawCio.toLowerCase())) {
-        setCioName("REY T. CORTEZ, MIT");
+      if (!rawCio || ["chief information officer", "cio", "none", "null", "undefined"].includes(rawCio.toLowerCase())) {
+        setCioName(rawCio && !["none", "null", "undefined"].includes(rawCio.toLowerCase()) ? rawCio : "");
       } else {
         setCioName(rawCio);
       }
@@ -438,8 +535,8 @@ export default function NarrativeManager() {
       setFocalContact(data.focal_contact_no || "");
 
       const rawHead = (data.head_of_agency_name || data.signatory_approved_by || "").trim();
-      if (!rawHead || ["head of agency", "agency head", "college president", "president", "none", "null"].includes(rawHead.toLowerCase())) {
-        setHeadOfAgencyName("AMADO A. OLIVA JR, PhD.");
+      if (!rawHead || ["head of agency", "agency head", "college president", "president", "none", "null", "undefined"].includes(rawHead.toLowerCase())) {
+        setHeadOfAgencyName(rawHead && !["none", "null", "undefined"].includes(rawHead.toLowerCase()) ? rawHead : "");
       } else {
         setHeadOfAgencyName(rawHead);
       }
@@ -539,10 +636,9 @@ export default function NarrativeManager() {
     const safeStart = parseInt(startYear, 10) || 2028;
     const safeEnd = parseInt(endYear, 10) || (safeStart + 2);
     const { scope_choice, scope_json } = resolveScopePayload();
-    const compiledSec6Text = buildSection6Text();
 
-    const cleanCio = (cioName.trim() || "REY T. CORTEZ, MIT");
-    const cleanHead = (headOfAgencyName.trim() || "AMADO A. OLIVA JR, PhD.");
+    const cleanCio = (cioName.trim() || "Chief Information Officer");
+    const cleanHead = (headOfAgencyName.trim() || agencyHeadPosition.trim() || defaultAgencyHeadTitle);
 
     const payload = {
       agency_name: agencyName.trim() || defaultAgencyName,
@@ -564,9 +660,9 @@ export default function NarrativeManager() {
 
       drbcp_approval_date: drbcpApprovalDate.trim() || null,
       drbcp_affected_assets_json: drAffectedAssets || [],
-      drbcp_recovery_strategy_text: drRecoveryStrategy.trim(),
-      drbcp_sop_phases_text: drSopPhases.trim(),
-      drbcp_compliance_narrative_text: compiledSec6Text,
+      drbcp_recovery_strategy_text: buildSection4Text(),
+      drbcp_sop_phases_text: buildSection5Text(),
+      drbcp_compliance_narrative_text: buildSection6Text(),
 
       cio_name: cleanCio,
       cio_plantilla_position: cioPosition.trim() || "Chief Information Officer",
@@ -1407,7 +1503,7 @@ export default function NarrativeManager() {
             </form>
           )}
 
-          {/* TAB 4: PART I.B.1 CIO & ISSP SIGNATORIES (EXACT PERSON NAMES) */}
+          {/* TAB 4: PART I.B.1 CIO & ISSP SIGNATORIES (ZERO HARDCODED NAMES) */}
           {activeTab === "cio_focal" && (
             <form onSubmit={handleSaveNarratives} className="space-y-6 animate-fadeIn">
               <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center gap-1.5 font-serif">
@@ -1421,15 +1517,17 @@ export default function NarrativeManager() {
                   <span className="text-[10px] uppercase font-bold text-blue-600 dark:text-blue-400 tracking-wider font-mono">
                     Prepared By: Chief Information Officer (CIO) / ICT Director
                   </span>
-                  <span className="text-[9.5px] text-slate-400 italic">Renders above "Name &amp; Signature of Chief Information Officer" on Cover Page</span>
+                  <span className="text-[9.5px] text-slate-400 italic">Renders above &ldquo;Name &amp; Signature of Chief Information Officer&rdquo; on Cover Page</span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="text-[10px] uppercase font-bold text-slate-500">Full Name with Degree / Title (First, MI, Last, Post-Nominal)</label>
                     <input
-                      type="text" required value={cioName} onChange={e => setCioName(e.target.value)}
-                      placeholder="e.g. REY T. CORTEZ, MIT"
+                      type="text" 
+                      value={cioName} 
+                      onChange={e => setCioName(e.target.value)}
+                      placeholder="e.g. Juan M. Dela Cruz, MIT"
                       className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-bold outline-none uppercase"
                     />
                   </div>
@@ -1474,17 +1572,19 @@ export default function NarrativeManager() {
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
                 <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-1.5">
                   <span className="text-[10px] uppercase font-bold text-emerald-600 dark:text-emerald-400 tracking-wider font-mono">
-                    Approved By: Head of Agency / College President
+                    Approved By: Head of Agency
                   </span>
-                  <span className="text-[9.5px] text-slate-400 italic">Renders above "Name &amp; Signature of Agency Head" on Cover Page</span>
+                  <span className="text-[9.5px] text-slate-400 italic">Renders above &ldquo;Name &amp; Signature of Agency Head&rdquo; on Cover Page</span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
                     <label className="text-[10px] uppercase font-bold text-slate-500">Head of Agency Full Name with Post-Nominal</label>
                     <input
-                      type="text" required value={headOfAgencyName} onChange={e => setHeadOfAgencyName(e.target.value)}
-                      placeholder="e.g. AMADO A. OLIVA JR, PhD."
+                      type="text" 
+                      value={headOfAgencyName} 
+                      onChange={e => setHeadOfAgencyName(e.target.value)}
+                      placeholder="e.g. Maria S. Santos, PhD / Atty. Roberto D. Cruz"
                       className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-bold outline-none uppercase"
                     />
                   </div>
@@ -1492,7 +1592,7 @@ export default function NarrativeManager() {
                     <label className="text-[10px] uppercase font-bold text-slate-500">Official Position Title</label>
                     <input
                       type="text" required value={agencyHeadPosition} onChange={e => setAgencyHeadPosition(e.target.value)}
-                      placeholder="e.g. Head of Agency / College President"
+                      placeholder="e.g. Secretary / Director General / Executive Director"
                       className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-semibold outline-none focus:border-emerald-500"
                     />
                   </div>
@@ -2047,59 +2147,94 @@ export default function NarrativeManager() {
             </div>
           )}
 
-          {/* TAB 8: ANNEX 2 DISASTER RECOVERY & BUSINESS CONTINUITY (NARRATIVE CORE) */}
+          {/* TAB 8: ANNEX 2 DISASTER RECOVERY & BUSINESS CONTINUITY (DYNAMIC INTERACTIVE CARDS) */}
           {activeTab === "drbcp" && (
             <div className="space-y-6 animate-fadeIn">
               <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2">
                 <h3 className="text-slate-900 dark:text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1.5 font-serif">
                   <ShieldAlert className="w-4 h-4 text-rose-500" />
-                  <span>Annex 2: Disaster Recovery &amp; Business Continuity Plan (DRBCP - Plain Text Core)</span>
+                  <span>Annex 2: Disaster Recovery &amp; Business Continuity Plan (DRBCP Interactive Studio)</span>
                 </h3>
                 <span className="text-[10px] text-slate-500 font-mono">Governed under DICT / ISO 22301 Standards</span>
               </div>
 
-              {/* Callout Link to Framework Checklists for DRT, BIA & KPIs */}
-              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3 shadow-xs">
-                <div className="space-y-0.5">
-                  <span className="font-bold text-slate-900 dark:text-white text-xs flex items-center gap-1.5">
-                    <Layers className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-                    <span>Disaster Recovery Teams, BIA &amp; KPIs Registry</span>
-                  </span>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Manage DRT personnel assignments, Business Impact Analysis (BIA) system targets, and DRBCP KPIs under the dedicated compliance checklists module.
-                  </p>
-                </div>
-                <button
-                  type="button"
+              {/* Integrated Section Navigation & Snapshot Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div 
                   onClick={() => navigate("/admin/framework")}
-                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-sm shrink-0"
+                  className="p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-blue-400 transition-all cursor-pointer space-y-1 shadow-2xs group"
                 >
-                  <span>Manage in Compliance Checklists</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
+                  <div className="flex justify-between items-center text-[10px] font-bold uppercase font-mono text-slate-500">
+                    <span className="flex items-center gap-1">
+                      <Users className="w-3.5 h-3.5 text-blue-500" />
+                      <span>1. DR Team Roles</span>
+                    </span>
+                    <ArrowRight className="w-3 h-3 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
+                  </div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-white font-mono">
+                    {drTeam.length} Assigned Members
+                  </div>
+                  <span className="text-[9.5px] text-slate-400 block truncate">Incident Commander &bull; Infra Lead</span>
+                </div>
+
+                <div 
+                  onClick={() => navigate("/admin/framework")}
+                  className="p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-emerald-400 transition-all cursor-pointer space-y-1 shadow-2xs group"
+                >
+                  <div className="flex justify-between items-center text-[10px] font-bold uppercase font-mono text-slate-500">
+                    <span className="flex items-center gap-1">
+                      <Database className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>2. BIA System Targets</span>
+                    </span>
+                    <ArrowRight className="w-3 h-3 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
+                  </div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-white font-mono">
+                    {drBia.length} Systems Evaluated
+                  </div>
+                  <span className="text-[9.5px] text-slate-400 block truncate">
+                    {drBia.filter(b => b.rto_hours <= 4).length} Mission-Critical (&le;4h RTO)
+                  </span>
+                </div>
+
+                <div 
+                  onClick={() => navigate("/admin/framework")}
+                  className="p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-purple-400 transition-all cursor-pointer space-y-1 shadow-2xs group"
+                >
+                  <div className="flex justify-between items-center text-[10px] font-bold uppercase font-mono text-slate-500">
+                    <span className="flex items-center gap-1">
+                      <Target className="w-3.5 h-3.5 text-purple-500" />
+                      <span>DRBCP Metrics (KPIs)</span>
+                    </span>
+                    <ArrowRight className="w-3 h-3 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
+                  </div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-white font-mono">
+                    {drMetrics.length} Active Benchmarks
+                  </div>
+                  <span className="text-[9.5px] text-slate-400 block truncate">Availability &bull; RTO Compliance</span>
+                </div>
               </div>
 
-              {/* Plan Overview & Approval Date */}
+              {/* Section 1: Plan Overview & Governance Approval Date */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
                 <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
-                  Plan Overview &amp; Official Governance Approval Date (Template Annex 2 Page 1)
+                  1. Plan Overview &amp; Official Governance Approval Date
                 </span>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <label className="text-[10px] uppercase font-bold text-slate-500">Official DRBCP Approval Date</label>
                     <div className="relative">
-                      <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                      <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
                       <input
                         type="text"
                         value={drbcpApprovalDate}
                         onChange={e => setDrbcpApprovalDate(e.target.value)}
-                        placeholder="e.g. October 06, 2026"
-                        className="w-full pl-9 p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                        placeholder="e.g. March 15, 2026 or Approved upon Plan Effectivity"
+                        className="w-full pl-9 p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white font-mono text-xs outline-none focus:border-blue-500"
                       />
                     </div>
                     <span className="text-[9.5px] text-slate-400 block">
-                      *Renders as 'Approval Date: {drbcpApprovalDate || "Approved upon Plan Effectivity"}' on Annex 2 Page 1.
+                      *Renders as &ldquo;Official Approval Date: {drbcpApprovalDate || "Approved upon Plan Effectivity"}&rdquo; on Annex 2 Page 1.
                     </span>
                   </div>
 
@@ -2110,148 +2245,300 @@ export default function NarrativeManager() {
                     </div>
                   </div>
                 </div>
-
-                <button
-                  type="button"
-                  onClick={handleSaveNarratives}
-                  disabled={submitting}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold cursor-pointer transition-colors shadow-sm"
-                >
-                  Save Approval Date
-                </button>
               </div>
 
-              {/* Affected Assets */}
+              {/* Section 3: Affected Assets */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
                 <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
                   3. ICT Component Inventory &amp; Affected Assets (Structured List)
                 </span>
                 
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <input
                     type="text"
                     placeholder="Asset Group (e.g. Primary Data Center)"
                     value={newAssetGroup}
                     onChange={e => setNewAssetGroup(e.target.value)}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs"
+                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none focus:border-blue-500"
                   />
                   <input
                     type="text"
                     placeholder="Physical enterprise servers, SAN storage, optical fiber backbone..."
                     value={newAssetDetails}
                     onChange={e => setNewAssetDetails(e.target.value)}
-                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white col-span-2 text-xs"
+                    className="p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white sm:col-span-2 text-xs outline-none focus:border-blue-500"
                   />
                 </div>
                 <button
                   type="button"
                   onClick={handleAddAffectedAsset}
-                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-white font-bold cursor-pointer flex items-center gap-1.5 text-xs shadow-sm"
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-white font-bold cursor-pointer flex items-center gap-1.5 text-xs shadow-sm transition-all"
                 >
                   <Plus className="w-3.5 h-3.5" /> Append Affected Asset Category
                 </button>
 
-                <div className="space-y-1.5 max-h-36 overflow-y-auto pt-1">
+                <div className="space-y-1.5 max-h-44 overflow-y-auto pt-1">
                   {drAffectedAssets.map((asset, aIdx) => (
                     <div key={aIdx} className="flex justify-between items-center p-2.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 text-xs shadow-2xs">
                       <div>
-                        <strong className="text-slate-900 dark:text-white">{asset.asset_group}:</strong>
+                        <strong className="text-slate-900 dark:text-white font-semibold">{asset.asset_group}:</strong>
                         <span className="text-slate-600 dark:text-slate-300 ml-1.5">{asset.details}</span>
                       </div>
-                      <button onClick={() => handleDeleteAffectedAsset(aIdx)} className="text-slate-400 hover:text-rose-600 cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
+                      <button 
+                        type="button"
+                        onClick={() => handleDeleteAffectedAsset(aIdx)} 
+                        className="text-slate-400 hover:text-rose-600 cursor-pointer p-1"
+                        title="Delete Asset Item"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   ))}
                   {drAffectedAssets.length === 0 && (
-                    <div className="text-slate-400 italic text-[11px]">No custom affected assets defined. Default baseline will be compiled.</div>
+                    <div className="text-slate-400 italic text-[11px] p-2">
+                      No custom affected assets defined. Default baseline will be compiled.
+                    </div>
                   )}
                 </div>
               </div>
 
-              {/* 4 & 5. Technical Recovery Strategy & SOP Operational Phases */}
+              {/* Section 4: Technical Recovery Strategy - 4 Structured Interactive Cards */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
-                <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider block font-mono">
-                  4 &amp; 5. Technical Recovery Strategy &amp; SOP Operational Phases (Plain Text)
-                </span>
-
-                <div className="space-y-1.5">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">4. Technical Recovery Strategy</label>
-                  <textarea
-                    rows={4}
-                    value={drRecoveryStrategy}
-                    onChange={e => setDrRecoveryStrategy(e.target.value)}
-                    placeholder="1. Off-site Backups: Maintained in a secondary facility (>30km away).&#10;2. Cloud Failover: Critical public service and administrative portals replicated off-site.&#10;3. Redundancy: Dual-ISP providers in active-passive load distribution."
-                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500 leading-relaxed font-sans"
-                  />
+                <div>
+                  <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider block font-mono">
+                    4. Technical Recovery Strategy (4 Core Technical Pillars)
+                  </span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Define technical resilience procedures across backup retention, failovers, network distribution, and transactional replication.
+                  </p>
                 </div>
 
-                <div className="space-y-1.5">
-                  <label className="text-[10px] uppercase font-bold text-slate-500">5. Standard Operating Procedures (SOP Phases)</label>
-                  <textarea
-                    rows={4}
-                    value={drSopPhases}
-                    onChange={e => setDrSopPhases(e.target.value)}
-                    placeholder="Phase I: Detection & Declaration: Monitoring alerts evaluated; Incident Commander activates DRBCP within 1 hour.&#10;Phase II: Activation & Execution: DRT redirected to standby cloud instances and off-site replication storage.&#10;Phase III: Failback: Primary campus datacenter restored; database deltas synchronized."
-                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white text-xs outline-none resize-none focus:border-blue-500 leading-relaxed font-sans"
-                  />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Pillar 1: Off-site Backup Management */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2 shadow-2xs">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 rounded-lg bg-blue-50 dark:bg-blue-955 text-blue-600 dark:text-blue-400">
+                        <HardDrive className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <strong className="block text-xs text-slate-900 dark:text-white">Pillar 1: Off-site Backup Management</strong>
+                        <span className="text-[9.5px] text-slate-400 block">Encrypted snapshots, &gt;30km offsite facility</span>
+                      </div>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={sec4OffsiteBackup}
+                      onChange={e => setSec4OffsiteBackup(e.target.value)}
+                      placeholder="Daily encrypted database snapshots are transferred to a secure secondary facility located >30km away..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none resize-none leading-relaxed focus:border-blue-500 font-sans"
+                    />
+                  </div>
+
+                  {/* Pillar 2: Cloud Failover */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2 shadow-2xs">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-955 text-emerald-600 dark:text-emerald-400">
+                        <Cloud className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <strong className="block text-xs text-slate-900 dark:text-white">Pillar 2: Cloud Failover (GovCloud)</strong>
+                        <span className="text-[9.5px] text-slate-400 block">Real-time replication for mission-critical portals</span>
+                      </div>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={sec4CloudFailover}
+                      onChange={e => setSec4CloudFailover(e.target.value)}
+                      placeholder="Mission-critical public service, registry, and e-payment microservices are replicated in real time to DICT GovCloud..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none resize-none leading-relaxed focus:border-blue-500 font-sans"
+                    />
+                  </div>
+
+                  {/* Pillar 3: ISP & Network Redundancy */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2 shadow-2xs">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 rounded-lg bg-purple-50 dark:bg-purple-955 text-purple-600 dark:text-purple-400">
+                        <Network className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <strong className="block text-xs text-slate-900 dark:text-white">Pillar 3: Network &amp; ISP Redundancy</strong>
+                        <span className="text-[9.5px] text-slate-400 block">Dual-provider active-passive load distribution</span>
+                      </div>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={sec4Redundancy}
+                      onChange={e => setSec4Redundancy(e.target.value)}
+                      placeholder="Dual-ISP providers configured in active-passive load distribution preventing single points of failure..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none resize-none leading-relaxed focus:border-blue-500 font-sans"
+                    />
+                  </div>
+
+                  {/* Pillar 4: Data Synchronization & RPO Assurance */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2 shadow-2xs">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 rounded-lg bg-amber-50 dark:bg-amber-955 text-amber-600 dark:text-amber-400">
+                        <RefreshCw className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <strong className="block text-xs text-slate-900 dark:text-white">Pillar 4: Data Synchronization &amp; RPO</strong>
+                        <span className="text-[9.5px] text-slate-400 block">Recovery Point Objective limit &le; 1 hour</span>
+                      </div>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={sec4DataSync}
+                      onChange={e => setSec4DataSync(e.target.value)}
+                      placeholder="Asynchronous database replication ensures an RPO limit of 1 hour during operational disruptions..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none resize-none leading-relaxed focus:border-blue-500 font-sans"
+                    />
+                  </div>
                 </div>
               </div>
 
-              {/* 6. Clean Plain-Text 4-Pillars Compliance Policies */}
+              {/* Section 5: Standard Operating Procedures (3 Interactive Operational Phases) */}
               <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
-                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block font-mono">
-                  6. Compliance, Scalability &amp; Sustainability Policies (MITHI Res. 2025-01 / SPAR 4 Pillars - Plain Text)
-                </span>
+                <div>
+                  <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider block font-mono">
+                    5. Standard Operating Procedures (3 Operational Phases)
+                  </span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Step-by-step continuity playbook executed during emergency incidents and system failbacks.
+                  </p>
+                </div>
 
-                <div className="space-y-3">
-                  <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-bold text-slate-500">
-                      6.1 Cybersecurity Integration Policy
-                    </label>
+                <div className="space-y-3.5">
+                  {/* Phase I */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2 shadow-2xs">
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-955/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 text-[9px] font-mono font-bold uppercase">
+                          Phase I
+                        </span>
+                        <strong className="text-xs text-slate-900 dark:text-white">Detection &amp; Declaration (Incident Triage)</strong>
+                      </div>
+                      <span className="text-[9.5px] text-slate-400 font-mono">Activation within 1 Hour</span>
+                    </div>
                     <textarea
                       rows={2}
+                      value={sec5Phase1}
+                      onChange={e => setSec5Phase1(e.target.value)}
+                      placeholder="Automated monitoring alerts evaluate disaster scale; Incident Commander activates DRBCP within 1 hour if localized RTO cannot be maintained..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none resize-none leading-relaxed focus:border-purple-500 font-sans"
+                    />
+                  </div>
+
+                  {/* Phase II */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2 shadow-2xs">
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-955/40 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800 text-[9px] font-mono font-bold uppercase">
+                          Phase II
+                        </span>
+                        <strong className="text-xs text-slate-900 dark:text-white">Activation &amp; Execution (Failover &amp; DNS Routing)</strong>
+                      </div>
+                      <span className="text-[9.5px] text-slate-400 font-mono">Sub-4-Hour RTO Execution</span>
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={sec5Phase2}
+                      onChange={e => setSec5Phase2(e.target.value)}
+                      placeholder="DRT redirected to GovCloud DR standby instance; DNS records updated; clean database backups verified and mounted..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none resize-none leading-relaxed focus:border-purple-500 font-sans"
+                    />
+                  </div>
+
+                  {/* Phase III */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2 shadow-2xs">
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-955/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 text-[9px] font-mono font-bold uppercase">
+                          Phase III
+                        </span>
+                        <strong className="text-xs text-slate-900 dark:text-white">Failback &amp; Normal Operations (Primary Delta Sync)</strong>
+                      </div>
+                      <span className="text-[9.5px] text-slate-400 font-mono">Maintenance Window Reroute</span>
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={sec5Phase3}
+                      onChange={e => setSec5Phase3(e.target.value)}
+                      placeholder="Primary data center infrastructure restored; synchronize transactional state delta from DR site during off-peak maintenance window..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white text-xs outline-none resize-none leading-relaxed focus:border-purple-500 font-sans"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 6: Clean Plain-Text 4-Pillars Compliance Policies */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-955 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4 shadow-xs">
+                <div>
+                  <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block font-mono">
+                    6. Compliance, Scalability &amp; Sustainability Policies (MITHI Res. 2025-01 / SPAR 4 Pillars)
+                  </span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Statutory institutional policies governing cyber isolation, simulation drills, review frequencies, and UACS multi-year budgeting.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Pillar 6.1 */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-2xs">
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-slate-900 dark:text-white">
+                      <Lock className="w-3.5 h-3.5 text-blue-500" />
+                      <span>6.1 Cybersecurity Integration Policy</span>
+                    </div>
+                    <textarea
+                      rows={3}
                       value={sec6CyberIntegration}
                       onChange={e => setSec6CyberIntegration(e.target.value)}
-                      placeholder="Describe procedures to isolate compromised networks, sanitize environments, and restore verified clean snapshots following ransomware or cyber-attack events..."
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
+                      placeholder="Formal cyber-recovery procedures isolate compromised networks and restore verified clean backups..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white leading-normal text-xs font-sans outline-none focus:border-emerald-500"
                     />
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-bold text-slate-500">
-                      6.2 Testing &amp; Maintenance Drills Mandate
-                    </label>
+                  {/* Pillar 6.2 */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-2xs">
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-slate-900 dark:text-white">
+                      <Target className="w-3.5 h-3.5 text-purple-500" />
+                      <span>6.2 Testing &amp; Maintenance Drills Mandate</span>
+                    </div>
                     <textarea
-                      rows={2}
+                      rows={3}
                       value={sec6DrillsTesting}
                       onChange={e => setSec6DrillsTesting(e.target.value)}
-                      placeholder="Mandate the frequency of full-scale DR simulation drills (min 1 per year) and tabletop walkthroughs..."
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
+                      placeholder="Mandates at least one (1) full-scale DR simulation exercise per calendar year..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white leading-normal text-xs font-sans outline-none focus:border-emerald-500"
                     />
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-bold text-slate-500">
-                      6.3 Audit &amp; Review Governance Schedule
-                    </label>
+                  {/* Pillar 6.3 */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-2xs">
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-slate-900 dark:text-white">
+                      <Calendar className="w-3.5 h-3.5 text-amber-500" />
+                      <span>6.3 Audit &amp; Review Governance Schedule</span>
+                    </div>
                     <textarea
-                      rows={2}
+                      rows={3}
                       value={sec6AuditReview}
                       onChange={e => setSec6AuditReview(e.target.value)}
-                      placeholder="Define periodic review cycles (annual / post-migration audit trigger)..."
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
+                      placeholder="The DRBCP is reviewed annually or whenever major infrastructure or platform migrations occur..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white leading-normal text-xs font-sans outline-none focus:border-emerald-500"
                     />
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-bold text-slate-500">
-                      6.4 UACS &amp; Budgeting Support Alignment
-                    </label>
+                  {/* Pillar 6.4 */}
+                  <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-2xs">
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-slate-900 dark:text-white">
+                      <Coins className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>6.4 UACS &amp; Budgeting Support Alignment</span>
+                    </div>
                     <textarea
-                      rows={2}
+                      rows={3}
                       value={sec6BudgetSupport}
                       onChange={e => setSec6BudgetSupport(e.target.value)}
-                      placeholder="Detail how standby compute, off-site storage, and leased circuits are funded under Continuing Costs in Part IV.A..."
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white leading-normal text-xs font-sans"
+                      placeholder="Funding for off-site replication, GovCloud standby subscriptions, and hardware maintenance is allocated under Continuing Costs..."
+                      className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white leading-normal text-xs font-sans outline-none focus:border-emerald-500"
                     />
                   </div>
                 </div>
@@ -2282,7 +2569,6 @@ export default function NarrativeManager() {
                   </p>
                 </div>
 
-                {/* Centralized Redirect Action Button */}
                 <button
                   type="button"
                   onClick={() => navigate("/admin/framework")}
@@ -2537,6 +2823,17 @@ export default function NarrativeManager() {
                 >
                   <FileText className="w-3.5 h-3.5" />
                   <span>View Archived Snapshot PDF</span>
+                </a>
+              )}
+              {rolloverModal.data?.final_docx_vault_url && (
+                <a
+                  href={rolloverModal.data.final_docx_vault_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-2 bg-blue-700 hover:bg-blue-600 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-sm text-xs"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Download Word (.docx)</span>
                 </a>
               )}
               <button

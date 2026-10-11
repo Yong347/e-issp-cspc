@@ -268,7 +268,7 @@ def align_database_schemas(engine):
     2. Converts legacy native ENUM columns to standard VARCHAR types to prevent InvalidTextRepresentation.
     3. Synchronizes missing columns for DICT v.2026 specifications.
     4. Ensures zero hardcoded deletion of user-created projects or institutional names.
-    5. Preserves legitimate human signatory names on the cover page without overwriting them with generic titles.
+    5. Preserves user-provided signatory names on the cover page without overwriting them on startup.
     6. Seeds initial baseline records for dynamic strategic categories, UACS catalog, and policy settings ONLY if empty.
     """
     logger.info("Running defensive schema alignment and data sanitization...")
@@ -601,12 +601,11 @@ def align_database_schemas(engine):
             WHERE agency_head_position IS NULL OR agency_head_position = '';
         """))
 
-        # Preserve human signatory full names without overwriting them with generic position titles
+        # Populate generic signatory defaults ONLY when null or empty
         safe_exec(conn, text("""
             UPDATE master_narratives 
-            SET signatory_prepared_by = 'REY T. CORTEZ, MIT'
-            WHERE signatory_prepared_by IS NULL OR signatory_prepared_by = ''
-               OR LOWER(TRIM(signatory_prepared_by)) IN ('chief information officer', 'cio', 'none', 'null', 'undefined');
+            SET signatory_prepared_by = 'Chief Information Officer'
+            WHERE signatory_prepared_by IS NULL OR signatory_prepared_by = '';
         """))
 
         safe_exec(conn, text("""
@@ -615,11 +614,10 @@ def align_database_schemas(engine):
             WHERE preparer_position IS NULL OR preparer_position = '';
         """))
 
-        safe_exec(conn, text("""
+        safe_exec(conn, text(f"""
             UPDATE master_narratives 
-            SET signatory_approved_by = 'AMADO A. OLIVA JR, PhD.'
-            WHERE signatory_approved_by IS NULL OR signatory_approved_by = ''
-               OR LOWER(TRIM(signatory_approved_by)) IN ('head of agency', 'agency head', 'college president', 'president', 'none', 'null', 'undefined');
+            SET signatory_approved_by = '{default_head_title}'
+            WHERE signatory_approved_by IS NULL OR signatory_approved_by = '';
         """))
 
         # Safely resolve dynamic active cycle period

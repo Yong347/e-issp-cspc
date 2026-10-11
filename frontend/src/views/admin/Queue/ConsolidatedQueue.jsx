@@ -155,8 +155,19 @@ export default function ConsolidatedQueue() {
 
   // Dynamic Year Sequence (1 to N Years)
   const activeYears = useMemo(() => {
-    return (planningYears && planningYears.length > 0) ? planningYears : [2028, 2029, 2030];
-  }, [planningYears]);
+    if (planningYears && planningYears.length > 0) return planningYears;
+    if (activeCycle && activeCycle.includes("-")) {
+      const parts = activeCycle.split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parseInt(parts[1], 10);
+      if (!isNaN(start) && !isNaN(end) && end >= start) {
+        const span = [];
+        for (let y = start; y <= end; y++) span.push(y);
+        return span;
+      }
+    }
+    return [2026, 2027, 2028];
+  }, [planningYears, activeCycle]);
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
@@ -1447,8 +1458,11 @@ export default function ConsolidatedQueue() {
               <div className="space-y-1.5">
                 <label className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">Resource Item Label</label>
                 <input
-                  type="text" required value={overrideItemName} onChange={(e) => setOverrideItemName(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-semibold outline-none focus:border-blue-500"
+                  type="text" 
+                  required 
+                  value={overrideItemName} 
+                  onChange={(e) => setOverrideItemName(e.target.value)}
+                  className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-semibold outline-none focus:border-blue-500"
                 />
               </div>
 
@@ -1467,8 +1481,8 @@ export default function ConsolidatedQueue() {
               </div>
 
               {/* STEP 1: Program Outcome Assignment (Part I.A.4) */}
-              <div className="space-y-1.5 p-3.5 bg-blue-50/50 dark:bg-blue-955/20 border border-blue-200 dark:border-blue-900/60 rounded-xl">
-                <label className="text-[10px] uppercase font-bold text-blue-900 dark:text-blue-300 flex items-center justify-between">
+              <div className="space-y-1.5 p-3.5 bg-blue-50/90 dark:bg-slate-955 border border-blue-200 dark:border-blue-900/60 text-blue-900 dark:text-blue-200 rounded-xl">
+                <label className="text-[10px] uppercase font-bold text-blue-900 dark:text-blue-200 flex items-center justify-between">
                   <span className="flex items-center gap-1.5">
                     <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center font-mono text-[9px] font-bold">1</span>
                     <GraduationCap className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
@@ -1595,7 +1609,7 @@ export default function ConsolidatedQueue() {
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
                       governanceMode === "project_bound"
-                        ? "bg-purple-50 dark:bg-purple-955/40 border-purple-400 text-purple-900 dark:text-purple-200 ring-1 ring-purple-400"
+                        ? "bg-purple-50/90 dark:bg-slate-955 border-purple-400 dark:border-purple-800 text-purple-900 dark:text-purple-200 ring-1 ring-purple-400"
                         : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
                     }`}>
                       <div className="flex items-center gap-2">
@@ -1619,7 +1633,7 @@ export default function ConsolidatedQueue() {
 
                     <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
                       governanceMode === "intake_pool"
-                        ? "bg-amber-50 dark:bg-amber-955/40 border-amber-400 text-amber-900 dark:text-amber-200 ring-1 ring-amber-400"
+                        ? "bg-amber-50/90 dark:bg-slate-955 border-amber-400 dark:border-amber-800 text-amber-900 dark:text-amber-200 ring-1 ring-amber-400"
                         : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
                     }`}>
                       <div className="flex items-center gap-2">
@@ -1641,7 +1655,7 @@ export default function ConsolidatedQueue() {
 
                     <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
                       governanceMode === "standalone"
-                        ? "bg-blue-50 dark:bg-blue-955/40 border-blue-400 text-blue-900 dark:text-blue-200 ring-1 ring-blue-400"
+                        ? "bg-blue-50/90 dark:bg-slate-955 border-blue-400 dark:border-blue-800 text-blue-900 dark:text-blue-200 ring-1 ring-blue-400"
                         : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
                     }`}>
                       <div className="flex items-center gap-2">
@@ -1665,8 +1679,8 @@ export default function ConsolidatedQueue() {
 
                 {/* Dynamic Explanatory Callout Banner based on Governance Mode */}
                 {governanceMode === "intake_pool" && (
-                  <div className="p-2.5 bg-amber-50 dark:bg-amber-955/30 border border-amber-300 dark:border-amber-900/60 rounded-xl text-[10.5px] text-amber-900 dark:text-amber-300 flex items-start gap-1.5 animate-fadeIn">
-                    <Info className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="p-2.5 bg-amber-50/90 dark:bg-slate-955 border border-amber-300 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 rounded-xl text-[10.5px] flex items-start gap-1.5 animate-fadeIn">
+                    <Info className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
                     <span>
                       <strong>Intake Pool Quarantining Active:</strong> This proposal will be approved into the departmental intake pool. It will <strong>NOT</strong> leak into Table B.1 or Table IV.A until an administrator assigns it to a Part III.E Project Charter in the Projects Portfolio.
                     </span>
@@ -1772,7 +1786,7 @@ export default function ConsolidatedQueue() {
 
                 {/* Helpful Guidance Callout for Packaged Software vs Custom Systems */}
                 {overrideCategory === "Software" && (
-                  <div className="p-2.5 bg-blue-50 dark:bg-blue-955/30 border border-blue-200 dark:border-blue-900/50 rounded-xl text-[10px] text-blue-800 dark:text-blue-300 flex items-start gap-1.5 leading-relaxed">
+                  <div className="p-2.5 bg-blue-50/90 dark:bg-slate-955 border border-blue-200 dark:border-blue-900/60 text-blue-900 dark:text-blue-200 rounded-xl text-[10px] flex items-start gap-1.5 leading-relaxed">
                     <Info className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
                     <span>
                       <strong>Procurement Scope Note:</strong> Use this line item for Commercial Off-The-Shelf (COTS) software licenses and perpetual seat packages (e.g. AutoCAD, SPSS, Adobe CC, Windows Server CALs). Enterprise systems running multi-user workflows (e.g. HRIS, Student Portal) must be managed under <strong>Part III.D Information Systems</strong>.
@@ -1806,7 +1820,7 @@ export default function ConsolidatedQueue() {
                       value={overrideOfficeLoc}
                       onChange={(e) => setOverrideOfficeLoc(e.target.value)}
                       placeholder="e.g. Planning Division, Central Office, Field Branch..."
-                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none text-xs"
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none focus:border-blue-500 text-xs"
                     />
                   </div>
                 </div>
@@ -1865,9 +1879,9 @@ export default function ConsolidatedQueue() {
 
               {/* Major Outlays Development Status Parameter */}
               {isOverrideMajorOutlay && (
-                <div className="p-3 bg-amber-50 dark:bg-amber-955/30 border border-amber-200 dark:border-amber-900/60 rounded-xl space-y-2 animate-fadeIn">
-                  <span className="block text-[10px] text-amber-800 dark:text-amber-400 font-bold uppercase tracking-wider flex items-center gap-1 font-mono">
-                    <ShieldAlert className="w-4 h-4 shrink-0" />
+                <div className="p-3 bg-amber-50/90 dark:bg-slate-955 border border-amber-300 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 rounded-xl space-y-2 animate-fadeIn">
+                  <span className="block text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 font-mono">
+                    <ShieldAlert className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
                     <span>Major Outlay &ge; {formatPHP(majorReviewThreshold)} (Development Tag Mandated)</span>
                   </span>
                   <select
@@ -1913,7 +1927,7 @@ export default function ConsolidatedQueue() {
               </div>
 
               {/* Live DBM Capitalization & UACS Preview Box */}
-              <div className="p-3 bg-blue-50 dark:bg-blue-955/30 border border-blue-200 dark:border-blue-900/60 rounded-xl text-[10px] text-blue-800 dark:text-blue-300 leading-relaxed space-y-1">
+              <div className="p-3 bg-blue-50/90 dark:bg-slate-955 border border-blue-200 dark:border-blue-900/60 text-blue-900 dark:text-blue-200 rounded-xl text-[10px] leading-relaxed space-y-1">
                 <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[9px]">
                   <Info className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
                   <span>Live DBM Classification &amp; Parity Resolution</span>
@@ -1933,7 +1947,7 @@ export default function ConsolidatedQueue() {
                   value={overrideJustification}
                   onChange={(e) => setOverrideJustification(e.target.value)}
                   placeholder="Record justification for audit trail and compliance reporting..."
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white resize-none outline-none"
+                  className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white resize-none outline-none focus:border-blue-500"
                 />
               </div>
 
@@ -1988,11 +2002,11 @@ export default function ConsolidatedQueue() {
                   value={returnRemark}
                   onChange={e => setReturnRemark(e.target.value)}
                   placeholder="Detail missing documentation, expired quotation updates, or required quantity adjustments..."
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none resize-none leading-relaxed"
+                  className="w-full p-2.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white outline-none resize-none leading-relaxed focus:border-rose-500"
                 />
               </div>
 
-              <div className="p-3 bg-amber-50 dark:bg-amber-955/20 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300 rounded-xl text-[10.5px]">
+              <div className="p-3 bg-amber-50/90 dark:bg-slate-955 border border-amber-300 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 rounded-xl text-[10.5px]">
                 Returning this proposal unlocks editing for the department and locks submission until this action item is marked resolved.
               </div>
 
@@ -2000,14 +2014,14 @@ export default function ConsolidatedQueue() {
                 <button
                   type="button"
                   onClick={() => setReturnModalItem(null)}
-                  className="px-4 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl font-bold cursor-pointer text-xs"
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold cursor-pointer text-xs transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isSubmittingReturn}
-                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold cursor-pointer shadow-sm text-xs"
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white rounded-xl font-bold cursor-pointer shadow-sm text-xs transition-colors"
                 >
                   {isSubmittingReturn ? "Returning..." : "Confirm Return"}
                 </button>
@@ -2098,3 +2112,4 @@ export default function ConsolidatedQueue() {
     </div>
   );
 }
+

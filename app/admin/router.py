@@ -558,7 +558,8 @@ def create_catalog_item(
     if existing:
         raise HTTPException(status_code=400, detail=f"Catalog item key '{payload.item_key}' already exists.")
 
-    item = CatalogItem(**payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(CatalogItem, k)}
+    item = CatalogItem(**dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -577,7 +578,8 @@ def update_catalog_item(
         raise HTTPException(status_code=404, detail="Catalog item not found.")
 
     for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
 
     db.commit()
     db.refresh(item)
@@ -685,7 +687,8 @@ def create_instruction(
     if existing:
         raise HTTPException(status_code=400, detail=f"Step number {payload.step_number} already exists.")
 
-    item = GeneralInstruction(**payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(GeneralInstruction, k)}
+    item = GeneralInstruction(**dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -939,6 +942,18 @@ def update_master_narrative(
         narrative = MasterNarrative(issp_period=issp_period, issp_period_from=start, issp_period_to=end)
         db.add(narrative)
 
+    # Explicitly map alias and signatory fields if present in payload
+    if "cio_name" in payload and payload["cio_name"]:
+        narrative.signatory_prepared_by = str(payload["cio_name"]).strip()
+    if "head_of_agency_name" in payload and payload["head_of_agency_name"]:
+        narrative.signatory_approved_by = str(payload["head_of_agency_name"]).strip()
+    if "agency_head_title" in payload and payload["agency_head_title"]:
+        narrative.agency_head_position = str(payload["agency_head_title"]).strip()
+    if "mandate_text" in payload and payload["mandate_text"] is not None:
+        narrative.mandate_text = str(payload["mandate_text"]).strip()
+    elif "mandate_html" in payload and payload["mandate_html"] is not None and not narrative.mandate_text:
+        narrative.mandate_text = str(payload["mandate_html"]).strip()
+
     for k, v in payload.items():
         if hasattr(narrative, k) and v is not None:
             # Case-insensitive normalization for scope_choice
@@ -1059,7 +1074,8 @@ def get_dr_teams(issp_period: str, db: Session = Depends(get_db), admin: dict = 
 
 @router.post("/narratives/{issp_period}/dr-teams", response_model=DisasterRecoveryTeamResponse, status_code=status.HTTP_201_CREATED)
 def create_dr_team(issp_period: str, payload: DisasterRecoveryTeamCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = DisasterRecoveryTeam(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(DisasterRecoveryTeam, k)}
+    item = DisasterRecoveryTeam(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1072,7 +1088,8 @@ def update_dr_team(id: int, payload: DisasterRecoveryTeamCreate, db: Session = D
     if not item:
         raise HTTPException(status_code=404, detail="DR Team member not found.")
     for k, v in payload.model_dump().items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1095,7 +1112,8 @@ def get_dr_bias(issp_period: str, db: Session = Depends(get_db), admin: dict = D
 
 @router.post("/narratives/{issp_period}/dr-bias", response_model=BusinessImpactAnalysisResponse, status_code=status.HTTP_201_CREATED)
 def create_dr_bia(issp_period: str, payload: BusinessImpactAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = BusinessImpactAnalysis(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(BusinessImpactAnalysis, k)}
+    item = BusinessImpactAnalysis(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1108,7 +1126,8 @@ def update_dr_bia(id: int, payload: BusinessImpactAnalysisCreate, db: Session = 
     if not item:
         raise HTTPException(status_code=404, detail="BIA record not found.")
     for k, v in payload.model_dump().items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1131,7 +1150,8 @@ def get_dr_metrics(issp_period: str, db: Session = Depends(get_db), admin: dict 
 
 @router.post("/narratives/{issp_period}/dr-metrics", response_model=DRBCPMetricResponse, status_code=status.HTTP_201_CREATED)
 def create_dr_metric(issp_period: str, payload: DRBCPMetricCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = DRBCPMetric(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(DRBCPMetric, k)}
+    item = DRBCPMetric(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1144,7 +1164,8 @@ def update_dr_metric(id: int, payload: DRBCPMetricCreate, db: Session = Depends(
     if not item:
         raise HTTPException(status_code=404, detail="DR Metric not found.")
     for k, v in payload.model_dump().items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1177,7 +1198,8 @@ def get_stakeholders_default(issp_period: Optional[str] = Query(None), db: Sessi
 
 @router.post("/narratives/{issp_period}/stakeholders", response_model=StakeholderAnalysisResponse, status_code=status.HTTP_201_CREATED)
 def create_stakeholder_by_cycle(issp_period: str, payload: StakeholderAnalysisCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = StakeholderAnalysis(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(StakeholderAnalysis, k)}
+    item = StakeholderAnalysis(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1187,7 +1209,8 @@ def create_stakeholder_by_cycle(issp_period: str, payload: StakeholderAnalysisCr
 @router.post("/stakeholders", response_model=StakeholderAnalysisResponse, status_code=status.HTTP_201_CREATED)
 def create_stakeholder_default(payload: StakeholderAnalysisCreate, issp_period: Optional[str] = Query(None), db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     period = issp_period or get_active_issp_period(db)
-    item = StakeholderAnalysis(issp_period=period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(StakeholderAnalysis, k)}
+    item = StakeholderAnalysis(issp_period=period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1200,7 +1223,8 @@ def update_stakeholder(id: int, payload: StakeholderAnalysisUpdate, db: Session 
     if not item:
         raise HTTPException(status_code=404, detail="Stakeholder not found.")
     for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1223,7 +1247,8 @@ def get_human_capitals(issp_period: str, db: Session = Depends(get_db), admin: d
 
 @router.post("/narratives/{issp_period}/human-capitals", response_model=HumanCapitalResponse, status_code=status.HTTP_201_CREATED)
 def create_human_capital(issp_period: str, payload: HumanCapitalCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = HumanCapital(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(HumanCapital, k)}
+    item = HumanCapital(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1236,7 +1261,8 @@ def update_human_capital(id: int, payload: HumanCapitalCreate, db: Session = Dep
     if not item:
         raise HTTPException(status_code=404, detail="Human Capital entry not found.")
     for k, v in payload.model_dump().items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1259,7 +1285,8 @@ def get_staff_positions(issp_period: str, db: Session = Depends(get_db), admin: 
 
 @router.post("/narratives/{issp_period}/staff-positions", response_model=IctStaffPositionResponse, status_code=status.HTTP_201_CREATED)
 def create_staff_position(issp_period: str, payload: IctStaffPositionCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = IctStaffPosition(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(IctStaffPosition, k)}
+    item = IctStaffPosition(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1272,7 +1299,8 @@ def update_staff_position(id: uuid.UUID, payload: IctStaffPositionCreate, db: Se
     if not item:
         raise HTTPException(status_code=404, detail="Staff Position not found.")
     for k, v in payload.model_dump().items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1299,31 +1327,37 @@ def get_egov_checklists_default(issp_period: Optional[str] = Query(None), db: Se
     return db.query(EGovernmentChecklist).filter(EGovernmentChecklist.issp_period == period).order_by(EGovernmentChecklist.id.asc()).all()
 
 
+# Filtered model_dump prevents 'is_proposed_equivalent' TypeError
 @router.post("/narratives/{issp_period}/egov-checklists", response_model=EGovernmentChecklistResponse, status_code=status.HTTP_201_CREATED)
 def create_egov_checklist_by_cycle(issp_period: str, payload: EGovernmentChecklistCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = EGovernmentChecklist(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(EGovernmentChecklist, k)}
+    item = EGovernmentChecklist(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
     return item
 
 
+# Filtered model_dump prevents 'is_proposed_equivalent' TypeError
 @router.post("/egov-checklists", response_model=EGovernmentChecklistResponse, status_code=status.HTTP_201_CREATED)
 def create_egov_checklist_default(payload: EGovernmentChecklistCreate, issp_period: Optional[str] = Query(None), db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     period = issp_period or get_active_issp_period(db)
-    item = EGovernmentChecklist(issp_period=period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(EGovernmentChecklist, k)}
+    item = EGovernmentChecklist(issp_period=period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
     return item
 
 
+# Filtered model_dump prevents 'is_proposed_equivalent' TypeError
 @router.put("/egov-checklists/{id}", response_model=EGovernmentChecklistResponse)
 def update_egov_checklist(id: int, payload: EGovernmentChecklistUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     item = db.query(EGovernmentChecklist).filter(EGovernmentChecklist.id == id).first()
     if not item:
         raise HTTPException(status_code=404, detail="EGP item not found.")
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if hasattr(EGovernmentChecklist, k)}
+    for k, v in update_data.items():
         setattr(item, k, v)
     db.commit()
     db.refresh(item)
@@ -1347,7 +1381,8 @@ def get_cross_projects(issp_period: str, db: Session = Depends(get_db), admin: d
 
 @router.post("/narratives/{issp_period}/cross-projects", response_model=CrossAgencyProjectResponse, status_code=status.HTTP_201_CREATED)
 def create_cross_project(issp_period: str, payload: CrossAgencyProjectCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
-    item = CrossAgencyProject(issp_period=issp_period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(CrossAgencyProject, k)}
+    item = CrossAgencyProject(issp_period=issp_period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1360,7 +1395,8 @@ def update_cross_project(id: uuid.UUID, payload: CrossAgencyProjectCreate, db: S
     if not item:
         raise HTTPException(status_code=404, detail="Cross Project not found.")
     for k, v in payload.model_dump().items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1619,7 +1655,8 @@ def create_network_infrastructure(
     admin: dict = Depends(require_admin)
 ):
     period = issp_period or get_active_issp_period(db)
-    item = NetworkInfrastructure(issp_period=period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(NetworkInfrastructure, k)}
+    item = NetworkInfrastructure(issp_period=period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1637,7 +1674,8 @@ def update_network_infrastructure(
     if not item:
         raise HTTPException(status_code=404, detail="Network infrastructure record not found.")
     for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1682,7 +1720,8 @@ def create_cybersecurity_control(
     admin: dict = Depends(require_admin)
 ):
     period = issp_period or get_active_issp_period(db)
-    item = CybersecurityControl(issp_period=period, **payload.model_dump())
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(CybersecurityControl, k)}
+    item = CybersecurityControl(issp_period=period, **dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -1700,7 +1739,8 @@ def update_cybersecurity_control(
     if not item:
         raise HTTPException(status_code=404, detail="Cybersecurity control not found.")
     for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(item, k, v)
+        if hasattr(item, k):
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -2311,7 +2351,7 @@ def create_ict_project(
 ):
     try:
         period = get_active_issp_period(db)
-        data_dict = payload.model_dump()
+        data_dict = {k: v for k, v in payload.model_dump().items() if hasattr(IctProject, k)}
         new_project = IctProject(
             issp_period=period,
             **data_dict
@@ -2379,7 +2419,7 @@ def update_ict_project(
         if not project:
             raise HTTPException(status_code=404, detail="ICT Project not found.")
 
-        update_dict = payload.model_dump(exclude_unset=True)
+        update_dict = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if hasattr(project, k)}
         for key, val in update_dict.items():
             setattr(project, key, val)
 
@@ -2631,7 +2671,8 @@ def update_performance_metric(
         raise HTTPException(status_code=404, detail="Performance metric not found.")
 
     for k, v in payload.model_dump().items():
-        setattr(metric, k, v)
+        if hasattr(metric, k):
+            setattr(metric, k, v)
 
     db.commit()
     db.refresh(metric)
@@ -2652,6 +2693,11 @@ def delete_performance_metric(id: uuid.UUID, db: Session = Depends(get_db), admi
 @router.get("/strategic-categories", response_model=List[StrategicCategoryResponse])
 def get_strategic_categories(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     return db.query(StrategicCategory).filter(StrategicCategory.is_active == True).order_by(StrategicCategory.order_index.asc()).all()
+
+
+@router.get("/governance/strategic-categories", response_model=List[StrategicCategoryResponse], include_in_schema=False)
+def get_strategic_categories_governance_alias(db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return get_strategic_categories(db=db, admin=admin)
 
 
 @router.post("/strategic-categories", response_model=StrategicCategoryResponse, status_code=status.HTTP_201_CREATED)
@@ -2676,6 +2722,11 @@ def create_strategic_category(payload: StrategicCategoryCreate, db: Session = De
     db.commit()
     db.refresh(cat)
     return cat
+
+
+@router.post("/governance/strategic-categories", response_model=StrategicCategoryResponse, status_code=status.HTTP_201_CREATED)
+def create_strategic_category_governance_alias(payload: StrategicCategoryCreate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return create_strategic_category(payload=payload, db=db, admin=admin)
 
 
 @router.put("/strategic-categories/{cat_id}", response_model=StrategicCategoryResponse)
@@ -2703,6 +2754,11 @@ def update_strategic_category(cat_id: int, payload: StrategicCategoryUpdate, db:
     return cat
 
 
+@router.put("/governance/strategic-categories/{cat_id}", response_model=StrategicCategoryResponse, include_in_schema=False)
+def update_strategic_category_governance_alias(cat_id: int, payload: StrategicCategoryUpdate, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return update_strategic_category(cat_id=cat_id, payload=payload, db=db, admin=admin)
+
+
 @router.delete("/strategic-categories/{cat_id}")
 def delete_strategic_category(cat_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
     cat = db.query(StrategicCategory).filter(StrategicCategory.id == cat_id).first()
@@ -2724,6 +2780,11 @@ def delete_strategic_category(cat_id: int, db: Session = Depends(get_db), admin:
     return {"status": "success", "message": f"Category '{cat.name}' deleted."}
 
 
+@router.delete("/governance/strategic-categories/{cat_id}", include_in_schema=False)
+def delete_strategic_category_governance_alias(cat_id: int, db: Session = Depends(get_db), admin: dict = Depends(require_admin)):
+    return delete_strategic_category(cat_id=cat_id, db=db, admin=admin)
+
+
 # ==========================================================
 # DYNAMIC UACS / OBJECT OF EXPENDITURE CRUD (TABLE B.4)
 # ==========================================================
@@ -2740,14 +2801,8 @@ def create_uacs_entry(payload: UacsCatalogItemCreate, db: Session = Depends(get_
     if existing:
         raise HTTPException(status_code=400, detail=f"UACS code '{code}' already exists in catalog.")
 
-    item = UacsCatalogItem(
-        uacs_code=code,
-        account_title=payload.account_title.strip(),
-        expenditure_class=payload.expenditure_class,
-        is_subscription_default=payload.is_subscription_default,
-        is_active=payload.is_active,
-        description=payload.description
-    )
+    dumped = {k: v for k, v in payload.model_dump().items() if hasattr(UacsCatalogItem, k)}
+    item = UacsCatalogItem(**dumped)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -2778,6 +2833,59 @@ def delete_uacs_entry(item_id: int, db: Session = Depends(get_db), admin: dict =
     db.delete(item)
     db.commit()
     return {"status": "success", "message": "UACS object code removed from catalog."}
+
+
+@router.put("/proposals/{proposal_id}/uacs")
+def assign_proposal_uacs(
+    proposal_id: uuid.UUID,
+    payload: Dict[str, Any],
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """Explicitly assigns UACS Object Code and Expenditure Class to a proposal."""
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found.")
+
+    uacs_code = payload.get("uacs_object_code")
+    exp_class = payload.get("expenditure_class")
+
+    old_vals = {
+        "uacs_object_code": proposal.uacs_object_code,
+        "expenditure_class": proposal.expenditure_class
+    }
+
+    if uacs_code:
+        proposal.uacs_object_code = str(uacs_code).strip()
+    if exp_class:
+        proposal.expenditure_class = str(exp_class).strip()
+    elif uacs_code:
+        if "(CO)" in str(uacs_code):
+            proposal.expenditure_class = "Capital Outlay"
+        elif "(MOOE)" in str(uacs_code):
+            proposal.expenditure_class = "Maintenance and Other Operating Expenses"
+
+    proposal.version += 1
+
+    log_audit_event(
+        db=db,
+        action="PROPOSAL_UACS_ASSIGNED",
+        module="PROPOSALS",
+        user_id=admin["id"],
+        department_id=proposal.department_id,
+        proposal_id=proposal.id,
+        ip_address=request.client.host if request.client else None,
+        old_value=old_vals,
+        new_value={
+            "uacs_object_code": proposal.uacs_object_code,
+            "expenditure_class": proposal.expenditure_class
+        }
+    )
+
+    db.commit()
+    db.refresh(proposal)
+    return {"status": "success", "message": "UACS object code assigned to proposal.", "proposal_id": str(proposal.id)}
 
 
 # ==========================================================
@@ -3896,6 +4004,10 @@ def admin_override_proposal(
                 if proj:
                     proposal.fund_source = str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)")
                     proposal.strategic_category = str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects")
+                    sc_row = db.query(StrategicCategory).filter(
+                        func.lower(StrategicCategory.name) == func.lower(proposal.strategic_category)
+                    ).first()
+                    proposal.strategic_category_id = sc_row.id if sc_row else None
             else:
                 # Disconnected from project: assign standalone category if not specified
                 if payload.strategic_category is None:
@@ -4003,6 +4115,59 @@ def admin_override_proposal(
         raise HTTPException(status_code=500, detail="Database failure during override.")
 
 
+@router.put("/proposals/{proposal_id}/uacs")
+def assign_proposal_uacs(
+    proposal_id: uuid.UUID,
+    payload: Dict[str, Any],
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    """Explicitly assigns UACS Object Code and Expenditure Class to a proposal."""
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found.")
+
+    uacs_code = payload.get("uacs_object_code")
+    exp_class = payload.get("expenditure_class")
+
+    old_vals = {
+        "uacs_object_code": proposal.uacs_object_code,
+        "expenditure_class": proposal.expenditure_class
+    }
+
+    if uacs_code:
+        proposal.uacs_object_code = str(uacs_code).strip()
+    if exp_class:
+        proposal.expenditure_class = str(exp_class).strip()
+    elif uacs_code:
+        if "(CO)" in str(uacs_code):
+            proposal.expenditure_class = "Capital Outlay"
+        elif "(MOOE)" in str(uacs_code):
+            proposal.expenditure_class = "Maintenance and Other Operating Expenses"
+
+    proposal.version += 1
+
+    log_audit_event(
+        db=db,
+        action="PROPOSAL_UACS_ASSIGNED",
+        module="PROPOSALS",
+        user_id=admin["id"],
+        department_id=proposal.department_id,
+        proposal_id=proposal.id,
+        ip_address=request.client.host if request.client else None,
+        old_value=old_vals,
+        new_value={
+            "uacs_object_code": proposal.uacs_object_code,
+            "expenditure_class": proposal.expenditure_class
+        }
+    )
+
+    db.commit()
+    db.refresh(proposal)
+    return {"status": "success", "message": "UACS object code assigned to proposal.", "proposal_id": str(proposal.id)}
+
+
 @router.delete("/proposals/{proposal_id}")
 def admin_delete_proposal(
     proposal_id: uuid.UUID,
@@ -4084,7 +4249,7 @@ def reset_planning_cycle(
     try:
         deleted_count = db.query(Proposal).filter(
             Proposal.issp_period == issp_period,
-            func.lower(cast(Proposal.status, String)).in_(["draft", "returned"])
+            func.lower(cast(Proposal.status, String)) == ["draft", "returned"]
         ).delete(synchronize_session=False)
 
         db.query(InformationSystem).filter(

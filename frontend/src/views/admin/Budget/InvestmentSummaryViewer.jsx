@@ -1,5 +1,5 @@
 ﻿// frontend/src/views/admin/Budget/InvestmentSummaryViewer.jsx
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
@@ -30,11 +30,11 @@ import {
   ArrowUpRight, 
   ChevronRight, 
   TrendingUp, 
-  Building,
-  Filter,
-  Layers,
-  CheckSquare,
-  Tag
+  Building, 
+  Filter, 
+  Layers, 
+  CheckSquare, 
+  Tag 
 } from "lucide-react";
 
 /**
@@ -54,6 +54,14 @@ export default function InvestmentSummaryViewer() {
   const { user } = useAuth();
   const { activeCycle, planningYears, agencyName: cycleAgencyName, agencyLogoUrl } = useCycle();
 
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // Core Parity Data & Audit States
   const [data, setData] = useState(null);
   const [graphStatus, setGraphStatus] = useState(null);
@@ -71,10 +79,29 @@ export default function InvestmentSummaryViewer() {
   // Active View Tab: "overview" | "b1" | "b2" | "b3" | "b4" | "print"
   const [activeTab, setActiveTab] = useState("overview");
 
-  const token = user?.token || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "");
+  const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? (localStorage.getItem("access_token") || localStorage.getItem("token") || "") : "");
 
   const defaultAgencyName = import.meta.env.VITE_DEFAULT_AGENCY_NAME || "National Government Agency";
   const agencyName = cycleAgencyName || user?.agency_name || data?.agency_name || defaultAgencyName;
+
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
 
   const formatPHP = (val) => {
     const num = parseFloat(val) || 0;
@@ -90,11 +117,17 @@ export default function InvestmentSummaryViewer() {
     setError(null);
     try {
       const json = await getParityMatrices(token, activeCycle, onlyApproved);
-      setData(json);
+      if (isMountedRef.current) {
+        setData(json);
+      }
     } catch (err) {
-      setError(err.message || "Failed to load Part IV.B investment matrices.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to load Part IV.B investment matrices.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [token, activeCycle, onlyApproved]);
 
@@ -105,11 +138,13 @@ export default function InvestmentSummaryViewer() {
     setError(null);
     try {
       const resData = await validateSingularityGraph(token, activeCycle);
-      setGraphStatus({ 
-        valid: true, 
-        message: resData.message || "Singularity DAG certified. All relational chains and financial parity tables are sound." 
-      });
-      setSuccess("Singularity graph successfully validated.");
+      if (isMountedRef.current) {
+        setGraphStatus({ 
+          valid: true, 
+          message: resData.message || "Singularity DAG certified. All relational chains and financial parity tables are sound." 
+        });
+        setSuccess("Singularity graph successfully validated.");
+      }
     } catch (err) {
       const msg = err.message || "Singularity audit network error.";
       let parsedViolations = [];
@@ -124,13 +159,17 @@ export default function InvestmentSummaryViewer() {
         parsedViolations = [msg];
       }
 
-      setGraphStatus({ 
-        valid: false, 
-        message: msg,
-        violations: parsedViolations
-      });
+      if (isMountedRef.current) {
+        setGraphStatus({ 
+          valid: false, 
+          message: msg,
+          violations: parsedViolations
+        });
+      }
     } finally {
-      setValidating(false);
+      if (isMountedRef.current) {
+        setValidating(false);
+      }
     }
   };
 
@@ -148,11 +187,17 @@ export default function InvestmentSummaryViewer() {
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-      setSuccess("DBM OSPS-compliant spreadsheet exported successfully.");
+      if (isMountedRef.current) {
+        setSuccess("DBM OSPS-compliant spreadsheet exported successfully.");
+      }
     } catch (err) {
-      setError(err.message || "Failed to download budget spreadsheet.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to download budget spreadsheet.");
+      }
     } finally {
-      setExportingCsv(false);
+      if (isMountedRef.current) {
+        setExportingCsv(false);
+      }
     }
   };
 
@@ -318,7 +363,7 @@ export default function InvestmentSummaryViewer() {
 
     const yearCols = getYearColumns(gridData);
     const totalOutlay = getGrandTotal(gridData);
-    const totalHeaderLabel = yearCols.length > 0 ? `${yearCols.length}-Year Total` : "Total Amount";
+    const totalHeaderLabel = yearCols.length > 0 ? `${yearCols.length}-Year Total (PHP)` : "Total Amount (PHP)";
     const isUacsTable = title.includes("B.4") || title.toUpperCase().includes("OBJECT OF EXPENDITURE");
 
     // Partition keys so GRAND TOTAL is always strictly the final row
@@ -434,7 +479,7 @@ export default function InvestmentSummaryViewer() {
   const renderPrintableTableSection = (gridData, sectionCode, sectionTitle, colHeader) => {
     if (!gridData) return null;
     const yearCols = activeYearCols;
-    const totalHeaderLabel = activeHorizonCount > 0 ? `${activeHorizonCount}-YEAR TOTAL` : "TOTAL";
+    const totalHeaderLabel = activeHorizonCount > 0 ? `${activeHorizonCount}-Year Total (PHP)` : "Total Amount (PHP)";
     const grand = gridData["GRAND TOTAL"] || gridData["Grand Total"];
     const entries = Object.entries(gridData).filter(([k]) => k !== "GRAND TOTAL" && k !== "Grand Total");
     const isUacsTable = sectionCode.includes("B.4") || sectionTitle.toUpperCase().includes("OBJECT OF EXPENDITURE");
@@ -516,7 +561,7 @@ export default function InvestmentSummaryViewer() {
               <span>Part IV.B: Summary of Investments (Four-Way Parity Ledger)</span>
             </h2>
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20 font-mono">
-              Cycle: FY {activeCycle || "2026-2028"}
+              Cycle: FY {activeCycle || "2026-2028"} ({activeHorizonCount} Years Horizon)
             </span>
           </div>
           <p className="text-slate-500 dark:text-slate-400 mt-1 text-xs">
@@ -559,7 +604,7 @@ export default function InvestmentSummaryViewer() {
             type="button"
             onClick={handleExportCsv}
             disabled={exportingCsv}
-            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 transition-all cursor-pointer shadow-xs text-xs"
+            className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl border border-slate-300 dark:border-slate-700 flex items-center gap-1.5 transition-all cursor-pointer shadow-xs text-xs"
             title="Download Part IV.A Detailed Deployment to DBM OSPS / NEP-compliant CSV"
           >
             <Download className={`w-3.5 h-3.5 ${exportingCsv ? "animate-spin text-blue-500" : "text-blue-600 dark:text-blue-400"}`} />
