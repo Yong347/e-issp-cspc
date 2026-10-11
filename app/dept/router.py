@@ -1299,7 +1299,7 @@ def submit_proposal(
         department_id=user["department_id"],
         proposal_id=proposal.id,
         ip_address=client_ip,
-        new_value={"status": old_status},
+        old_value={"status": old_status},
         new_value={"status": "Submitted", "total_cost": str(proposal.total_cost)}
     )
     
