@@ -687,6 +687,17 @@ def create_merged_proposal(
     elif resolved_category in ["Subscription", "Services"]:
         resolved_strategic_cat = "Continuing Costs/Expenses"
 
+    # Always auto-bind to a matching ICT Project in the cycle if none was selected
+    if not resolved_project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == active_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(resolved_strategic_cat, String))
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == active_period).first()
+        if matched_proj:
+            resolved_project_id = matched_proj.id
+            resolved_strategic_cat = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            resolved_fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
     payload.yearly_quantities = aligned_quantities
 
@@ -1200,7 +1211,18 @@ def submit_proposal(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=canvas_msg
         )
-
+        
+    # Guarantee project linkage upon submission
+    if not proposal.project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == proposal.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(proposal.strategic_category, String))
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == proposal.issp_period).first()
+        if matched_proj:
+            proposal.project_id = matched_proj.id
+            proposal.strategic_category = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            proposal.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+            
     # Ensure accounting classification is assigned before headroom checks
     if not proposal.expenditure_class or not proposal.uacs_object_code:
         uacs, exp_class = classify_uacs_and_expenditure(
@@ -1463,16 +1485,17 @@ def create_department_proposed_system(
     else:
         dumped["needs_assessment_id"] = None
 
-    # Handle project_id linkage if provided
+    # Handle project_id linkage with automatic fallback to an active ICT Project
     project_id = coerce_optional_uuid(getattr(payload, "project_id", None) or dumped.get("project_id"))
     if project_id:
         proj = db.query(IctProject).filter(IctProject.id == project_id).first()
-        if proj:
-            dumped["project_id"] = project_id
-        else:
-            dumped["project_id"] = None
+        dumped["project_id"] = proj.id if proj else None
     else:
-        dumped["project_id"] = None
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == active_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == active_period).first()
+        dumped["project_id"] = matched_proj.id if matched_proj else None
 
     # Calculate multi-classification flags with safe fallbacks
     c_str = str(dumped.get("classification", "")).lower()
@@ -1757,6 +1780,15 @@ def submit_department_proposed_system(
             status_code=400,
             detail="Enhancement Details are required when proposing a system upgrade ('For Enhancement')."
         )
+
+    # Guarantee project linkage upon submission
+    if not system.project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == system.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+        if matched_proj:
+            system.project_id = matched_proj.id
 
     system.submission_status = "Submitted"
     system.rejection_reason = None

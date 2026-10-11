@@ -986,8 +986,17 @@ def sync_system_proposal(db: Session, system: Any) -> Optional[Any]:
         exp_class = "Capital Outlay" if "(CO)" in uacs_code else "Maintenance and Other Operating Expenses"
         system.expenditure_class = exp_class
 
-    # Project, strategic category, and funding source
+    # Auto-resolve project_id if missing on system
     project_id = getattr(system, "project_id", None)
+    if not project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == system.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+        if matched_proj:
+            project_id = matched_proj.id
+            system.project_id = matched_proj.id
+
     strat_cat = "Internal ICT Projects"
     fund_source = "General Appropriations Act (GAA)"
     strat_cat_id = None
@@ -1013,9 +1022,9 @@ def sync_system_proposal(db: Session, system: Any) -> Optional[Any]:
         if default_oo:
             outcome_id = default_oo.id
 
-    # Status mapping
+    # Status mapping - promote to Approved if system is approved or slated for development/enhancement
     sub_status = str(getattr(system, "submission_status", "Approved") or "Approved").lower()
-    if sub_status == "approved":
+    if sub_status in ["approved", "for development", "for enhancement"]:
         prop_status = "Approved"
     elif sub_status == "submitted":
         prop_status = "Submitted"

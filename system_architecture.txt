@@ -10084,6 +10084,14 @@ def create_information_system(
             dumped["project_id"] = uuid.UUID(str(payload.project_id))
         except ValueError:
             dumped["project_id"] = payload.project_id
+    else:
+        # Auto-bind to an active ICT Project if not specified
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == period).first()
+        if matched_proj:
+            dumped["project_id"] = matched_proj.id
 
     db_system = InformationSystem(
         issp_period=period,
@@ -10376,9 +10384,19 @@ def get_ict_projects(
             linked_items = []
             for item in proj.resource_items:
                 if not getattr(item, "is_archived", False):
-                    # Omit proposal if it belongs to an already rendered system to prevent duplicate table rows
+                    # Only omit synthetic duplicates where the system itself is already displayed with cost > 0
+                    is_synthetic_duplicate = False
                     if item.system_id and str(item.system_id).lower() in linked_sys_ids:
+                        matching_sys = next((s for s in linked_sys_list if str(s["id"]).lower() == str(item.system_id).lower()), None)
+                        if matching_sys and matching_sys.get("proposed_cost", 0) > 0:
+                            lower_name = (item.item_name or "").lower().strip()
+                            sys_name = (matching_sys.get("name") or "").lower().strip()
+                            if lower_name in [f"system development: {sys_name}", f"system enhancement: {sys_name}", f"software development: {sys_name}", sys_name]:
+                                is_synthetic_duplicate = True
+
+                    if is_synthetic_duplicate:
                         continue
+
                     linked_items.append({
                         "id": str(item.id),
                         "item_name": item.item_name,
@@ -10653,7 +10671,7 @@ def update_project_links(
                 p.strategic_category = "Office Productivity"
                 p.strategic_category_id = None
 
-        # Bind selected proposals and inherit project category and fund source
+        # Bind selected proposals, inherit project attributes, and ensure status is Approved so costs roll up
         for pid_str in p_uuids_str:
             prop = db.query(Proposal).filter(
                 or_(cast(Proposal.id, String) == pid_str, Proposal.id == pid_str)
@@ -10664,6 +10682,8 @@ def update_project_links(
                 prop.fund_source = proj_fund_source
                 if strat_cat_id:
                     prop.strategic_category_id = strat_cat_id
+                if str(prop.status).lower() in ["submitted", "draft"]:
+                    prop.status = "Approved"
 
     # 2. Update system linkages with string normalization
     if payload.system_ids is not None:
@@ -10689,7 +10709,8 @@ def update_project_links(
             ).first()
             if sys_obj:
                 sys_obj.project_id = project.id
-                # Ensure synchronized proposal is created/updated under this project!
+                if str(sys_obj.submission_status).lower() in ["submitted", "draft"]:
+                    sys_obj.submission_status = "Approved"
                 sync_system_proposal(db, sys_obj)
 
         if s_uuids_str:
@@ -16065,6 +16086,17 @@ def create_merged_proposal(
     elif resolved_category in ["Subscription", "Services"]:
         resolved_strategic_cat = "Continuing Costs/Expenses"
 
+    # Always auto-bind to a matching ICT Project in the cycle if none was selected
+    if not resolved_project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == active_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(resolved_strategic_cat, String))
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == active_period).first()
+        if matched_proj:
+            resolved_project_id = matched_proj.id
+            resolved_strategic_cat = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            resolved_fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
     payload.yearly_quantities = aligned_quantities
 
@@ -16578,7 +16610,18 @@ def submit_proposal(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=canvas_msg
         )
-
+        
+    # Guarantee project linkage upon submission
+    if not proposal.project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == proposal.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(proposal.strategic_category, String))
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == proposal.issp_period).first()
+        if matched_proj:
+            proposal.project_id = matched_proj.id
+            proposal.strategic_category = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            proposal.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+            
     # Ensure accounting classification is assigned before headroom checks
     if not proposal.expenditure_class or not proposal.uacs_object_code:
         uacs, exp_class = classify_uacs_and_expenditure(
@@ -16677,7 +16720,7 @@ def submit_proposal(
         department_id=user["department_id"],
         proposal_id=proposal.id,
         ip_address=client_ip,
-        new_value={"status": old_status},
+        old_value={"status": old_status},
         new_value={"status": "Submitted", "total_cost": str(proposal.total_cost)}
     )
     
@@ -16841,16 +16884,17 @@ def create_department_proposed_system(
     else:
         dumped["needs_assessment_id"] = None
 
-    # Handle project_id linkage if provided
+    # Handle project_id linkage with automatic fallback to an active ICT Project
     project_id = coerce_optional_uuid(getattr(payload, "project_id", None) or dumped.get("project_id"))
     if project_id:
         proj = db.query(IctProject).filter(IctProject.id == project_id).first()
-        if proj:
-            dumped["project_id"] = project_id
-        else:
-            dumped["project_id"] = None
+        dumped["project_id"] = proj.id if proj else None
     else:
-        dumped["project_id"] = None
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == active_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == active_period).first()
+        dumped["project_id"] = matched_proj.id if matched_proj else None
 
     # Calculate multi-classification flags with safe fallbacks
     c_str = str(dumped.get("classification", "")).lower()
@@ -17135,6 +17179,15 @@ def submit_department_proposed_system(
             status_code=400,
             detail="Enhancement Details are required when proposing a system upgrade ('For Enhancement')."
         )
+
+    # Guarantee project linkage upon submission
+    if not system.project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == system.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+        if matched_proj:
+            system.project_id = matched_proj.id
 
     system.submission_status = "Submitted"
     system.rejection_reason = None
@@ -27743,8 +27796,17 @@ def sync_system_proposal(db: Session, system: Any) -> Optional[Any]:
         exp_class = "Capital Outlay" if "(CO)" in uacs_code else "Maintenance and Other Operating Expenses"
         system.expenditure_class = exp_class
 
-    # Project, strategic category, and funding source
+    # Auto-resolve project_id if missing on system
     project_id = getattr(system, "project_id", None)
+    if not project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == system.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+        if matched_proj:
+            project_id = matched_proj.id
+            system.project_id = matched_proj.id
+
     strat_cat = "Internal ICT Projects"
     fund_source = "General Appropriations Act (GAA)"
     strat_cat_id = None
@@ -27770,9 +27832,9 @@ def sync_system_proposal(db: Session, system: Any) -> Optional[Any]:
         if default_oo:
             outcome_id = default_oo.id
 
-    # Status mapping
+    # Status mapping - promote to Approved if system is approved or slated for development/enhancement
     sub_status = str(getattr(system, "submission_status", "Approved") or "Approved").lower()
-    if sub_status == "approved":
+    if sub_status in ["approved", "for development", "for enhancement"]:
         prop_status = "Approved"
     elif sub_status == "submitted":
         prop_status = "Submitted"
@@ -55310,16 +55372,31 @@ export default function InternalProjectsManager() {
     return projects.filter(p => !((p.project_category || "").toLowerCase().includes("cross")) && parseFloat(p.computed_total_project_cost || 0) === 0).length;
   }, [projects]);
 
-  // Projected Cost in Link Modal (Aggregates both selected proposals and selected systems)
+  // Projected Cost in Link Modal (Prevents double-counting systems whose proposals are already selected)
   const projectedModalCost = useMemo(() => {
     if (!linkingProject) return 0;
-    const propsCost = allAvailableProposals
+
+    const countedSystemIds = new Set();
+    let total = 0;
+
+    allAvailableProposals
       .filter(p => selectedProposalIds.includes(String(p.id)))
-      .reduce((acc, p) => acc + (parseFloat(p.total_cost) || 0), 0);
-    const sysCost = systems
+      .forEach(p => {
+        total += (parseFloat(p.total_cost) || 0);
+        if (p.system_id) {
+          countedSystemIds.add(String(p.system_id).toLowerCase());
+        }
+      });
+
+    systems
       .filter(s => selectedSystemIds.includes(String(s.id)))
-      .reduce((acc, s) => acc + (parseFloat(s.proposed_cost) || 0), 0);
-    return propsCost + sysCost;
+      .forEach(s => {
+        if (!countedSystemIds.has(String(s.id).toLowerCase())) {
+          total += (parseFloat(s.proposed_cost) || 0);
+        }
+      });
+
+    return total;
   }, [linkingProject, selectedProposalIds, allAvailableProposals, systems, selectedSystemIds]);
     
   // Filter Pipeline for Main List (Integrated with Dynamic Categories)
@@ -55931,44 +56008,50 @@ export default function InternalProjectsManager() {
                           </thead>
                           <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
                             {/* 1. Linked Information Systems */}
-                            {cardLinkedSystems.map(sys => (
-                              <tr key={`sys-${sys.id}`} className="hover:bg-slate-50/60 dark:hover:bg-slate-955/40 text-blue-900 dark:text-blue-200">
-                                <td className="p-2.5 font-bold font-mono">
-                                  <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-955 dark:text-blue-300 dark:border-blue-900 text-[8.5px] font-bold uppercase">
-                                    SYSTEM
-                                  </span>
-                                </td>
-                                <td className="p-2.5 font-bold">
-                                  <div>{sys.name}</div>
-                                  <div className="text-[9px] text-slate-400 dark:text-slate-500 font-mono font-normal">
-                                    {sys.uacs_object_code ? cleanUacsTitle(sys.uacs_object_code) : (sys.classification || "Information System")}
-                                  </div>
-                                </td>
-                                <td className="p-2.5 text-slate-500 dark:text-slate-400 font-mono text-[10px]">
-                                  {sys.target_year ? `FY ${sys.target_year}` : "Central Office"}
-                                </td>
-                                <td className="p-2.5 text-center font-mono font-bold">1</td>
-                                <td className="p-2.5 text-right font-mono text-slate-600 dark:text-slate-400">{formatPHP(sys.proposed_cost)}</td>
-                                <td className="p-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400 text-xs">
-                                  {formatPHP(sys.proposed_cost)}
-                                </td>
-                                <td className="p-2.5 text-center font-mono font-bold text-[9px] uppercase">
-                                  <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-955 dark:text-blue-300">
-                                    {sys.status}
-                                  </span>
-                                </td>
-                                <td className="p-2.5 text-right">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleUnlinkItem(proj, sys.id, "system", cardLinkedSystems)}
-                                    className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
-                                    title="Unlink System from Project"
-                                  >
-                                    <Unlink className="w-3.5 h-3.5" />
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
+                            {cardLinkedSystems.map(sys => {
+                              // If system's direct proposed_cost is 0, fall back to any proposal created for this system under this project
+                              const matchingProp = (proj.linked_proposals || []).find(p => String(p.system_id).toLowerCase() === String(sys.id).toLowerCase());
+                              const displayCost = sys.proposed_cost > 0 ? sys.proposed_cost : (matchingProp ? parseFloat(matchingProp.total_cost || 0) : 0);
+
+                              return (
+                                <tr key={`sys-${sys.id}`} className="hover:bg-slate-50/60 dark:hover:bg-slate-955/40 text-blue-900 dark:text-blue-200">
+                                  <td className="p-2.5 font-bold font-mono">
+                                    <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-955 dark:text-blue-300 dark:border-blue-900 text-[8.5px] font-bold uppercase">
+                                      SYSTEM
+                                    </span>
+                                  </td>
+                                  <td className="p-2.5 font-bold">
+                                    <div>{sys.name}</div>
+                                    <div className="text-[9px] text-slate-400 dark:text-slate-500 font-mono font-normal">
+                                      {sys.uacs_object_code ? cleanUacsTitle(sys.uacs_object_code) : (sys.classification || "Information System")}
+                                    </div>
+                                  </td>
+                                  <td className="p-2.5 text-slate-500 dark:text-slate-400 font-mono text-[10px]">
+                                    {sys.target_year ? `FY ${sys.target_year}` : "Central Office"}
+                                  </td>
+                                  <td className="p-2.5 text-center font-mono font-bold">1</td>
+                                  <td className="p-2.5 text-right font-mono text-slate-600 dark:text-slate-400">{formatPHP(displayCost)}</td>
+                                  <td className="p-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400 text-xs">
+                                    {formatPHP(displayCost)}
+                                  </td>
+                                  <td className="p-2.5 text-center font-mono font-bold text-[9px] uppercase">
+                                    <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-955 dark:text-blue-300">
+                                      {sys.status}
+                                    </span>
+                                  </td>
+                                  <td className="p-2.5 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleUnlinkItem(proj, sys.id, "system", cardLinkedSystems)}
+                                      className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
+                                      title="Unlink System from Project"
+                                    >
+                                      <Unlink className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
 
                             {/* 2. Linked Proposals (Hardware, Software, Subscriptions, Services) */}
                             {proj.linked_proposals && proj.linked_proposals.map(itm => (
@@ -59437,12 +59520,12 @@ export default function InformationSystemsManager() {
     }
   };
 
-  // Summary Metrics Breakdown
+  // Summary Metrics Breakdown (Evaluate real status so newly created/drafted systems register immediately)
   const intakeCount = systems.filter(s => (s.submission_status || "").toLowerCase() === "submitted").length;
-  const operationalCount = systems.filter(s => (s.status?.value || s.status) === "Operational" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
-  const proposedCount = systems.filter(s => (s.status?.value || s.status) !== "Operational" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
-  const devCount = systems.filter(s => (s.status?.value || s.status) === "For Development" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
-  const enhanceCount = systems.filter(s => (s.status?.value || s.status) === "For Enhancement" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
+  const operationalCount = systems.filter(s => (s.status?.value || s.status) === "Operational").length;
+  const proposedCount = systems.filter(s => (s.status?.value || s.status) !== "Operational").length;
+  const devCount = systems.filter(s => (s.status?.value || s.status) === "For Development").length;
+  const enhanceCount = systems.filter(s => (s.status?.value || s.status) === "For Enhancement").length;
   const returnedCount = systems.filter(s => (s.submission_status || "").toLowerCase() === "returned").length;
 
   const totalProposedOutlay = useMemo(() => {
@@ -59467,13 +59550,13 @@ export default function InformationSystemsManager() {
       if (statusTab === "Intake") {
         matchesTab = subStatus === "submitted";
       } else if (statusTab === "Operational") {
-        matchesTab = sStatus === "Operational" && subStatus === "approved";
+        matchesTab = sStatus === "Operational";
       } else if (statusTab === "Proposed") {
-        matchesTab = sStatus !== "Operational" && subStatus === "approved";
+        matchesTab = sStatus !== "Operational";
       } else if (statusTab === "For Development") {
-        matchesTab = sStatus === "For Development" && subStatus === "approved";
+        matchesTab = sStatus === "For Development";
       } else if (statusTab === "For Enhancement") {
-        matchesTab = sStatus === "For Enhancement" && subStatus === "approved";
+        matchesTab = sStatus === "For Enhancement";
       } else if (statusTab === "Returned") {
         matchesTab = subStatus === "returned";
       }

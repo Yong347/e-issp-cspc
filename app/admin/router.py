@@ -2208,6 +2208,14 @@ def create_information_system(
             dumped["project_id"] = uuid.UUID(str(payload.project_id))
         except ValueError:
             dumped["project_id"] = payload.project_id
+    else:
+        # Auto-bind to an active ICT Project if not specified
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == period).first()
+        if matched_proj:
+            dumped["project_id"] = matched_proj.id
 
     db_system = InformationSystem(
         issp_period=period,
@@ -2500,9 +2508,19 @@ def get_ict_projects(
             linked_items = []
             for item in proj.resource_items:
                 if not getattr(item, "is_archived", False):
-                    # Omit proposal if it belongs to an already rendered system to prevent duplicate table rows
+                    # Only omit synthetic duplicates where the system itself is already displayed with cost > 0
+                    is_synthetic_duplicate = False
                     if item.system_id and str(item.system_id).lower() in linked_sys_ids:
+                        matching_sys = next((s for s in linked_sys_list if str(s["id"]).lower() == str(item.system_id).lower()), None)
+                        if matching_sys and matching_sys.get("proposed_cost", 0) > 0:
+                            lower_name = (item.item_name or "").lower().strip()
+                            sys_name = (matching_sys.get("name") or "").lower().strip()
+                            if lower_name in [f"system development: {sys_name}", f"system enhancement: {sys_name}", f"software development: {sys_name}", sys_name]:
+                                is_synthetic_duplicate = True
+
+                    if is_synthetic_duplicate:
                         continue
+
                     linked_items.append({
                         "id": str(item.id),
                         "item_name": item.item_name,
@@ -2777,7 +2795,7 @@ def update_project_links(
                 p.strategic_category = "Office Productivity"
                 p.strategic_category_id = None
 
-        # Bind selected proposals and inherit project category and fund source
+        # Bind selected proposals, inherit project attributes, and ensure status is Approved so costs roll up
         for pid_str in p_uuids_str:
             prop = db.query(Proposal).filter(
                 or_(cast(Proposal.id, String) == pid_str, Proposal.id == pid_str)
@@ -2788,6 +2806,8 @@ def update_project_links(
                 prop.fund_source = proj_fund_source
                 if strat_cat_id:
                     prop.strategic_category_id = strat_cat_id
+                if str(prop.status).lower() in ["submitted", "draft"]:
+                    prop.status = "Approved"
 
     # 2. Update system linkages with string normalization
     if payload.system_ids is not None:
@@ -2813,7 +2833,8 @@ def update_project_links(
             ).first()
             if sys_obj:
                 sys_obj.project_id = project.id
-                # Ensure synchronized proposal is created/updated under this project!
+                if str(sys_obj.submission_status).lower() in ["submitted", "draft"]:
+                    sys_obj.submission_status = "Approved"
                 sync_system_proposal(db, sys_obj)
 
         if s_uuids_str:

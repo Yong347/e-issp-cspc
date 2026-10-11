@@ -612,12 +612,12 @@ export default function InformationSystemsManager() {
     }
   };
 
-  // Summary Metrics Breakdown
+  // Summary Metrics Breakdown (Evaluate real status so newly created/drafted systems register immediately)
   const intakeCount = systems.filter(s => (s.submission_status || "").toLowerCase() === "submitted").length;
-  const operationalCount = systems.filter(s => (s.status?.value || s.status) === "Operational" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
-  const proposedCount = systems.filter(s => (s.status?.value || s.status) !== "Operational" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
-  const devCount = systems.filter(s => (s.status?.value || s.status) === "For Development" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
-  const enhanceCount = systems.filter(s => (s.status?.value || s.status) === "For Enhancement" && (s.submission_status || "Approved").toLowerCase() === "approved").length;
+  const operationalCount = systems.filter(s => (s.status?.value || s.status) === "Operational").length;
+  const proposedCount = systems.filter(s => (s.status?.value || s.status) !== "Operational").length;
+  const devCount = systems.filter(s => (s.status?.value || s.status) === "For Development").length;
+  const enhanceCount = systems.filter(s => (s.status?.value || s.status) === "For Enhancement").length;
   const returnedCount = systems.filter(s => (s.submission_status || "").toLowerCase() === "returned").length;
 
   const totalProposedOutlay = useMemo(() => {
@@ -642,13 +642,13 @@ export default function InformationSystemsManager() {
       if (statusTab === "Intake") {
         matchesTab = subStatus === "submitted";
       } else if (statusTab === "Operational") {
-        matchesTab = sStatus === "Operational" && subStatus === "approved";
+        matchesTab = sStatus === "Operational";
       } else if (statusTab === "Proposed") {
-        matchesTab = sStatus !== "Operational" && subStatus === "approved";
+        matchesTab = sStatus !== "Operational";
       } else if (statusTab === "For Development") {
-        matchesTab = sStatus === "For Development" && subStatus === "approved";
+        matchesTab = sStatus === "For Development";
       } else if (statusTab === "For Enhancement") {
-        matchesTab = sStatus === "For Enhancement" && subStatus === "approved";
+        matchesTab = sStatus === "For Enhancement";
       } else if (statusTab === "Returned") {
         matchesTab = subStatus === "returned";
       }

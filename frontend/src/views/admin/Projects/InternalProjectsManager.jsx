@@ -809,16 +809,31 @@ export default function InternalProjectsManager() {
     return projects.filter(p => !((p.project_category || "").toLowerCase().includes("cross")) && parseFloat(p.computed_total_project_cost || 0) === 0).length;
   }, [projects]);
 
-  // Projected Cost in Link Modal (Aggregates both selected proposals and selected systems)
+  // Projected Cost in Link Modal (Prevents double-counting systems whose proposals are already selected)
   const projectedModalCost = useMemo(() => {
     if (!linkingProject) return 0;
-    const propsCost = allAvailableProposals
+
+    const countedSystemIds = new Set();
+    let total = 0;
+
+    allAvailableProposals
       .filter(p => selectedProposalIds.includes(String(p.id)))
-      .reduce((acc, p) => acc + (parseFloat(p.total_cost) || 0), 0);
-    const sysCost = systems
+      .forEach(p => {
+        total += (parseFloat(p.total_cost) || 0);
+        if (p.system_id) {
+          countedSystemIds.add(String(p.system_id).toLowerCase());
+        }
+      });
+
+    systems
       .filter(s => selectedSystemIds.includes(String(s.id)))
-      .reduce((acc, s) => acc + (parseFloat(s.proposed_cost) || 0), 0);
-    return propsCost + sysCost;
+      .forEach(s => {
+        if (!countedSystemIds.has(String(s.id).toLowerCase())) {
+          total += (parseFloat(s.proposed_cost) || 0);
+        }
+      });
+
+    return total;
   }, [linkingProject, selectedProposalIds, allAvailableProposals, systems, selectedSystemIds]);
     
   // Filter Pipeline for Main List (Integrated with Dynamic Categories)
@@ -1430,44 +1445,50 @@ export default function InternalProjectsManager() {
                           </thead>
                           <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
                             {/* 1. Linked Information Systems */}
-                            {cardLinkedSystems.map(sys => (
-                              <tr key={`sys-${sys.id}`} className="hover:bg-slate-50/60 dark:hover:bg-slate-955/40 text-blue-900 dark:text-blue-200">
-                                <td className="p-2.5 font-bold font-mono">
-                                  <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-955 dark:text-blue-300 dark:border-blue-900 text-[8.5px] font-bold uppercase">
-                                    SYSTEM
-                                  </span>
-                                </td>
-                                <td className="p-2.5 font-bold">
-                                  <div>{sys.name}</div>
-                                  <div className="text-[9px] text-slate-400 dark:text-slate-500 font-mono font-normal">
-                                    {sys.uacs_object_code ? cleanUacsTitle(sys.uacs_object_code) : (sys.classification || "Information System")}
-                                  </div>
-                                </td>
-                                <td className="p-2.5 text-slate-500 dark:text-slate-400 font-mono text-[10px]">
-                                  {sys.target_year ? `FY ${sys.target_year}` : "Central Office"}
-                                </td>
-                                <td className="p-2.5 text-center font-mono font-bold">1</td>
-                                <td className="p-2.5 text-right font-mono text-slate-600 dark:text-slate-400">{formatPHP(sys.proposed_cost)}</td>
-                                <td className="p-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400 text-xs">
-                                  {formatPHP(sys.proposed_cost)}
-                                </td>
-                                <td className="p-2.5 text-center font-mono font-bold text-[9px] uppercase">
-                                  <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-955 dark:text-blue-300">
-                                    {sys.status}
-                                  </span>
-                                </td>
-                                <td className="p-2.5 text-right">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleUnlinkItem(proj, sys.id, "system", cardLinkedSystems)}
-                                    className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
-                                    title="Unlink System from Project"
-                                  >
-                                    <Unlink className="w-3.5 h-3.5" />
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
+                            {cardLinkedSystems.map(sys => {
+                              // If system's direct proposed_cost is 0, fall back to any proposal created for this system under this project
+                              const matchingProp = (proj.linked_proposals || []).find(p => String(p.system_id).toLowerCase() === String(sys.id).toLowerCase());
+                              const displayCost = sys.proposed_cost > 0 ? sys.proposed_cost : (matchingProp ? parseFloat(matchingProp.total_cost || 0) : 0);
+
+                              return (
+                                <tr key={`sys-${sys.id}`} className="hover:bg-slate-50/60 dark:hover:bg-slate-955/40 text-blue-900 dark:text-blue-200">
+                                  <td className="p-2.5 font-bold font-mono">
+                                    <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-955 dark:text-blue-300 dark:border-blue-900 text-[8.5px] font-bold uppercase">
+                                      SYSTEM
+                                    </span>
+                                  </td>
+                                  <td className="p-2.5 font-bold">
+                                    <div>{sys.name}</div>
+                                    <div className="text-[9px] text-slate-400 dark:text-slate-500 font-mono font-normal">
+                                      {sys.uacs_object_code ? cleanUacsTitle(sys.uacs_object_code) : (sys.classification || "Information System")}
+                                    </div>
+                                  </td>
+                                  <td className="p-2.5 text-slate-500 dark:text-slate-400 font-mono text-[10px]">
+                                    {sys.target_year ? `FY ${sys.target_year}` : "Central Office"}
+                                  </td>
+                                  <td className="p-2.5 text-center font-mono font-bold">1</td>
+                                  <td className="p-2.5 text-right font-mono text-slate-600 dark:text-slate-400">{formatPHP(displayCost)}</td>
+                                  <td className="p-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400 text-xs">
+                                    {formatPHP(displayCost)}
+                                  </td>
+                                  <td className="p-2.5 text-center font-mono font-bold text-[9px] uppercase">
+                                    <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-955 dark:text-blue-300">
+                                      {sys.status}
+                                    </span>
+                                  </td>
+                                  <td className="p-2.5 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleUnlinkItem(proj, sys.id, "system", cardLinkedSystems)}
+                                      className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
+                                      title="Unlink System from Project"
+                                    >
+                                      <Unlink className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
 
                             {/* 2. Linked Proposals (Hardware, Software, Subscriptions, Services) */}
                             {proj.linked_proposals && proj.linked_proposals.map(itm => (
