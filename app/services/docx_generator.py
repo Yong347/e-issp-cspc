@@ -6,11 +6,13 @@ DICT ISSP v.2026 COMPLIANCE ENGINE — WORD (.DOCX) DOCUMENT GENERATOR
 Strictly adheres to official DICT ISSP v.2026 Guidelines and statutory order:
 - Single Central Institutional Emblem (No Secondary Side Logos)
 - First-Page Section Isolation (Strict 1-Page Cover Page, No Spillover)
-- Running 3-Column Header Table with Dynamic Logo, Agency Title & Planning Horizon
+- Running 3-Column Header Table starting at Table of Contents through to Document End
 - Running Footer with Dynamic Page Numbering (Page X of Y)
+- Completely Dynamic Planning Horizon (Derived from Active Cycle, Zero Hardcoding)
+- Dynamic Inflation Rates & UACS Accounting (Synced with System Policies)
 - Full Statutory Structure:
     * Cover Page (Page 1)
-    * Table of Contents (2-Column Format with Statutorily Mapped Page Numbers)
+    * Table of Contents (Starting with Section 2 Running Headers)
     * Preliminary: Definition of Terms (Glossary with Fallback Seeding)
     * Part I: Agency Profile & Strategic Context (A, B.1, B.2, C)
     * Part II: Current ICT Assessment (A, B1, B2, C, D)
@@ -38,16 +40,16 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.enum.section import WD_ORIENTATION, WD_SECTION_START
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn, nsdecls
+from sqlalchemy.orm import object_session
 
 from app.config import settings
+from app.utils.helpers import (
+    get_adjusted_unit_cost_for_year,
+    get_cycle_year_range,
+    calculate_financial_summaries
+)
 
 logger = logging.getLogger("app.services.docx_generator")
-
-# Security & Compliance Blacklist against test artwork leaks
-DIAGRAM_BLACKLIST = (
-    "syanart", "boruto", "naruto", "wallpaper", "anime", 
-    "test", "dummy", "placeholder", "sample"
-)
 
 # =========================================================================
 # CANONICAL DICT STATUTORY GLOSSARY FALLBACK
@@ -64,7 +66,7 @@ DEFAULT_CANONICAL_GLOSSARY = [
     ),
     (
         "ISSP",
-        "Information Systems Strategic Plan – A statutory three-year strategic blueprint that outlines an agency's overall ICT strategy, operational information systems, infrastructure roadmaps, and budgetary requirements."
+        "Information Systems Strategic Plan – A statutory multi-year strategic blueprint that outlines an agency's overall ICT strategy, operational information systems, infrastructure roadmaps, and budgetary requirements."
     ),
     (
         "PeGIF",
@@ -112,21 +114,15 @@ DEFAULT_CANONICAL_GLOSSARY = [
 def get_image_bytes(url: Optional[str]) -> Optional[bytes]:
     """
     Universally resolves an image URL or local file path into raw bytes.
-    Defensively checks:
-    1. Direct local disk path
-    2. Candidate uploads directories across environments (Docker, Azure, dev)
-    3. S3 storage client (via base64 URI)
-    4. Direct HTTP/HTTPS network streams
+    Accepts valid user-provided image data without arbitrary keyword dropping.
     """
     if not url or not isinstance(url, str):
         return None
     url_clean = url.strip()
-
-    if any(k in url_clean.lower() for k in DIAGRAM_BLACKLIST):
-        logger.warning(f"Sanity Guard: Blocked test artwork from Word generation: {url_clean}")
+    if not url_clean:
         return None
 
-    # 1. Direct local path
+    # 1. Direct local disk path
     if os.path.exists(url_clean) and os.path.isfile(url_clean):
         try:
             with open(url_clean, "rb") as f:
@@ -158,12 +154,11 @@ def get_image_bytes(url: Optional[str]) -> Optional[bytes]:
         if cdir:
             cand_path = os.path.join(cdir, rel)
             if os.path.exists(cand_path) and os.path.isfile(cand_path):
-                if not any(k in cand_path.lower() for k in DIAGRAM_BLACKLIST):
-                    try:
-                        with open(cand_path, "rb") as f:
-                            return f.read()
-                    except Exception:
-                        pass
+                try:
+                    with open(cand_path, "rb") as f:
+                        return f.read()
+                except Exception:
+                    pass
 
     # 3. Use storage_client if initialized
     try:
@@ -192,7 +187,7 @@ def get_image_bytes(url: Optional[str]) -> Optional[bytes]:
 
 def get_agency_logo_bytes(narrative: Any) -> Optional[bytes]:
     """
-    Resolves the official institutional agency logo bytes with fallback to disk.
+    Resolves the official institutional agency logo bytes with disk search fallback.
     """
     raw_url = getattr(narrative, "agency_logo_url", None)
     if raw_url:
@@ -202,7 +197,8 @@ def get_agency_logo_bytes(narrative: Any) -> Optional[bytes]:
 
     search_dirs = [
         os.path.join(getattr(settings, "LOCAL_UPLOAD_DIR", "uploads"), "diagrams", "agency_logo"),
-        os.path.join(getattr(settings, "BASE_DIR", "."), "uploads", "diagrams", "agency_logo"),
+        os.path.join(getattr(settings, "BASE_DIR", "."), "uploads"),
+        os.path.join(getattr(settings, "BASE_DIR", "."), "uploads", "diagrams"),
         "/home/site/wwwroot/uploads/diagrams/agency_logo",
         "/home/uploads/diagrams/agency_logo",
         "/code/uploads/diagrams/agency_logo",
@@ -212,14 +208,13 @@ def get_agency_logo_bytes(narrative: Any) -> Optional[bytes]:
     for sdir in search_dirs:
         if os.path.exists(sdir) and os.path.isdir(sdir):
             for fname in os.listdir(sdir):
-                if fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                    if not any(k in fname.lower() for k in DIAGRAM_BLACKLIST):
-                        fpath = os.path.join(sdir, fname)
-                        try:
-                            with open(fpath, "rb") as f:
-                                return f.read()
-                        except Exception:
-                            pass
+                if fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".svg")):
+                    fpath = os.path.join(sdir, fname)
+                    try:
+                        with open(fpath, "rb") as f:
+                            return f.read()
+                    except Exception:
+                        pass
     return None
 
 
@@ -228,7 +223,7 @@ def get_agency_logo_bytes(narrative: Any) -> Optional[bytes]:
 # =========================================================================
 
 def add_xml_field(paragraph, field_name: str):
-    """Inserts a native dynamic Word field (like PAGE or NUMPAGES) into a paragraph."""
+    """Inserts a native dynamic Word field (PAGE, NUMPAGES) into a paragraph."""
     run = paragraph.add_run()
     run.font.name = "Palatino Linotype"
     run.font.size = Pt(7.5)
@@ -251,7 +246,7 @@ def set_cell_shading(cell, color_hex: str = "F1F5F9"):
 
 
 def set_cell_margins(cell, top: int = 60, bottom: int = 60, left: int = 100, right: int = 100):
-    """Sets internal padding (in dxa: 20 dxa = 1 pt) for a table cell."""
+    """Sets internal cell margins in dxa (20 dxa = 1 pt)."""
     tcPr = cell._tc.get_or_add_tcPr()
     tcMar = OxmlElement('w:tcMar')
     for m, val in [('w:top', top), ('w:bottom', bottom), ('w:left', left), ('w:right', right)]:
@@ -263,7 +258,7 @@ def set_cell_margins(cell, top: int = 60, bottom: int = 60, left: int = 100, rig
 
 
 def set_table_borders(table, color: str = "334155", sz: str = "4", val: str = "single"):
-    """Applies clean, standard borders to all edges and inside grid lines of a Word table."""
+    """Applies clean borders to all edges and inside grid lines of a Word table."""
     tblPr = table._tbl.tblPr
     borders = parse_xml(
         f'<w:tblBorders {nsdecls("w")}>'
@@ -307,7 +302,7 @@ def prevent_row_split(row):
 
 
 def fmt_currency(val: Any) -> str:
-    """Formats numeric and decimal currency values to standard Philippine Peso format."""
+    """Formats numeric and decimal currency values to Philippine Peso representation."""
     if val is None:
         return "PHP 0.00"
     try:
@@ -318,7 +313,7 @@ def fmt_currency(val: Any) -> str:
 
 
 def clean_str(val: Any, default: str = "") -> str:
-    """Extracts a clean, non-null string value safely from objects or enums."""
+    """Extracts clean non-null string value safely without dropping test data."""
     if val is None:
         return default
     s = str(getattr(val, "value", val) or "").strip()
@@ -326,7 +321,7 @@ def clean_str(val: Any, default: str = "") -> str:
 
 
 def strip_html_tags(text_val: Any) -> str:
-    """Converts HTML strings into clean, structured plain text paragraphs."""
+    """Converts HTML strings into clean plain-text paragraphs."""
     if not text_val:
         return ""
     clean = re.sub(r'</?(p|br|li|h[1-6]|tr|div)[^>]*>', '\n', str(text_val), flags=re.IGNORECASE)
@@ -347,18 +342,32 @@ def clean_uacs_title(uacs_str: str) -> str:
     return cleaned or val
 
 
+def normalize_category_name(cat_str: str) -> str:
+    """Normalizes category variations for consistent grouping."""
+    c_lower = str(cat_str or "").strip().lower()
+    if "continuing" in c_lower:
+        return "Continuing Costs/Expenses"
+    if "internal" in c_lower and "project" in c_lower:
+        return "Internal ICT Projects"
+    if "cross" in c_lower and "project" in c_lower:
+        return "Cross-Agency ICT Projects"
+    if "office" in c_lower or "productivity" in c_lower:
+        return "Office Productivity"
+    return cat_str.strip() if cat_str else "Office Productivity"
+
+
 def resolve_proposal_category(itm: Any) -> str:
     """
-    In DICT ISSP methodology, categorization is strictly governed by the 
+    In DICT ISSP methodology, categorization is governed by the 
     parent ICT Project or designated standalone operational bucket.
     """
     proj = getattr(itm, "project_rel", None)
     if proj and getattr(proj, "project_category", None):
-        return clean_str(getattr(proj.project_category, "value", proj.project_category))
+        return normalize_category_name(clean_str(getattr(proj.project_category, "value", proj.project_category)))
     
     strat = clean_str(getattr(itm, "strategic_category", ""))
     if strat:
-        return strat
+        return normalize_category_name(strat)
 
     cat_lower = clean_str(getattr(itm, "category", "")).lower()
     if cat_lower in ["subscription", "services"]:
@@ -731,18 +740,21 @@ def render_project_charter_card(doc, proj: Any, is_cross: bool = False, planning
         )
     add_charter_row("HARMONIZATION FRAMEWORK", harm_text)
 
-    p_start = getattr(proj, "duration_start_year", None) or 2028
-    p_end = getattr(proj, "duration_end_year", None) or (p_start + 2)
-    add_charter_row("DURATION", f"FY {p_start} to FY {p_end} ({max(1, p_end - p_start + 1)} Years)")
+    # Dynamic duration derived from active planning span
+    base_start = planning_years[0] if (planning_years and len(planning_years) > 0) else 2026
+    base_end = planning_years[-1] if (planning_years and len(planning_years) > 0) else (base_start + 2)
+    p_start = getattr(proj, "duration_start_year", None) or base_start
+    p_end = getattr(proj, "duration_end_year", None) or base_end
+    p_years = list(range(p_start, p_end + 1)) if p_end >= p_start else [p_start]
+    add_charter_row("DURATION", f"FY {p_start} to FY {p_end} ({len(p_years)} Years)")
 
     annual_map = getattr(proj, "annual_deliverables", None) or {}
     if isinstance(annual_map, str):
         try: annual_map = json.loads(annual_map)
         except Exception: annual_map = {}
 
-    p_years = list(range(p_start, p_end + 1)) if p_end >= p_start else [p_start]
     for idx, yr in enumerate(p_years):
-        m_text = annual_map.get(str(yr)) or annual_map.get(f"Year {idx + 1}")
+        m_text = annual_map.get(str(yr)) or annual_map.get(f"Year {idx + 1}") or annual_map.get(yr)
         if not m_text:
             if idx == 0: m_text = getattr(proj, "year_1_deliverables", "N/A")
             elif idx == 1: m_text = getattr(proj, "year_2_deliverables", "N/A")
@@ -763,9 +775,9 @@ def render_project_charter_card(doc, proj: Any, is_cross: bool = False, planning
     p_spacer.paragraph_format.space_after = Pt(4)
 
 
-# =========================================================================
+# ==========================================================
 # CORE DOCUMENT GENERATOR PIPELINE
-# =========================================================================
+# ==========================================================
 
 def create_issp_docx(
     narrative: Any,
@@ -793,9 +805,51 @@ def create_issp_docx(
     Builds a fully formatted, editable Microsoft Word (.docx) document
     representing the complete DICT ISSP v.2026 statutory blueprint.
     Guarantees strict single-page cover sheet layout, running headers/footers with
-    dynamic page numbers, and total sanitization of placeholder images.
+    dynamic page numbers starting on Table of Contents through to document end,
+    and dynamically renders all user data without artificial blacklists.
     """
     doc = Document()
+
+    # Resolve database session if available for dynamic inflation rates
+    db_session = kwargs.get("db") or (object_session(narrative) if narrative is not None else None)
+
+    # Resolve dynamic planning years from narrative or kwargs
+    issp_period = clean_str(getattr(narrative, "issp_period", None), "2026-2028")
+    
+    planning_years = kwargs.get("planning_years")
+    if not planning_years:
+        planning_years = get_cycle_year_range(narrative, issp_period)
+    
+    start_year = planning_years[0]
+    end_year = planning_years[-1]
+
+    # Resolve Project groupings for PMF and TOC chapters
+    internal_projects = [p for p in projects if "cross" not in clean_str(getattr(p, "project_category", "")).lower()]
+    cross_projects = [p for p in projects if "cross" in clean_str(getattr(p, "project_category", "")).lower()]
+    internal_pids = {str(p.id) for p in internal_projects if getattr(p, "id", None)}
+    cross_pids = {str(p.id) for p in cross_projects if getattr(p, "id", None)}
+    internal_titles = {clean_str(p.project_title).lower() for p in internal_projects if getattr(p, "project_title", None)}
+    cross_titles = {clean_str(p.project_title).lower() for p in cross_projects if getattr(p, "project_title", None)}
+
+    pmf_metrics = performance_metrics or []
+
+    # Initialize PMF groupings at outer scope so they are available for both TOC and Body
+    pmf_f1 = [
+        m for m in pmf_metrics 
+        if (getattr(m, "project_id", None) and str(m.project_id) in internal_pids) or 
+           (clean_str(getattr(m, "project_title", "")).lower() in internal_titles)
+    ]
+    pmf_f2 = [
+        m for m in pmf_metrics 
+        if (getattr(m, "project_id", None) and str(m.project_id) in cross_pids) or 
+           (clean_str(getattr(m, "project_title", "")).lower() in cross_titles)
+    ]
+    pmf_f1_ids = {id(m) for m in pmf_f1}
+    pmf_f2_ids = {id(m) for m in pmf_f2}
+    pmf_f3 = [
+        m for m in pmf_metrics 
+        if id(m) not in pmf_f1_ids and id(m) not in pmf_f2_ids
+    ]
 
     # =========================================================================
     # SECTION 1: COVER PAGE SETUP (NO HEADER, NO FOOTER, STRICT 1-PAGE)
@@ -815,25 +869,7 @@ def create_issp_docx(
     sec1.header.paragraphs[0].text = ""
     sec1.footer.paragraphs[0].text = ""
 
-    issp_period = clean_str(narrative.issp_period, "2026-2028")
     agency_name = clean_str(narrative.agency_name, getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency"))
-    
-    start_year = getattr(narrative, "issp_period_from", None)
-    end_year = getattr(narrative, "issp_period_to", None)
-    if start_year is None or end_year is None:
-        if "-" in issp_period:
-            try:
-                parts = issp_period.split("-")
-                start_year = int(parts[0].strip())
-                end_year = int(parts[1].strip())
-            except Exception:
-                start_year = 2026
-                end_year = 2028
-        else:
-            start_year = 2026
-            end_year = 2028
-            
-    planning_years = list(range(start_year, end_year + 1))
 
     # Resolve Signatories cleanly (preserving user-entered names without hardcoded human names)
     raw_cio = clean_str(getattr(narrative, "signatory_prepared_by", None) or getattr(narrative, "cio_name", None))
@@ -855,7 +891,7 @@ def create_issp_docx(
     bia_list = dr_bias or getattr(narrative, "dr_bia_relation", []) or []
     drm_list = dr_metrics or getattr(narrative, "dr_metrics_relation", []) or []
 
-    # MERGE STATUTORY GLOSSARY: Guarantee all 12 official terms exist alongside custom definitions
+    # MERGE STATUTORY GLOSSARY: Guarantee official terms exist alongside user custom definitions
     glossary_dict = {}
     for term, definition in DEFAULT_CANONICAL_GLOSSARY:
         glossary_dict[term.upper()] = (term, definition)
@@ -976,7 +1012,7 @@ def create_issp_docx(
     p_cio_tit = c_left.add_paragraph()
     p_cio_tit.paragraph_format.space_before = Pt(0)
     p_cio_tit.paragraph_format.space_after = Pt(18)
-    r_ctit = p_cio_tit.add_run("    Name & Signature of Chief Information Officer")
+    r_ctit = p_cio_tit.add_run(f"    Name & Signature of Chief Information Officer\n    ({clean_str(getattr(narrative, 'preparer_position', None) or getattr(narrative, 'cio_plantilla_position', None), 'Chief Information Officer')})")
     r_ctit.font.name = "Palatino Linotype"
     r_ctit.font.size = Pt(7.5)
     r_ctit.font.color.rgb = RGBColor(71, 85, 105)
@@ -1058,7 +1094,7 @@ def create_issp_docx(
         r_sc.font.size = Pt(7.5)
 
     # =========================================================================
-    # SECTION 2: BODY & ANNEXES (NEW SECTION WITH RUNNING HEADER & PAGE NUMBERS)
+    # SECTION 2: BODY & ANNEXES (STARTING WITH TABLE OF CONTENTS TO END)
     # =========================================================================
     sec2 = doc.add_section(WD_SECTION_START.NEW_PAGE)
     sec2.orientation = WD_ORIENTATION.LANDSCAPE
@@ -1074,35 +1110,48 @@ def create_issp_docx(
     sec2.footer.is_linked_to_previous = False
 
     # -------------------------------------------------------------
-    # 3-COLUMN VERTICALLY CENTERED RUNNING HEADER TABLE
+    # RUNNING 2/3-COLUMN HEADER TABLE (FROM TOC TO END OF DOCUMENT)
     # -------------------------------------------------------------
     sec2_header = sec2.header
+    
     p_init_hdr = sec2_header.paragraphs[0]
     p_init_hdr.text = ""
+    p_init_hdr.paragraph_format.space_before = Pt(0)
+    p_init_hdr.paragraph_format.space_after = Pt(0)
+    p_init_hdr.paragraph_format.line_spacing = Pt(1)
 
-    header_table = sec2_header.add_table(rows=1, cols=3, width=Inches(10.29))
+    has_logo = bool(agency_logo_data)
+    cols_count = 3 if has_logo else 2
+    header_table = sec2_header.add_table(rows=1, cols=cols_count, width=Inches(10.29))
     header_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     header_table.autofit = False
     set_header_table_bottom_border(header_table, color="CBD5E1", sz="12", val="single")
 
-    # Remove the empty paragraph before the table so header rests on the top margin
-    p_init_hdr._p.getparent().remove(p_init_hdr._p)
+    try:
+        header_table._tbl.addnext(p_init_hdr._p)
+    except Exception as e:
+        logger.debug(f"Header paragraph reorder note: {e}")
 
-    c_logo, c_inst, c_right = header_table.rows[0].cells[0], header_table.rows[0].cells[1], header_table.rows[0].cells[2]
-    c_logo.width = Inches(0.60)
-    c_inst.width = Inches(4.69)
-    c_right.width = Inches(5.00)
+    agency_header_name = clean_str(narrative.agency_name, getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency")).upper()
 
-    c_logo.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    c_inst.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    c_right.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    if has_logo:
+        c_logo = header_table.rows[0].cells[0]
+        c_inst = header_table.rows[0].cells[1]
+        c_right = header_table.rows[0].cells[2]
 
-    set_cell_margins(c_logo, top=20, bottom=40, left=0, right=20)
-    set_cell_margins(c_inst, top=20, bottom=40, left=20, right=40)
-    set_cell_margins(c_right, top=20, bottom=40, left=40, right=0)
+        c_logo.width = Inches(0.60)
+        c_inst.width = Inches(4.69)
+        c_right.width = Inches(5.00)
 
-    # Column 0: Circular Institutional Logo
-    if agency_logo_data:
+        c_logo.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        c_inst.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        c_right.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+        set_cell_margins(c_logo, top=20, bottom=40, left=0, right=20)
+        set_cell_margins(c_inst, top=20, bottom=40, left=20, right=40)
+        set_cell_margins(c_right, top=20, bottom=40, left=40, right=0)
+
+        # Column 0: Circular Institutional Logo
         try:
             p_logo_hdr = c_logo.paragraphs[0]
             p_logo_hdr.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -1114,36 +1163,63 @@ def create_issp_docx(
         except Exception as e:
             logger.debug(f"Running header logo add note: {e}")
 
-    # Column 1: Institutional Name (Full name preserved intact; NO string replacement or word dropping)
-    agency_clean_str = clean_str(
-        narrative.agency_name, 
-        getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency")
-    ).upper()
+        # Column 1: Institutional Name
+        p_inst = c_inst.paragraphs[0]
+        p_inst.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p_inst.paragraph_format.space_before = Pt(0)
+        p_inst.paragraph_format.space_after = Pt(0)
+        p_inst.paragraph_format.line_spacing = 1.05
+        r_inst = p_inst.add_run(agency_header_name)
+        r_inst.font.name = "Palatino Linotype"
+        r_inst.font.size = Pt(8.5)
+        r_inst.font.bold = True
+        r_inst.font.color.rgb = RGBColor(15, 23, 42)
 
-    agency_header_name = agency_clean_str
+        # Column 2: Active Planning Cycle Span
+        p_span = c_right.paragraphs[0]
+        p_span.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p_span.paragraph_format.space_before = Pt(0)
+        p_span.paragraph_format.space_after = Pt(0)
+        p_span.paragraph_format.line_spacing = 1.05
+        r_span = p_span.add_run(f"INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}")
+        r_span.font.name = "Palatino Linotype"
+        r_span.font.size = Pt(9.0)
+        r_span.font.bold = True
+        r_span.font.color.rgb = RGBColor(15, 23, 42)
+    else:
+        c_inst = header_table.rows[0].cells[0]
+        c_right = header_table.rows[0].cells[1]
 
-    p_inst = c_inst.paragraphs[0]
-    p_inst.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    p_inst.paragraph_format.space_before = Pt(0)
-    p_inst.paragraph_format.space_after = Pt(0)
-    p_inst.paragraph_format.line_spacing = 1.05
-    r_inst = p_inst.add_run(agency_header_name)
-    r_inst.font.name = "Palatino Linotype"
-    r_inst.font.size = Pt(8.5)
-    r_inst.font.bold = True
-    r_inst.font.color.rgb = RGBColor(15, 23, 42)
+        c_inst.width = Inches(5.29)
+        c_right.width = Inches(5.00)
 
-    # Column 2: Active Planning Cycle Span
-    p_span = c_right.paragraphs[0]
-    p_span.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    p_span.paragraph_format.space_before = Pt(0)
-    p_span.paragraph_format.space_after = Pt(0)
-    p_span.paragraph_format.line_spacing = 1.05
-    r_span = p_span.add_run(f"INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}")
-    r_span.font.name = "Palatino Linotype"
-    r_span.font.size = Pt(9.0)
-    r_span.font.bold = True
-    r_span.font.color.rgb = RGBColor(15, 23, 42)
+        c_inst.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        c_right.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+        set_cell_margins(c_inst, top=20, bottom=40, left=0, right=40)
+        set_cell_margins(c_right, top=20, bottom=40, left=40, right=0)
+
+        p_inst = c_inst.paragraphs[0]
+        p_inst.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p_inst.paragraph_format.space_before = Pt(0)
+        p_inst.paragraph_format.space_after = Pt(0)
+        p_inst.paragraph_format.line_spacing = 1.05
+        r_inst = p_inst.add_run(agency_header_name)
+        r_inst.font.name = "Palatino Linotype"
+        r_inst.font.size = Pt(8.5)
+        r_inst.font.bold = True
+        r_inst.font.color.rgb = RGBColor(15, 23, 42)
+
+        p_span = c_right.paragraphs[0]
+        p_span.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p_span.paragraph_format.space_before = Pt(0)
+        p_span.paragraph_format.space_after = Pt(0)
+        p_span.paragraph_format.line_spacing = 1.05
+        r_span = p_span.add_run(f"INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}")
+        r_span.font.name = "Palatino Linotype"
+        r_span.font.size = Pt(9.0)
+        r_span.font.bold = True
+        r_span.font.color.rgb = RGBColor(15, 23, 42)
 
     # Running Footer: Left title + Right Page {PAGE} of {NUMPAGES}
     fp = sec2.footer.paragraphs[0]
@@ -1162,7 +1238,7 @@ def create_issp_docx(
     add_xml_field(fp, "NUMPAGES")
 
     # =========================================================================
-    # TABLE OF CONTENTS
+    # TABLE OF CONTENTS (STARTS IMMEDIATELY UNDER SECTION 2 HEADER)
     # =========================================================================
     h_toc = doc.add_heading(level=1)
     h_toc.paragraph_format.space_before = Pt(0)
@@ -1174,77 +1250,80 @@ def create_issp_docx(
     r_toc.font.color.rgb = RGBColor(30, 58, 138)
 
     toc_items = [
-        ("DEFINITION OF TERMS", 0, True, "3"),
-        ("PART I. AGENCY PROFILE & STRATEGIC CONTEXT", 0, True, "1"),
-        ("A. Mandate, Vision, Mission, and Organizational Outcome", 1, False, "1"),
-        ("A.1. Mandate", 2, False, "1"),
-        ("A.2. Vision Statement", 2, False, "1"),
-        ("A.3. Mission Statement", 2, False, "1"),
-        ("A.4. Organizational Outcomes", 2, False, "1"),
-        ("B. Organizational Structure", 1, False, "1"),
-        ("B.1. Chief Information Officer (CIO) & ISSP Focal Person", 2, False, "1"),
-        ("B.2. Human Capital", 2, False, "2"),
-        ("C. Stakeholder Analysis", 1, False, "2"),
-        ("PART II. CURRENT ICT ASSESSMENT", 0, True, "3"),
-        ("A. Strategic Concerns for ICT Use", 1, False, "3"),
-        ("B. Existing Network Infrastructure", 1, False, "4"),
-        ("B1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, "4"),
-        ("B2. Cybersecurity Control Checklist", 2, False, "5"),
-        ("C. Existing / Operational Information Systems (IS) Inventory", 1, False, "6"),
-        ("D. E-Government Programs (EGP) Checklist", 1, False, "8"),
-        ("PART III. PROPOSED ICT STRATEGY", 0, True, "11"),
-        ("A. Proposed Network Infrastructure", 1, False, "11"),
-        ("A.1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, "11"),
-        ("A.2. Cybersecurity Control Checklist", 2, False, "12"),
-        ("B. Enterprise Architecture", 1, False, "13"),
-        ("C. Proposed ICT Human Capital", 1, False, "14"),
-        ("D. Proposed Information Systems", 1, False, "15"),
-        ("E. ICT Projects Portfolio", 1, True, "17"),
-        ("E.1. Internal ICT Projects", 2, False, "17"),
-        ("E.2. Cross-Agency ICT Projects", 2, False, "19"),
-        ("F. Performance Measurement Framework", 1, True, "21"),
-        ("F.1. Internal ICT Projects Scorecard", 2, False, "21"),
-        ("F.2. Cross-Agency ICT Projects Scorecard", 2, False, "22"),
-        ("PART IV. RESOURCE REQUIREMENTS", 0, True, "23"),
-        ("A. Detailed Resource Deployment and Cost Breakdown", 1, False, "23"),
+        ("DEFINITION OF TERMS", 0, True, "Preliminary"),
+        ("PART I. AGENCY PROFILE & STRATEGIC CONTEXT", 0, True, "Section I"),
+        ("A. Mandate, Vision, Mission, and Organizational Outcome", 1, False, ""),
+        ("A.1. Mandate", 2, False, ""),
+        ("A.2. Vision Statement", 2, False, ""),
+        ("A.3. Mission Statement", 2, False, ""),
+        ("A.4. Organizational Outcomes", 2, False, ""),
+        ("B. Organizational Structure", 1, False, ""),
+        ("B.1. Chief Information Officer (CIO) & ISSP Focal Person", 2, False, ""),
+        ("B.2. Human Capital", 2, False, ""),
+        ("C. Stakeholder Analysis", 1, False, ""),
+        ("PART II. CURRENT ICT ASSESSMENT", 0, True, "Section II"),
+        ("A. Strategic Concerns for ICT Use", 1, False, ""),
+        ("B. Existing Network Infrastructure", 1, False, ""),
+        ("B1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, ""),
+        ("B2. Cybersecurity Control Checklist", 2, False, ""),
+        ("C. Existing / Operational Information Systems (IS) Inventory", 1, False, ""),
+        ("D. E-Government Programs (EGP) Checklist", 1, False, ""),
+        ("PART III. PROPOSED ICT STRATEGY", 0, True, "Section III"),
+        ("A. Proposed Network Infrastructure", 1, False, ""),
+        ("A.1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, ""),
+        ("A.2. Cybersecurity Control Checklist", 2, False, ""),
+        ("B. Enterprise Architecture", 1, False, ""),
+        ("C. Proposed ICT Human Capital", 1, False, ""),
+        ("D. Proposed Information Systems", 1, False, ""),
+        ("E. ICT Projects Portfolio", 1, True, ""),
+        ("E.1. Internal ICT Projects", 2, False, ""),
+        ("E.2. Cross-Agency ICT Projects", 2, False, ""),
+        ("F. Performance Measurement Framework", 1, True, ""),
+        ("F.1. Internal ICT Projects Scorecard", 2, False, ""),
+        ("F.2. Cross-Agency ICT Projects Scorecard", 2, False, ""),
     ]
 
-    cur_p = 23
-    for y_idx, y_val in enumerate(planning_years):
-        toc_items.append((f"A.{y_idx + 1}. Year {y_idx + 1} Resource Deployment (FY {y_val})", 2, False, str(cur_p)))
-        cur_p += 4
+    if pmf_f3:
+        toc_items.append(("F.3. Institutional ICT Governance KPIs", 2, False, ""))
 
-    b_page = cur_p
     toc_items.extend([
-        ("B. Summary of Investments", 1, True, str(b_page)),
-        ("B.1. General Summary", 2, False, str(b_page)),
-        ("B.2. Fund Source", 2, False, str(b_page)),
-        ("B.3. Statement of Expenditure", 2, False, str(b_page)),
-        ("B.4. Object of Expenditure", 2, False, str(b_page + 1)),
+        ("PART IV. RESOURCE REQUIREMENTS", 0, True, "Section IV"),
+        ("A. Detailed Resource Deployment and Cost Breakdown", 1, False, ""),
+    ])
+
+    for y_idx, y_val in enumerate(planning_years):
+        toc_items.append((f"A.{y_idx + 1}. Year {y_idx + 1} Resource Deployment (FY {y_val})", 2, False, f"FY {y_val}"))
+
+    toc_items.extend([
+        ("B. Summary of Investments", 1, True, "Part IV.B"),
+        ("B.1. General Summary", 2, False, ""),
+        ("B.2. Fund Source", 2, False, ""),
+        ("B.3. Statement of Expenditure", 2, False, ""),
+        ("B.4. Object of Expenditure", 2, False, ""),
         ("ANNEX 1: EXISTING INFORMATION & COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY", 0, True, "Annex 1"),
-        ("1. ICT Equipment Inventory", 1, False, "Annex 1"),
-        ("2. ICT Software Inventory", 1, False, "Annex 1"),
+        ("1. ICT Equipment Inventory", 1, False, ""),
+        ("2. ICT Software Inventory", 1, False, ""),
         ("ANNEX 2: DISASTER RECOVERY & BUSINESS CONTINUITY PLAN (DRBCP) FOR ICT RESOURCES", 0, True, "Annex 2"),
-        ("1. Plan Overview & Disaster Recovery Team", 1, False, "Annex 2"),
-        ("2. Business Impact Analysis (BIA) Summary", 1, False, "Annex 2"),
-        ("3. ICT Component Inventory & Affected Assets", 1, False, "Annex 2"),
-        ("4. Technical Recovery Strategy", 1, False, "Annex 2"),
-        ("5. Standard Operating Procedures (SOP)", 1, False, "Annex 2"),
-        ("6. Compliance, Scalability and Sustainability (MITHI Res. 2025-01)", 1, False, "Annex 2")
+        ("1. Plan Overview & Disaster Recovery Team", 1, False, ""),
+        ("2. Business Impact Analysis (BIA) Summary", 1, False, ""),
+        ("3. ICT Component Inventory & Affected Assets", 1, False, ""),
+        ("4. Technical Recovery Strategy", 1, False, ""),
+        ("5. Standard Operating Procedures (SOP)", 1, False, ""),
+        ("6. Compliance, Scalability and Sustainability (MITHI Res. 2025-01)", 1, False, "")
     ])
 
     toc_table = doc.add_table(rows=len(toc_items), cols=2)
     toc_table.style = 'Table Grid'
     set_table_borders(toc_table, color="FFFFFF")
 
-    for idx, (title, indent_level, is_bold, page_num) in enumerate(toc_items):
+    for idx, (title, indent_level, is_bold, section_ref) in enumerate(toc_items):
         row = toc_table.rows[idx]
         prevent_row_split(row)
         c0, c1 = row.cells[0], row.cells[1]
         c0.width = Inches(9.2)
         c1.width = Inches(1.0)
-        set_cell_margins(c0, top=10, bottom=10, left=40, right=40)
-        set_cell_margins(c1, top=10, bottom=10, left=40, right=40)
+        set_cell_margins(c0, top=8, bottom=8, left=40, right=40)
+        set_cell_margins(c1, top=8, bottom=8, left=40, right=40)
 
         p0 = c0.paragraphs[0]
         p0.paragraph_format.space_before = Pt(0)
@@ -1260,11 +1339,12 @@ def create_issp_docx(
         p1.paragraph_format.space_before = Pt(0)
         p1.paragraph_format.space_after = Pt(0)
         p1.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        run1 = p1.add_run(page_num)
-        run1.font.name = "Courier New" if page_num.isdigit() else "Palatino Linotype"
-        run1.font.size = Pt(7.5)
-        run1.font.bold = is_bold
-        run1.font.color.rgb = RGBColor(30, 58, 138) if is_bold else RGBColor(71, 85, 105)
+        if section_ref:
+            run1 = p1.add_run(section_ref)
+            run1.font.name = "Palatino Linotype"
+            run1.font.size = Pt(7.5)
+            run1.font.bold = is_bold
+            run1.font.color.rgb = RGBColor(30, 58, 138) if is_bold else RGBColor(71, 85, 105)
 
     doc.add_page_break()
 
@@ -1331,14 +1411,14 @@ def create_issp_docx(
     p.paragraph_format.space_after = Pt(4)
     p.add_run("A. Mandate, Vision, Mission, and Organizational Outcome\n").font.bold = True
     p.add_run("A.1. Mandate:\n").font.bold = True
-    p.add_run(f"Legal Basis: {strip_html_tags(narrative.mandate_text or narrative.mandate_html) or 'Enabling law / statutory charter establishing institutional mandate.'}\n")
+    p.add_run(f"Legal Basis: {strip_html_tags(narrative.mandate_text or getattr(narrative, 'mandate_html', '')) or 'Enabling law / statutory charter establishing institutional mandate.'}\n")
     p.add_run(f"Functions: {strip_html_tags(narrative.functions) or 'Provide higher professional, technical instructions and deliver responsive community research and frontline public services.'}\n\n")
 
     p.add_run("A.2. Vision Statement:\n").font.bold = True
-    p.add_run(f"{strip_html_tags(narrative.vision_text or narrative.vision_html) or 'A premier institution transforming lives and communities through excellence in education, research, and digital innovation.'}\n\n")
+    p.add_run(f"{strip_html_tags(narrative.vision_text or getattr(narrative, 'vision_html', '')) or 'A premier institution transforming lives and communities through excellence in education, research, and digital innovation.'}\n\n")
 
     p.add_run("A.3. Mission Statement:\n").font.bold = True
-    p.add_run(f"{strip_html_tags(narrative.mission_text or narrative.mission_html) or 'Produce globally competent professionals and generate responsive technologies to foster sustainable development.'}\n\n")
+    p.add_run(f"{strip_html_tags(narrative.mission_text or getattr(narrative, 'mission_html', '')) or 'Produce globally competent professionals and generate responsive technologies to foster sustainable development.'}\n\n")
 
     p.add_run("A.4. Organizational Outcomes:\n").font.bold = True
     if outcomes:
@@ -1813,9 +1893,6 @@ def create_issp_docx(
     p_proj.paragraph_format.space_after = Pt(2)
     p_proj.add_run("E. Strategic ICT Projects Portfolio (Table III.E)\n").font.bold = True
 
-    internal_projects = [p for p in projects if "cross" not in clean_str(getattr(p, "project_category", "")).lower()]
-    cross_projects = [p for p in projects if "cross" in clean_str(getattr(p, "project_category", "")).lower()]
-
     p_e1 = doc.add_paragraph()
     p_e1.paragraph_format.space_before = Pt(2)
     p_e1.paragraph_format.space_after = Pt(2)
@@ -1850,7 +1927,6 @@ def create_issp_docx(
     p_pmf.paragraph_format.space_before = Pt(0)
     p_pmf.paragraph_format.space_after = Pt(2)
     p_pmf.add_run("F. Performance Measurement Framework (PMF Scorecard)\n").font.bold = True
-    pmf_metrics = performance_metrics or []
 
     def render_pmf_subtable(metrics_subset: List[Any], subheader: str):
         p_sub = doc.add_paragraph()
@@ -1903,13 +1979,6 @@ def create_issp_docx(
                 if i in [3, 4]:
                     cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    internal_pids = {str(p.id) for p in internal_projects}
-    cross_pids = {str(p.id) for p in cross_projects}
-
-    pmf_f1 = [m for m in pmf_metrics if str(m.project_id) in internal_pids]
-    pmf_f2 = [m for m in pmf_metrics if str(m.project_id) in cross_pids]
-    pmf_f3 = [m for m in pmf_metrics if str(m.project_id) not in internal_pids and str(m.project_id) not in cross_pids]
-
     render_pmf_subtable(pmf_f1, "F.1. Internal ICT Projects Scorecard")
     render_pmf_subtable(pmf_f2, "F.2. Cross-Agency ICT Projects Scorecard")
     if pmf_f3:
@@ -1936,30 +2005,16 @@ def create_issp_docx(
     p_iv_a.add_run("A. Detailed Resource Deployment and Cost Breakdown (Part IV.A)\n").font.bold = True
 
     raw_items = items or []
-    cap_threshold = Decimal("50000.00")
-
     prop_items = []
     for itm in raw_items:
         if getattr(itm, "is_archived", False):
             continue
-        if clean_str(getattr(itm, "status", "")).lower() != "approved":
+        status_str = clean_str(getattr(itm, "status", "")).lower()
+        if status_str and status_str not in ["approved", "submitted"]:
             continue
+        prop_items.append(itm)
 
-        strat_cat = resolve_proposal_category(itm).lower()
-        cost_val = Decimal(str(getattr(itm, "total_cost", 0) or 0))
-        uacs_code = clean_str(getattr(itm, "uacs_object_code", "")).lower()
-        exp_class = clean_str(getattr(itm, "expenditure_class", "")).lower()
-        is_co = cost_val >= cap_threshold or "(co)" in uacs_code or "capital" in exp_class
-        is_project_cat = "project" in strat_cat or strat_cat in ["internal ict projects", "cross-agency ict projects"]
-
-        if is_project_cat:
-            if itm.project_id is not None:
-                prop_items.append(itm)
-        else:
-            if is_co and itm.project_id is None:
-                continue
-            prop_items.append(itm)
-
+    # Dynamically determine categories list from strategic categories or defaults
     canonical_categories = [
         ("Office Productivity", False),
         ("Internal ICT Projects", True),
@@ -1967,13 +2022,27 @@ def create_issp_docx(
         ("Continuing Costs/Expenses", False)
     ]
 
-    # Discover any active custom strategic categories dynamically
-    seen_cats = {c[0].lower() for c in canonical_categories}
-    active_categories_list = list(canonical_categories)
+    active_categories_list = []
+    if db_session:
+        try:
+            from app.database.models import StrategicCategory
+            db_cats = db_session.query(StrategicCategory).filter(
+                StrategicCategory.is_active == True
+            ).order_by(StrategicCategory.order_index.asc()).all()
+            for c in db_cats:
+                active_categories_list.append((c.name, bool(c.is_project_linked)))
+        except Exception:
+            pass
+
+    if not active_categories_list:
+        active_categories_list = list(canonical_categories)
+
+    # Preserve all categories present on active line items without dropping custom ones
+    seen_cats = {normalize_category_name(c[0]).lower() for c in active_categories_list}
     for itm in prop_items:
         resolved_c = resolve_proposal_category(itm)
-        if resolved_c and resolved_c.lower() not in seen_cats:
-            seen_cats.add(resolved_c.lower())
+        if resolved_c and normalize_category_name(resolved_c).lower() not in seen_cats:
+            seen_cats.add(normalize_category_name(resolved_c).lower())
             active_categories_list.append((resolved_c, True))
 
     for yr_idx, yr in enumerate(planning_years):
@@ -2009,8 +2078,8 @@ def create_issp_docx(
         for cat_name, is_proj_linked in active_categories_list:
             matched_items = []
             for itm in prop_items:
-                strat_name = resolve_proposal_category(itm).lower()
-                is_match = (cat_name.lower() == strat_name)
+                strat_name = normalize_category_name(resolve_proposal_category(itm)).lower()
+                is_match = (normalize_category_name(cat_name).lower() == strat_name)
 
                 if is_match:
                     q_map = itm.yearly_quantities or {}
@@ -2018,11 +2087,17 @@ def create_issp_docx(
                         try: q_map = json.loads(q_map)
                         except Exception: q_map = {}
 
-                    qty = q_map.get(str(yr)) or q_map.get(yr) or q_map.get(f"Year {yr_idx + 1}")
-                    if qty is None or qty == 0:
+                    qty = None
+                    for candidate_key in [str(yr), yr, f"Year {yr_idx + 1}", f"year {yr_idx + 1}", f"Year{yr_idx + 1}", f"year_{yr_idx + 1}", str(yr_idx + 1)]:
+                        if candidate_key in q_map and q_map[candidate_key] is not None:
+                            qty = q_map[candidate_key]
+                            break
+
+                    if qty is None:
                         if yr_idx == 0: qty = getattr(itm, "year_1_qty", 0) or 0
                         elif yr_idx == 1: qty = getattr(itm, "year_2_qty", 0) or 0
                         elif yr_idx == 2: qty = getattr(itm, "year_3_qty", 0) or 0
+                        else: qty = 0
 
                     try: qty_int = int(qty)
                     except Exception: qty_int = 0
@@ -2037,10 +2112,7 @@ def create_issp_docx(
             cat_subtotal = Decimal("0.00")
             for itm, q in cat_items:
                 u_cost = Decimal(str(itm.unit_cost or 0))
-                rate = Decimal("0.00")
-                if yr_idx == 1: rate = Decimal("0.03")
-                elif yr_idx >= 2: rate = Decimal("0.05") + Decimal(str((yr_idx - 2) * 0.02))
-                adj_unit = (u_cost * (Decimal("1.00") + rate)).quantize(Decimal("0.01"))
+                adj_unit = get_adjusted_unit_cost_for_year(db_session, u_cost, yr, start_year)
                 cat_subtotal += Decimal(q) * adj_unit
 
             r_cat = iv_a_table.add_row()
@@ -2062,7 +2134,7 @@ def create_issp_docx(
                     continue
 
                 exp_subtotal = sum(
-                    Decimal(q) * (Decimal(str(itm.unit_cost or 0)) * (Decimal("1.00") + (Decimal("0.03") if yr_idx == 1 else (Decimal("0.05") + Decimal(str((yr_idx - 2) * 0.02)) if yr_idx >= 2 else Decimal("0.00"))))).quantize(Decimal("0.01"))
+                    Decimal(q) * get_adjusted_unit_cost_for_year(db_session, Decimal(str(itm.unit_cost or 0)), yr, start_year)
                     for itm, q in exp_items
                 )
 
@@ -2082,10 +2154,7 @@ def create_issp_docx(
 
                 for itm, qty_int in exp_items:
                     u_cost = Decimal(str(itm.unit_cost or 0))
-                    rate = Decimal("0.00")
-                    if yr_idx == 1: rate = Decimal("0.03")
-                    elif yr_idx >= 2: rate = Decimal("0.05") + Decimal(str((yr_idx - 2) * 0.02))
-                    adj_unit = (u_cost * (Decimal("1.00") + rate)).quantize(Decimal("0.01"))
+                    adj_unit = get_adjusted_unit_cost_for_year(db_session, u_cost, yr, start_year)
                     line_cost = Decimal(qty_int) * adj_unit
                     total_yr_cost += line_cost
 
@@ -2147,7 +2216,15 @@ def create_issp_docx(
     p_bhead.paragraph_format.space_after = Pt(2)
     p_bhead.add_run("B. Summary of Investments (Four-Way Parity Matrices)\n").font.bold = True
 
-    p_data = parity_data or {}
+    p_data = parity_data
+    if not p_data and db_session:
+        try:
+            p_data = calculate_financial_summaries(db_session, issp_period, only_approved=True)
+        except Exception as p_err:
+            logger.debug(f"Parity calculation in docx generator note: {p_err}")
+    if not p_data:
+        p_data = {}
+
     year_cols = p_data.get("year_columns", [f"FY {y}" for y in planning_years])
 
     tables_to_render = [
@@ -2310,7 +2387,16 @@ def create_issp_docx(
         set_cell_margins(c, top=40, bottom=40, left=60, right=60)
         c.paragraphs[0].add_run(h).font.bold = True
 
-    eq_categories = ["Servers", "Desktop", "Laptop", "Mobile Phone", "Tablet", "Printer", "Network Switch", "Others, please specify"]
+    eq_categories = [
+        "Servers", 
+        "Desktop", 
+        "Laptop", 
+        "Mobile Phone", 
+        "Tablet", 
+        "Printer", 
+        "Network Switch", 
+        "Others, please specify"
+    ]
     tot_c_ops = tot_c_eol = tot_c_bak = 0
     tot_f_ops = tot_f_eol = tot_f_bak = 0
 
@@ -2392,7 +2478,16 @@ def create_issp_docx(
         set_cell_margins(c, top=40, bottom=40, left=60, right=60)
         c.paragraphs[0].add_run(h).font.bold = True
 
-    sw_categories = ["Office Productivity Tool", "Grammar checker", "Graphics and Simulation Software", "Antivirus", "IT Help Desk Tool", "Others, please specify"]
+    sw_categories = [
+        "Office Productivity Tool", 
+        "Grammar checker", 
+        "Graphics and Simulation Software", 
+        "Antivirus", 
+        "IT Help Desk Tool", 
+        "Photo and Video Editing Software",
+        "Web Application Firewall",
+        "Others, please specify"
+    ]
     tot_c_perp = tot_c_sub = 0
     tot_f_perp = tot_f_sub = 0
 
@@ -2464,7 +2559,7 @@ def create_issp_docx(
     p_d1.paragraph_format.space_before = Pt(0)
     p_d1.paragraph_format.space_after = Pt(2)
     p_d1.add_run("1. Plan Overview & Disaster Recovery Team (DRT)\n").font.bold = True
-    app_date = clean_str(getattr(narrative, "drbcp_approval_date", None), f"March 15, {start_year}")
+    app_date = clean_str(getattr(narrative, "drbcp_approval_date", None), "Approved upon Plan Effectivity")
     doc.add_paragraph(f"Agency: {agency_name} | Version: {issp_period}.1 | Official Approval Date: {app_date}")
 
     if drt_list:
@@ -2498,7 +2593,7 @@ def create_issp_docx(
     p_d2.paragraph_format.space_after = Pt(2)
     p_d2.add_run("2. Business Impact Analysis (BIA) Summary\n").font.bold = True
 
-    real_bias = [b for b in bia_list if b.system_name and not clean_str(b.system_name).lower().startswith("testtt")]
+    real_bias = [b for b in bia_list if b.system_name and clean_str(b.system_name)]
     if real_bias:
         bia_table = doc.add_table(rows=1, cols=5)
         bia_table.style = 'Table Grid'

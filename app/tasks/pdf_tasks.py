@@ -45,7 +45,8 @@ from app.utils.helpers import (
     calculate_financial_summaries, 
     get_cycle_year_range, 
     get_adjusted_unit_cost_for_year,
-    get_governance_policy
+    get_governance_policy,
+    get_active_issp_period
 )
 
 logger = logging.getLogger(__name__)
@@ -166,10 +167,13 @@ def safe_update_progress(
 
 
 def clean_text(val: Optional[str], default: str = "") -> str:
-    if not val:
+    """
+    Safely sanitizes text input without stripping real user data containing 'test'.
+    """
+    if val is None:
         return default
     s = str(val).strip()
-    if s.lower().startswith("testtt") or "testttt" in s.lower() or s.lower() in ("none", "null", "undefined"):
+    if s.lower() in ("none", "null", "undefined", ""):
         return default
     return s
 
@@ -211,22 +215,21 @@ def format_text_blocks(val: Optional[str], default: str = "") -> str:
 
 
 def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
+    """
+    Safely resolves image paths without suppressing user uploaded files
+    that contain words such as 'test', 'sample', etc.
+    """
     if not url:
         return None
-    normalized = url.strip().lower()
-    if ".." in normalized or normalized.startswith("file://"):
+    normalized = url.strip()
+    if ".." in normalized or normalized.lower().startswith("file://"):
         logger.warning(f"Security Block: Traversal or local file scheme prohibited: {url}")
-        return None
-
-    blacklist = ["syanart", "boruto", "naruto", "wallpaper", "anime", "test", "dummy", "placeholder", "sample"]
-    if any(k in normalized for k in blacklist):
-        logger.warning(f"Image Sanity Block: Rejected test asset: {url}")
         return None
 
     if getattr(settings, "STORAGE_TYPE", "local") == "local":
         try:
-            if "/static/uploads/" in url:
-                relative_path = url.split("/static/uploads/")[-1]
+            if "/static/uploads/" in normalized:
+                relative_path = normalized.split("/static/uploads/")[-1]
                 local_file = Path(settings.LOCAL_UPLOAD_DIR) / relative_path
                 if local_file.exists() and local_file.is_file():
                     mime, _ = mimetypes.guess_type(str(local_file))
@@ -237,7 +240,7 @@ def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
             logger.warning(f"Direct disk image read bypassed for {url}: {disk_err}")
 
     try:
-        return storage_client.get_as_base64_uri(url)
+        return storage_client.get_as_base64_uri(normalized)
     except Exception as e:
         logger.error(f"Image conversion failed for url {url}: {str(e)}")
         return None
@@ -304,7 +307,7 @@ def resolve_proposal_category(itm: Proposal) -> str:
     if proj and getattr(proj, "project_category", None):
         return str(getattr(proj.project_category, "value", proj.project_category)).strip()
     
-    strat = str(getattr(itm.strategic_category, "value", itm.strategic_category or "")).strip()
+    strat = str(getattr(itm, "strategic_category", "value" if hasattr(itm, "strategic_category") and hasattr(itm.strategic_category, "value") else itm.strategic_category or "")).strip()
     if strat:
         return strat
 
@@ -313,6 +316,43 @@ def resolve_proposal_category(itm: Proposal) -> str:
         return "Continuing Costs/Expenses"
 
     return "Office Productivity"
+
+
+def infer_dict_category(item_name: str, is_software: bool) -> str:
+    """Fallback inference for assets without an explicit DICT category."""
+    name_clean = (item_name or "").strip().lower()
+    if is_software:
+        if any(k in name_clean for k in ["antivirus", "anti-virus", "edr", "endpoint"]):
+            return "Antivirus"
+        if any(k in name_clean for k in ["grammar", "grammarly"]):
+            return "Grammar checker"
+        if any(k in name_clean for k in ["graphics", "simulation", "cad", "autocad", "3d"]):
+            return "Graphics and Simulation Software"
+        if any(k in name_clean for k in ["help desk", "helpdesk", "ticketing"]):
+            return "IT Help Desk Tool"
+        if any(k in name_clean for k in ["photo", "video", "premiere", "photoshop"]):
+            return "Photo and Video Editing Software"
+        if any(k in name_clean for k in ["waf", "firewall", "web application firewall"]):
+            return "Web Application Firewall"
+        if any(k in name_clean for k in ["office", "productivity", "word", "excel", "suite"]):
+            return "Office Productivity Tool"
+        return "Others (ICT Software)"
+    else:
+        if any(k in name_clean for k in ["switch", "router", "access point", "network"]):
+            return "Network Switch"
+        if any(k in name_clean for k in ["printer", "scanner", "plotter", "copier"]):
+            return "Printer"
+        if any(k in name_clean for k in ["tablet", "ipad"]):
+            return "Tablet"
+        if any(k in name_clean for k in ["mobile", "phone", "smartphone"]):
+            return "Mobile Phone"
+        if any(k in name_clean for k in ["laptop", "notebook", "thinkpad"]):
+            return "Laptop"
+        if any(k in name_clean for k in ["desktop", "pc", "optiplex", "workstation"]):
+            return "Desktop"
+        if any(k in name_clean for k in ["server", "rackmount", "blade", "san", "nas"]):
+            return "Servers"
+        return "Others (ICT Equipment)"
 
 
 @celery_app.task(
@@ -326,7 +366,12 @@ def compile_issp_document(self, metadata: dict):
     db = SessionLocal()
     task_ref = self
     try:
-        issp_period = metadata.get("issp_period_years", "2026-2028")
+        # Dynamically resolve active planning cycle from database or metadata
+        issp_period = metadata.get("issp_period_years")
+        if not issp_period:
+            active_row = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
+            issp_period = active_row.issp_period if active_row else get_active_issp_period(db)
+        
         export_format = metadata.get("export_format", "pdf").lower().strip()
         
         safe_update_progress(task_ref, "PROGRESS", 15, "Certifying graph singularity and legal linkages...")
@@ -360,7 +405,11 @@ def compile_issp_document(self, metadata: dict):
         safe_update_progress(task_ref, "PROGRESS", 45, "Extracting certified graph artifacts...")
         narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
         if not narrative:
-            raise ValueError(f"Active planning cycle '{issp_period}' is not configured in the database.")
+            narrative = db.query(MasterNarrative).filter(MasterNarrative.is_active == True).first()
+            if narrative:
+                issp_period = narrative.issp_period
+            else:
+                raise ValueError(f"Active planning cycle '{issp_period}' is not configured in the database.")
 
         outcomes = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == issp_period).all()
         concerns = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).order_by(StrategicConcern.order_index.asc()).all()
@@ -389,9 +438,16 @@ def compile_issp_document(self, metadata: dict):
         ).filter(IctProject.issp_period == issp_period).all()
 
         performance_metrics = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
-        
-        policy = get_governance_policy(db)
-        cap_threshold = policy.get("capitalization_threshold", Decimal("50000.00"))
+
+        # Dynamically determine standalone categories from database
+        non_project_cats = db.query(StrategicCategory.name).filter(
+            StrategicCategory.is_project_linked == False,
+            StrategicCategory.is_active == True
+        ).all()
+        standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
+        for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
+            if default_cat not in standalone_cat_names:
+                standalone_cat_names.append(default_cat)
 
         raw_approved_items = db.query(Proposal).options(
             joinedload(Proposal.project_rel),
@@ -404,20 +460,11 @@ def compile_issp_document(self, metadata: dict):
             or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).all()
 
+        # Include all approved proposals that are project-linked OR standalone operational outlays
         items = []
         for itm in raw_approved_items:
-            resolved_cat = resolve_proposal_category(itm)
-            if itm.project_id is not None:
-                items.append(itm)
-            else:
-                is_capital_outlay = (
-                    Decimal(str(itm.total_cost or 0)) >= cap_threshold 
-                    or "(co)" in str(itm.uacs_object_code or "").lower()
-                    or "capital" in str(getattr(itm.expenditure_class, 'value', itm.expenditure_class or '')).lower()
-                )
-                is_project_cat = "project" in resolved_cat.lower() or resolved_cat in ["Internal ICT Projects", "Cross-Agency ICT Projects"]
-                if is_capital_outlay or is_project_cat:
-                    continue
+            resolved_cat = resolve_proposal_category(itm).lower().strip()
+            if itm.project_id is not None or resolved_cat in standalone_cat_names:
                 items.append(itm)
 
         inventory = db.query(ExistingInventory).filter(
@@ -436,27 +483,7 @@ def compile_issp_document(self, metadata: dict):
         dr_teams = db.query(DisasterRecoveryTeam).filter(DisasterRecoveryTeam.issp_period == issp_period).all()
         dr_bias = db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.issp_period == issp_period).all()
         dr_metrics = db.query(DRBCPMetric).filter(DRBCPMetric.issp_period == issp_period).all()
-
         glossary = db.query(GlossaryTerm).order_by(GlossaryTerm.order_index.asc()).all()
-        if not glossary:
-            default_dict_terms = [
-                ("DICT", "Department of Information and Communications Technology – The executive department of the Philippine government responsible for the planning, development, and promotion of the national ICT agenda in support of national development."),
-                ("MITHI", "Medium-Term Information and Technology Harmonization Initiative – An inter-agency initiative (DBM, DICT, NEDA) aimed at harmonizing government ICT investments to optimize public resources and eliminate redundancies."),
-                ("ISSP", "Information Systems Strategic Plan – A statutory three-year strategic blueprint that outlines an agency's overall ICT strategy, operational information systems, infrastructure roadmaps, and budgetary requirements."),
-                ("PeGIF", "Philippine e-Government Interoperability Framework – Technical, organizational, and semantic specifications designed to enable seamless data exchange, unified digital identity, and API interconnectivity among government agencies."),
-                ("GovNet", "Government Network – High-speed fiber-optic network infrastructure deployed by DICT to interconnect national government agencies, state universities, and field offices for secure digital communications."),
-                ("GovCloud", "Government Cloud – Secure, multi-tenant cloud hosting infrastructure managed by DICT, providing scalable virtual compute, containerized clusters, and offsite disaster recovery storage for public sector services."),
-                ("PNPKI", "Philippine National Public Key Infrastructure – The national cryptographic certification authority operated by DICT that issues digital certificates ensuring confidentiality, integrity, authenticity, and non-repudiation in electronic transactions."),
-                ("DPA", "Data Privacy Act of 2012 (Republic Act No. 10173) – Comprehensive statutory law mandating the protection and security of personal and sensitive personal information processed by government agencies and private entities."),
-                ("UACS", "Unified Accounts Code Structure – Standardized government-wide coding framework jointly developed by DBM, COA, and DOF to harmonize budget classification, expenditure monitoring, and accounting across the bureaucracy."),
-                ("CO", "Capital Outlay – Budgetary appropriation classification for expenditures intended for the acquisition of physical assets, IT infrastructure, perpetual software licenses, and systems whose utility extends beyond one fiscal year."),
-                ("MOOE", "Maintenance and Other Operating Expenses – Budgetary classification covering recurrent operational expenditures necessary for day-to-day government operations, including software-as-a-service subscriptions, utilities, and maintenance contracts."),
-                ("DRBCP", "Disaster Recovery and Business Continuity Plan – Mandatory institutional protocol establishing emergency procedures, technical failovers, Recovery Time Objectives (RTO), and Recovery Point Objectives (RPO) to safeguard government data and services.")
-            ]
-            for idx, (t, d) in enumerate(default_dict_terms, start=1):
-                db.add(GlossaryTerm(term=t, definition=d, order_index=idx))
-            db.commit()
-            glossary = db.query(GlossaryTerm).order_by(GlossaryTerm.order_index.asc()).all()
 
         # DUAL OUTPUT BRANCHING: WORD (.DOCX) VS PDF
         if export_format == "docx":
@@ -507,8 +534,7 @@ def compile_issp_document(self, metadata: dict):
             try:
                 narrative_record = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
                 if narrative_record:
-                    if hasattr(narrative_record, "final_docx_vault_url"):
-                        narrative_record.final_docx_vault_url = download_url
+                    narrative_record.final_docx_vault_url = download_url
                     db.commit()
             except Exception as db_save_err:
                 db.rollback()
@@ -846,28 +872,46 @@ def generate_complete_issp_html(
     dr_metrics: List[DRBCPMetric],
     parity_data: Dict[str, Any]
 ) -> str:
-    years_range = get_cycle_year_range(narrative, narrative.issp_period)
-    if not years_range:
-        years_range = [2026, 2027, 2028]
+    # Dynamically extract planning cycle span from narrative
+    start_year = getattr(narrative, "issp_period_from", None)
+    end_year = getattr(narrative, "issp_period_to", None)
+    
+    if start_year is None or end_year is None:
+        period_str = str(getattr(narrative, "issp_period", "") or "").strip()
+        if "-" in period_str:
+            try:
+                parts = period_str.split("-")
+                start_year = int(parts[0].strip())
+                end_year = int(parts[1].strip())
+            except Exception:
+                start_year, end_year = 2026, 2028
+        else:
+            try:
+                start_year = int(period_str)
+                end_year = start_year
+            except Exception:
+                start_year, end_year = 2026, 2028
 
+    if start_year > end_year:
+        start_year, end_year = end_year, start_year
+
+    years_range = list(range(start_year, end_year + 1))
     year_headers = [f"FY {y}" for y in years_range]
-    start_year = years_range[0]
-    end_year = years_range[-1]
+    plan_years_label = f"{start_year} - {end_year}" if start_year != end_year else f"{start_year}"
 
     agency_logo = resolve_local_img_path(narrative.agency_logo_url) or ""
     running_header_logo = agency_logo
 
-    agency_name_clean = clean_text(narrative.agency_name, settings.DEFAULT_AGENCY_NAME)
+    agency_name_clean = clean_text(narrative.agency_name, getattr(settings, "DEFAULT_AGENCY_NAME", "National Government Agency"))
     default_web = getattr(settings, "DEFAULT_AGENCY_WEBSITE", "https://agency.gov.ph")
     agency_website_clean = clean_text(narrative.agency_website_url, default_web).replace("https://", "").replace("http://", "").rstrip("/")
-    default_contact = getattr(settings, "DEFAULT_AGENCY_CONTACT", "")
+    agency_address = clean_text(getattr(narrative, "agency_address", None), "")
 
     standalone_metrics = [m for m in performance_metrics if not m.project_id]
 
-    # Non-destructive running header title formatting
     agency_header_name = agency_name_clean.upper()
 
-    # Dynamic Signatory Names with non-hardcoded fallbacks
+    # Dynamic Signatory Names without hardcoded placeholders
     cio_display_name = clean_text(
         getattr(narrative, 'signatory_prepared_by', None) or getattr(narrative, 'cio_name', None), 
         "CHIEF INFORMATION OFFICER"
@@ -878,76 +922,115 @@ def generate_complete_issp_html(
         clean_text(getattr(narrative, 'agency_head_position', None), getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "HEAD OF AGENCY"))
     ).upper()
 
+    head_title = clean_text(getattr(narrative, 'agency_head_position', None), getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency"))
+
+    # Robust running header logo css to prevent gap or missing layout
+    if running_header_logo:
+        logo_css = f'background-image: url("{running_header_logo}"); background-size: 26px 26px; background-repeat: no-repeat; background-position: left center; padding-left: 32px;'
+    else:
+        logo_css = 'padding-left: 0;'
+
+    # Shared running header block starting from Table of Contents through to end of document
+    shared_running_header = f"""
+        @top-left {{
+            content: "{agency_header_name}";
+            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+            font-size: 8.5pt;
+            font-weight: bold;
+            color: #0f172a;
+            white-space: nowrap;
+            text-align: left;
+            vertical-align: middle;
+            {logo_css}
+            padding-bottom: 4px;
+            border-bottom: 1.5px solid #cbd5e1;
+            height: 32px;
+        }}
+        @top-center {{
+            content: "";
+            vertical-align: middle;
+            padding-bottom: 4px;
+            border-bottom: 1.5px solid #cbd5e1;
+            height: 32px;
+        }}
+        @top-right {{
+            content: "INFORMATION SYSTEMS STRATEGIC PLAN {plan_years_label}";
+            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+            font-size: 8.5pt;
+            font-weight: bold;
+            color: #0f172a;
+            text-align: right;
+            vertical-align: middle;
+            white-space: nowrap;
+            padding-bottom: 4px;
+            border-bottom: 1.5px solid #cbd5e1;
+            height: 32px;
+        }}
+    """
+
     css = f"""
     <style>
         @page {{
             size: A4 landscape;
-            margin: 1.25in 1.0in 1.0in 1.0in;
-            @top-left {{
-                content: "{agency_header_name}";
+            margin: 1.2in 1.0in 1.0in 1.0in;
+            {shared_running_header}
+            @bottom-left {{
+                content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8.5pt;
-                font-weight: bold;
-                color: #0f172a;
-                white-space: nowrap;
-                text-align: left;
+                font-size: 7.5pt;
+                color: #94a3b8;
                 vertical-align: middle;
-                background-image: url("{running_header_logo}");
-                background-size: 32px 32px;
-                background-repeat: no-repeat;
-                background-position: left center;
-                padding-left: 40px;
-                padding-bottom: 4px;
-                border-bottom: 1.5px solid #cbd5e1;
-                height: 36px;
-            }}
-            @top-right {{
-                content: "INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}";
-                font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8.5pt;
-                font-weight: bold;
-                color: #0f172a;
-                text-align: right;
-                vertical-align: middle;
-                white-space: nowrap;
-                padding-bottom: 4px;
-                border-bottom: 1.5px solid #cbd5e1;
-                height: 36px;
             }}
             @bottom-right {{
                 content: "Page " counter(page);
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
                 font-size: 8pt;
                 color: #64748b;
+                vertical-align: middle;
             }}
         }}
 
+        /* STRICT FIRST-PAGE COVER ISOLATION: NO HEADERS OR FOOTERS ON COVER PAGE */
         @page:first {{
             size: A4 landscape;
             margin: 0.85in 0.9in 0.85in 0.9in;
-            @top-left {{ content: none !important; }}
-            @top-right {{ content: none !important; }}
-            @bottom-right {{ content: none !important; }}
+            @top-left {{ content: none !important; border: none !important; }}
+            @top-center {{ content: none !important; border: none !important; }}
+            @top-right {{ content: none !important; border: none !important; }}
+            @bottom-left {{ content: none !important; border: none !important; }}
+            @bottom-center {{ content: none !important; border: none !important; }}
+            @bottom-right {{ content: none !important; border: none !important; }}
         }}
 
         @page cover_layout {{
             size: A4 landscape;
             margin: 0.85in 0.9in 0.85in 0.9in;
-            @top-left {{ content: none !important; }}
-            @top-right {{ content: none !important; }}
-            @bottom-right {{ content: none !important; }}
+            @top-left {{ content: none !important; border: none !important; }}
+            @top-center {{ content: none !important; border: none !important; }}
+            @top-right {{ content: none !important; border: none !important; }}
+            @bottom-left {{ content: none !important; border: none !important; }}
+            @bottom-center {{ content: none !important; border: none !important; }}
+            @bottom-right {{ content: none !important; border: none !important; }}
         }}
 
+        /* HEADERS START CONTINUOUSLY ON TABLE OF CONTENTS */
         @page toc_layout {{
             size: A4 landscape;
-            margin: 1.25in 1.0in 1.0in 1.0in;
-            @top-left {{ content: none; }}
-            @top-right {{ content: none; }}
+            margin: 1.2in 1.0in 1.0in 1.0in;
+            {shared_running_header}
+            @bottom-left {{
+                content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
+                font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+                font-size: 7.5pt;
+                color: #94a3b8;
+                vertical-align: middle;
+            }}
             @bottom-right {{
                 content: "Page " counter(page, lower-roman);
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
                 font-size: 8pt;
                 color: #64748b;
+                vertical-align: middle;
             }}
         }}
 
@@ -970,44 +1053,22 @@ def generate_complete_issp_html(
 
         @page part1_start {{
             size: A4 landscape;
-            margin: 1.25in 1.0in 1.0in 1.0in;
+            margin: 1.2in 1.0in 1.0in 1.0in;
             counter-reset: page 1;
-            @top-left {{
-                content: "{agency_header_name}";
+            {shared_running_header}
+            @bottom-left {{
+                content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8.5pt;
-                font-weight: bold;
-                color: #0f172a;
-                white-space: nowrap;
-                text-align: left;
+                font-size: 7.5pt;
+                color: #94a3b8;
                 vertical-align: middle;
-                background-image: url("{running_header_logo}");
-                background-size: 32px 32px;
-                background-repeat: no-repeat;
-                background-position: left center;
-                padding-left: 40px;
-                padding-bottom: 4px;
-                border-bottom: 1.5px solid #cbd5e1;
-                height: 36px;
-            }}
-            @top-right {{
-                content: "INFORMATION SYSTEMS STRATEGIC PLAN {start_year} - {end_year}";
-                font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-                font-size: 8.5pt;
-                font-weight: bold;
-                color: #0f172a;
-                text-align: right;
-                vertical-align: middle;
-                white-space: nowrap;
-                padding-bottom: 4px;
-                border-bottom: 1.5px solid #cbd5e1;
-                height: 36px;
             }}
             @bottom-right {{
                 content: "Page " counter(page);
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
                 font-size: 8pt;
                 color: #64748b;
+                vertical-align: middle;
             }}
         }}
 
@@ -1227,6 +1288,8 @@ def generate_complete_issp_html(
     is_other_gov = "other" in raw_scope
     is_lgu = "lgu" in raw_scope
 
+    address_display = agency_address if agency_address else ""
+
     cover_html = f"""
     <div class="page-cover">
         <div style="text-align: center; margin-bottom: 20px;">
@@ -1234,7 +1297,7 @@ def generate_complete_issp_html(
             <p style="font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1.2px; margin: 0; color: #475569; line-height: 1.4; font-family: sans-serif;">
                 Republic of the Philippines<br/>
                 <strong style="color: #0f172a; font-size: 14pt; font-family: 'Palatino Linotype', serif;">{agency_name_clean.upper()}</strong><br/>
-                <span style="font-size: 9pt; color: #64748b;">{clean_text(getattr(narrative, 'agency_address', None), 'Central Office, Philippines')}</span>
+                {f'<span style="font-size: 9pt; color: #64748b;">{address_display}</span>' if address_display else ''}
             </p>
         </div>
 
@@ -1284,6 +1347,7 @@ def generate_complete_issp_html(
                             </strong>
                             <div style="border-top: 1.5px solid #0f172a; padding-top: 3px;">
                                 <span style="font-size: 8pt; color: #475569;">Name &amp; Signature of Agency Head</span>
+                                <span style="font-size: 7.5pt; color: #64748b; display: block;">({head_title})</span>
                             </div>
                         </div>
                     </div>
@@ -1408,20 +1472,20 @@ def generate_complete_issp_html(
     # --- 4. PART I: AGENCY PROFILE & STRATEGIC CONTEXT ---
     mandate_clean = clean_text(getattr(narrative, 'mandate_text', None) or getattr(narrative, 'mandate_html', None), "Statutory legal basis establishing mandate, administrative leadership, and public service functions.")
     functions_clean = clean_text(narrative.functions, "Deliver efficient public services, execute regulatory and policy duties, and advance institutional digital transformation.")
-    vision_clean = clean_text(getattr(narrative, 'vision_text', None) or getattr(narrative, 'vision_html', None), "A digitally empowered, transparent, and resilient public institution delivering world-class service.")
+    vision_clean = clean_text(getattr(narrative, 'vision_text', None) or getattr(narrative, 'vision_html', None), "A premier institution delivering responsive public service, digital innovation, and excellence.")
     mission_clean = clean_text(getattr(narrative, 'mission_text', None) or getattr(narrative, 'mission_html', None), "To provide accountable, citizen-centric, and accessible digital governance through strategic technological modernization.")
 
-    clean_domain = agency_website_clean.split('/')[0]
+    clean_domain = agency_website_clean.split('/')[0] if agency_website_clean else "agency.gov.ph"
     cio_pos = clean_text(getattr(narrative, 'cio_plantilla_position', None) or getattr(narrative, 'preparer_position', ''), "Director, ICT Management Office")
     cio_unit = clean_text(narrative.cio_organizational_unit, "Management Information & Communications Technology Services")
     cio_email = clean_text(narrative.preparer_email, f"cio@{clean_domain}")
-    cio_phone = clean_text(narrative.preparer_tel, default_contact)
+    cio_phone = clean_text(narrative.preparer_tel, "N/A")
 
-    focal_name = clean_text(narrative.focal_name, "Alternate ISSP Focal Person")
+    focal_name = clean_text(narrative.focal_name, "")
     focal_pos = clean_text(narrative.focal_position, "Head, Systems and Infrastructure Administration")
     focal_unit = clean_text(narrative.focal_organizational_unit, "ICT Management Service")
     focal_email = clean_text(narrative.focal_email, f"focal@{clean_domain}")
-    focal_phone = clean_text(narrative.focal_contact_no, default_contact)
+    focal_phone = clean_text(narrative.focal_contact_no, "N/A")
 
     hc_current = [h for h in human_capitals if not h.is_proposed]
     hc_total_it = sum(h.it_positions_count for h in hc_current)
@@ -1457,6 +1521,17 @@ def generate_complete_issp_html(
         for oo in valid_outcomes
     ) if valid_outcomes else "<li>No organizational outcomes mapped.</li>"
 
+    focal_card_html = f"""
+    <td style="width: 50%; border: 1px solid #cbd5e1; border-radius: 4px; padding: 6px 10px; background: #f8fafc; font-size: 8pt;">
+        <strong style="color: #1e3a8a; text-transform: uppercase; display: block; margin-bottom: 3px;">Alternate ISSP Focal Person</strong>
+        <div>● <strong>Name of ISSP Focal:</strong> {focal_name}</div>
+        <div>● <strong>Position:</strong> {focal_pos}</div>
+        <div>● <strong>Organizational Unit:</strong> {focal_unit}</div>
+        <div>● <strong>E-mail Address:</strong> {focal_email}</div>
+        <div>● <strong>Contact Number/s:</strong> {focal_phone}</div>
+    </td>
+    """ if focal_name else '<td style="width: 50%; border: none;"></td>'
+
     part1_html = f"""
     <div class="page-body-start" id="sec-part1">
         <div class="section-header">PART I. AGENCY PROFILE &amp; STRATEGIC CONTEXT</div>
@@ -1481,14 +1556,7 @@ def generate_complete_issp_html(
                     <div>● <strong>E-mail Address:</strong> {cio_email}</div>
                     <div>● <strong>Contact Number/s:</strong> {cio_phone}</div>
                 </td>
-                <td style="width: 50%; border: 1px solid #cbd5e1; border-radius: 4px; padding: 6px 10px; background: #f8fafc; font-size: 8pt;">
-                    <strong style="color: #1e3a8a; text-transform: uppercase; display: block; margin-bottom: 3px;">Alternate ISSP Focal Person</strong>
-                    <div>● <strong>Name of ISSP Focal:</strong> {focal_name}</div>
-                    <div>● <strong>Position:</strong> {focal_pos}</div>
-                    <div>● <strong>Organizational Unit:</strong> {focal_unit}</div>
-                    <div>● <strong>E-mail Address:</strong> {focal_email}</div>
-                    <div>● <strong>Contact Number/s:</strong> {focal_phone}</div>
-                </td>
+                {focal_card_html}
             </tr>
         </table>
 
@@ -2099,14 +2167,27 @@ def generate_complete_issp_html(
         rows = ""
         year_total = Decimal("0.00")
 
+        # Discover all active categories from proposals
+        discovered_categories = []
+        for itm in items:
+            c = resolve_proposal_category(itm)
+            if c and c not in discovered_categories:
+                discovered_categories.append(c)
+        
+        # Ensure canonical categories are present
         canonical_cats = [
-            ("Office Productivity", False),
-            ("Internal ICT Projects", True),
-            ("Cross-Agency ICT Projects", True),
-            ("Continuing Costs/Expenses", False)
+            "Office Productivity",
+            "Internal ICT Projects",
+            "Cross-Agency ICT Projects",
+            "Continuing Costs/Expenses"
         ]
+        for cc in canonical_cats:
+            if cc not in discovered_categories:
+                discovered_categories.append(cc)
 
-        for cat_name, is_proj_linked in canonical_cats:
+        for cat_name in discovered_categories:
+            is_proj_linked = "project" in cat_name.lower()
+
             cat_items = []
             for itm in items:
                 resolved_cat = resolve_proposal_category(itm)
@@ -2114,7 +2195,7 @@ def generate_complete_issp_html(
                 if resolved_cat.lower() == cat_name.lower():
                     qty = 0
                     if itm.yearly_quantities and isinstance(itm.yearly_quantities, dict):
-                        qty = int(itm.yearly_quantities.get(str(cal_year), 0) or 0)
+                        qty = int(itm.yearly_quantities.get(str(cal_year), 0) or itm.yearly_quantities.get(cal_year, 0) or 0)
                         if qty == 0:
                             qty = int(itm.yearly_quantities.get(f"Year {year_index}", 0) or 0)
                     elif year_index == 1:
@@ -2325,7 +2406,15 @@ def generate_complete_issp_html(
     """
 
     # --- 9. ANNEX 1: ASSET INVENTORY ---
-    std_equipment = ["Servers", "Desktop", "Laptop", "Mobile Phone", "Tablet", "Printer", "Network Switch"]
+    std_equipment = [
+        "Servers", 
+        "Desktop", 
+        "Laptop", 
+        "Mobile Phone", 
+        "Tablet", 
+        "Printer", 
+        "Network Switch"
+    ]
 
     def match_eq_category(item, target_cat):
         if item.is_software:
@@ -2333,9 +2422,10 @@ def generate_complete_issp_html(
         cat_val = getattr(item, 'dict_category', None)
         if cat_val:
             val_str = getattr(cat_val, "value", str(cat_val))
-            return val_str.strip().lower() == target_cat.strip().lower()
-        name_clean = (item.item_name or "").strip().lower()
-        return target_cat.lower() in name_clean
+            if val_str.strip().lower() == target_cat.strip().lower():
+                return True
+        inferred = infer_dict_category(item.item_name or "", False)
+        return inferred.strip().lower() == target_cat.strip().lower()
 
     eq_rows_html = ""
     tot_c_ops = 0
@@ -2433,7 +2523,15 @@ def generate_complete_issp_html(
     </tr>
     """
 
-    std_software = ["Office Productivity Tool", "Grammar checker", "Graphics and Simulation Software", "Antivirus", "IT Help Desk Tool", "Photo and Video Editing Software", "Web Application Firewall"]
+    std_software = [
+        "Office Productivity Tool", 
+        "Grammar checker", 
+        "Graphics and Simulation Software", 
+        "Antivirus", 
+        "IT Help Desk Tool", 
+        "Photo and Video Editing Software", 
+        "Web Application Firewall"
+    ]
 
     def match_sw_category(item, target_cat):
         if not item.is_software:
@@ -2441,9 +2539,10 @@ def generate_complete_issp_html(
         cat_val = getattr(item, 'dict_category', None)
         if cat_val:
             val_str = getattr(cat_val, "value", str(cat_val))
-            return val_str.strip().lower() == target_cat.strip().lower()
-        name_clean = (item.item_name or "").strip().lower()
-        return target_cat.lower() in name_clean
+            if val_str.strip().lower() == target_cat.strip().lower():
+                return True
+        inferred = infer_dict_category(item.item_name or "", True)
+        return inferred.strip().lower() == target_cat.strip().lower()
 
     sw_rows_html = ""
     tot_c_perp = 0
@@ -2546,7 +2645,7 @@ def generate_complete_issp_html(
 
     real_bias = [
         b for b in dr_bias 
-        if b.system_name and not b.system_name.lower().startswith("testtt")
+        if b.system_name and b.system_name.strip()
     ]
 
     bia_rows = "".join(f"""
@@ -2572,7 +2671,7 @@ def generate_complete_issp_html(
                 dtls = clean_text(str(a.get("details", "")))
                 if grp and dtls:
                     affected_assets_items.append(f"<li><strong>{grp}:</strong> {dtls}</li>")
-            elif isinstance(a, str) and not a.strip().lower().startswith("testtt"):
+            elif isinstance(a, str):
                 clean_str = clean_text(a)
                 if clean_str:
                     affected_assets_items.append(f"<li>{clean_str}</li>")
@@ -2607,7 +2706,7 @@ def generate_complete_issp_html(
         "UACS and Budgeting: Funding for off-site storage, GovCloud mirror subscriptions, and standby infrastructure is categorized under Continuing Costs in Part IV of the ISSP."
     )
 
-    drbcp_approval_date = clean_text(getattr(narrative, 'drbcp_approval_date', None), f"January 15, {start_year}")
+    drbcp_approval_date = clean_text(getattr(narrative, 'drbcp_approval_date', None), f"March 15, {start_year}")
 
     annex2_html = f"""
     <div class="page-break" id="sec-annex2">
@@ -2656,3 +2755,4 @@ def generate_complete_issp_html(
     """
 
     return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}</body></html>"
+
