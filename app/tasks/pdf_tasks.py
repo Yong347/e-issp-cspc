@@ -439,16 +439,7 @@ def compile_issp_document(self, metadata: dict):
 
         performance_metrics = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
 
-        # Dynamically determine standalone categories from database
-        non_project_cats = db.query(StrategicCategory.name).filter(
-            StrategicCategory.is_project_linked == False,
-            StrategicCategory.is_active == True
-        ).all()
-        standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-        for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-            if default_cat not in standalone_cat_names:
-                standalone_cat_names.append(default_cat)
-
+        # Strict compilation: Only pull approved proposals that are bound to an ICT Project
         raw_approved_items = db.query(Proposal).options(
             joinedload(Proposal.project_rel),
             joinedload(Proposal.outcome),
@@ -457,15 +448,11 @@ def compile_issp_document(self, metadata: dict):
         ).filter(
             Proposal.issp_period == issp_period,
             func.lower(cast(Proposal.status, String)) == "approved",
+            Proposal.project_id.isnot(None),
             or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).all()
 
-        # Include all approved proposals that are project-linked OR standalone operational outlays
-        items = []
-        for itm in raw_approved_items:
-            resolved_cat = resolve_proposal_category(itm).lower().strip()
-            if itm.project_id is not None or resolved_cat in standalone_cat_names:
-                items.append(itm)
+        items = raw_approved_items
 
         inventory = db.query(ExistingInventory).filter(
             or_(
@@ -2268,7 +2255,9 @@ def generate_complete_issp_html(
                             line_cost = Decimal(qty) * adj_unit
                             year_total += line_cost
                             deploy_office = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location or "Central Office"
-                            fund_val = str(getattr(getattr(p_obj, "funding_source", None) or itm.fund_source, 'value', itm.fund_source or 'GAA'))
+                            proj = getattr(itm, "project_rel", None)
+                            resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
+                            fund_val = str(getattr(resolved_fund, 'value', resolved_fund or itm.fund_source or 'GAA'))
 
                             rows += f"""
                             <tr>
@@ -2307,7 +2296,9 @@ def generate_complete_issp_html(
                         line_cost = Decimal(qty) * adj_unit
                         year_total += line_cost
                         deploy_office = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location or "Central Office"
-                        fund_val = str(getattr(itm.fund_source, 'value', itm.fund_source or 'GAA'))
+                        proj = getattr(itm, "project_rel", None)
+                        resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
+                        fund_val = str(getattr(resolved_fund, 'value', resolved_fund or itm.fund_source or 'GAA'))
 
                         rows += f"""
                         <tr>
@@ -2755,4 +2746,3 @@ def generate_complete_issp_html(
     """
 
     return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}</body></html>"
-

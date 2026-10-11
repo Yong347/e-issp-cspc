@@ -11,6 +11,7 @@ Core Capabilities:
 - DBM Capitalization Thresholding & Dynamic UACS Accounting Engine
 - Annex 1 Hardware Obsolescence Quota & Anti-Loop Replacement Enforcement
 - Section 8.0 Needs Assessment, Multi-Pathway Resolution & PIA Audit Checks
+- Strict Project-Governed Rollup & Multi-Pathway Strategic Concern Validation
 =============================================================================
 """
 
@@ -312,7 +313,7 @@ def get_active_issp_period(db: Optional[Session] = None) -> str:
                 except Exception:
                     pass
 
-    return getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+    return getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
 
 
 def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = None) -> List[int]:
@@ -331,7 +332,7 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
             issp_period = getattr(narrative, "issp_period", None)
 
     if not start_year or not end_year:
-        period_str = str(issp_period or getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")).strip()
+        period_str = str(issp_period or getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")).strip()
         parts = period_str.split("-")
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             start_year = int(parts[0])
@@ -340,7 +341,7 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
             start_year = int(parts[0])
             end_year = int(parts[0])
         else:
-            start_year, end_year = 2028, 2030
+            start_year, end_year = 2026, 2028
 
     if start_year > end_year:
         start_year, end_year = end_year, start_year
@@ -380,7 +381,7 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
                 except Exception:
                     pass
 
-    target_period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+    target_period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
     year_range = get_cycle_year_range(active_narrative, issp_period=target_period)
     expected_years = [str(y) for y in year_range]
     submitted_years_str = [str(y).strip() for y in submitted_years]
@@ -427,7 +428,7 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 except Exception:
                     pass
 
-    period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+    period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
     year_range = get_cycle_year_range(active_narrative, issp_period=period)
     expected_years = [str(y) for y in year_range]
     aligned_data = {year: 0 for year in expected_years}
@@ -443,7 +444,7 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 qty_val = 0
             sanitized_input[k_str] = max(0, qty_val)
 
-    # 1. Direct calendar year match (e.g. "2028", "2029", "2030")
+    # 1. Direct calendar year match (e.g. "2026", "2027", "2028")
     for yr in expected_years:
         if yr in sanitized_input:
             aligned_data[yr] = sanitized_input[yr]
@@ -490,9 +491,9 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
     return period, aligned_data
 
 
-# =========================================================================
+# ==========================================================
 # 3. DYNAMIC POLICY & INFLATION BUFFER RESOLVERS
-# =========================================================================
+# ==========================================================
 
 def get_governance_policy(db_or_conn: Optional[Any] = None) -> Dict[str, Any]:
     """
@@ -602,20 +603,6 @@ def get_adjusted_unit_cost_for_year(connection_or_db: Any, base_cost: Decimal, c
 # =========================================================================
 # 4. DYNAMIC CAPITALIZATION & UACS RESOLUTION
 # =========================================================================
-
-def clean_uacs_title(uacs_str: Optional[str]) -> str:
-    """
-    Strips numeric UACS accounting prefixes, displaying solely the clean account title.
-    Example: '50604050 03 - ICT Equipment (CO)' -> 'ICT Equipment (CO)'
-    """
-    if not uacs_str:
-        return ""
-    val = str(uacs_str).strip()
-    if " - " in val:
-        return val.split(" - ", 1)[1].strip()
-    cleaned = re.sub(r'^\d{8}(?:\s+\d{2})?\s*[-–]?\s*', '', val).strip()
-    return cleaned or val
-
 
 def classify_uacs_and_expenditure(
     item_name: str,
@@ -913,7 +900,8 @@ def verify_annex1_obsolescence_link(
     category: Optional[Any] = None,
     strategic_category: Optional[Any] = None,
     is_expansion: bool = False,
-    is_in_house_turnover: bool = False
+    is_in_house_turnover: bool = False,
+    project_category: Optional[Any] = None
 ) -> Tuple[bool, str]:
     """
     Asserts that replacement hardware requested is justified by an equivalent 
@@ -932,12 +920,14 @@ def verify_annex1_obsolescence_link(
 
     cat_str = str(getattr(category, "value", category or "")).strip().lower()
     strat_str = str(getattr(strategic_category, "value", strategic_category or "")).strip().lower()
+    if project_category:
+        strat_str = str(getattr(project_category, "value", project_category or "")).strip().lower()
 
     # Non-hardware procurement is exempt from physical hardware retirement quotas
     if cat_str and not any(k in cat_str for k in ["hardware", "equipment"]):
         return True, "Non-hardware procurement; exempt from physical obsolescence quota."
 
-    # Strategic project outlays and continuing expenses are exempt from Office Productivity EOL quotas
+    # Strategic project outlays (Internal, Cross-Agency) and continuing expenses are exempt from Office Productivity EOL quotas
     if strat_str and "office productivity" not in strat_str:
         return True, "Project or operational expenditure; exempt from office equipment obsolescence quota."
 
@@ -1041,8 +1031,13 @@ def verify_strategic_concern_resolution(db: Session, issp_period: str, concern: 
     if linked_systems > 0:
         return True, "Resolved via Information System."
 
-    # 2. Check Strategic ICT Projects (Direct alignment or keyword matching)
+    # 2. Check Strategic ICT Projects (Direct alignment, outcome linkage, or keyword matching)
     project_filters = []
+    if hasattr(IctProject, "strategic_concern_id") and c_id:
+        project_filters.append(getattr(IctProject, "strategic_concern_id") == c_id)
+    if hasattr(IctProject, "outcome_id") and getattr(concern, "outcome_id", None):
+        project_filters.append(getattr(IctProject, "outcome_id") == concern.outcome_id)
+
     if c_text:
         project_filters.extend([
             func.lower(func.trim(IctProject.project_title)).contains(c_text),
@@ -1062,6 +1057,11 @@ def verify_strategic_concern_resolution(db: Session, issp_period: str, concern: 
 
     # 3. Check Resource Proposals (Hardware, Peripherals, Infrastructure)
     prop_filters = []
+    if hasattr(Proposal, "strategic_concern_id") and c_id:
+        prop_filters.append(getattr(Proposal, "strategic_concern_id") == c_id)
+    if hasattr(Proposal, "outcome_id") and getattr(concern, "outcome_id", None):
+        prop_filters.append(Proposal.outcome_id == concern.outcome_id)
+
     if c_text:
         prop_filters.extend([
             func.lower(func.trim(Proposal.item_name)).contains(c_text),
@@ -1198,17 +1198,13 @@ def verify_drbcp_funding(db: Session, issp_period: str) -> Tuple[bool, str]:
     ).all()
 
     if critical_bias:
-        strat_cat_col = cast(Proposal.strategic_category, String)
         uacs_col = cast(Proposal.uacs_object_code, String)
 
+        # In DICT v.2026 methodology, all proposals must be bound to an ICT Project
         cloud_items = db.query(Proposal).filter(
             Proposal.issp_period == issp_period,
             func.lower(cast(Proposal.status, String)) == "approved",
-            or_(
-                func.lower(strat_cat_col).like("%continuing%"),
-                func.lower(strat_cat_col).like("%project%"),
-                Proposal.project_id.isnot(None)
-            ),
+            Proposal.project_id.isnot(None),
             or_(
                 func.lower(uacs_col).like("%subscription%"),
                 func.lower(Proposal.item_name).like("%cloud%"),
@@ -1225,7 +1221,7 @@ def verify_drbcp_funding(db: Session, issp_period: str) -> Tuple[bool, str]:
         if total_cloud_funding <= Decimal("0.00"):
             return False, (
                 "Disaster Recovery & Continuity Funding Required: Frontline mission-critical systems require an RTO <= 4 hours "
-                "(mandating GovCloud real-time failover), but no funding is allocated under Continuing Costs or ICT Projects for Cloud/DR Subscriptions."
+                "(mandating GovCloud real-time failover), but no funding is allocated under an approved ICT Project for Cloud/DR Subscriptions in Part IV.A."
             )
 
     return True, "DRBCP continuity funding verified."

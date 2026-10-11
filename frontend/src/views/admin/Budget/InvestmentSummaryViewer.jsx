@@ -72,8 +72,8 @@ export default function InvestmentSummaryViewer() {
   const [success, setSuccess] = useState(null);
 
   // Proposal-to-Project Governance Filter:
-  // true = Only approved proposals bound to ICT Projects (or standalone operational buckets) -> matches final ISSP PDF compilation.
-  // false = Entire planning pipeline ledger (including pending drafts and pool items).
+  // true = Only approved proposals bound to an authorized ICT Project charter (Part III.E) -> matches official ISSP compilation.
+  // false = Entire planning pipeline ledger (including pending drafts and intake pool items).
   const [onlyApproved, setOnlyApproved] = useState(true);
 
   // Active View Tab: "overview" | "b1" | "b2" | "b3" | "b4" | "print"
@@ -580,7 +580,7 @@ export default function InvestmentSummaryViewer() {
                   ? "bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs" 
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
               }`}
-              title="Official DICT compiled scope: Approved proposals bound to ICT Projects or Continuing Costs"
+              title="Official DICT compiled scope: Approved proposals bound to an ICT Project charter in Part III.E"
             >
               <CheckSquare className="w-3.5 h-3.5" />
               <span>Project-Bound Scope</span>
@@ -652,7 +652,7 @@ export default function InvestmentSummaryViewer() {
           </strong>
           {onlyApproved ? (
             <span>
-              Under standard DICT ISSP regulations, only approved proposals bound to an authorized <strong>ICT Project (Part III.E)</strong> or statutory continuing operations (Office Productivity / Continuing Costs) contribute to the compiled Part IV.B summary and PDF document. Detached pool items remain excluded until assigned.
+              Under standard DICT ISSP regulations, all outlays (including Office Productivity and Continuing Costs) must belong to an authorized <strong>ICT Project charter (Part III.E)</strong> to contribute to the compiled Part IV.B summary and PDF document. Detached pool items remain quarantined in the Intake Pool until assigned to an ICT Project in the Projects Portfolio.
             </span>
           ) : (
             <span>
@@ -680,7 +680,7 @@ export default function InvestmentSummaryViewer() {
             <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
           </div>
-          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
             <X className="w-4 h-4" />
           </button>
         </div>

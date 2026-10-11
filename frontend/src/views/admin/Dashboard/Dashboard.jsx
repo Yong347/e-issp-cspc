@@ -466,7 +466,7 @@ export default function AdminDashboard() {
             <div 
               className={`h-full rounded-full transition-all duration-500 ${
                 utilizationPercent > 100 ? "bg-rose-500" : utilizationPercent > 80 ? "bg-amber-500" : "bg-blue-600"
-              }`}
+              }`} 
               style={{ width: `${Math.min(utilizationPercent, 100)}%` }} 
             />
           </div>
@@ -599,13 +599,6 @@ export default function AdminDashboard() {
               ) : (
                 filteredProposals.slice(0, 10).map(p => {
                   const isProjectBound = Boolean(p.project_id);
-                  const totalCostNum = Number(p.total_cost || (p.unit_cost * p.total_qty) || 0);
-                  const isCapitalOutlay = totalCostNum >= 50000 || (p.uacs_object_code || "").toLowerCase().includes("(co)");
-                  const isStandaloneOperational = [
-                    "office productivity", 
-                    "continuing costs/expenses", 
-                    "continuing costs"
-                  ].includes((p.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
 
                   return (
                     <tr key={p.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-955/30 transition-colors">
@@ -625,10 +618,6 @@ export default function AdminDashboard() {
                           <span className="px-2 py-0.5 bg-purple-50 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded font-mono text-[9.5px] font-bold flex items-center gap-1 w-fit">
                             <Layers className="w-3 h-3" />
                             <span>Project-Bound</span>
-                          </span>
-                        ) : isStandaloneOperational ? (
-                          <span className="px-2 py-0.5 bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded font-mono text-[9.5px] font-medium w-fit block">
-                            Standalone OpEx
                           </span>
                         ) : p.status === "Approved" ? (
                           <span className="px-2 py-0.5 bg-amber-50 text-amber-700 dark:bg-amber-955/50 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded font-mono text-[9.5px] font-bold w-fit block" title="Quarantined in Intake Pool until linked to an ICT Project">
@@ -676,7 +665,7 @@ export default function AdminDashboard() {
                               Return
                             </button>
                           </div>
-                        ) : p.status === "Approved" && !isProjectBound && !isStandaloneOperational ? (
+                        ) : p.status === "Approved" && !isProjectBound ? (
                           <button
                             type="button"
                             onClick={() => navigate("/admin/projects/internal")}

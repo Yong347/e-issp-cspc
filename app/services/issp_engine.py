@@ -7,9 +7,11 @@ Core Capabilities:
 - End-to-End Relational Singularity Validation (Part I through Annex 2)
 - Multi-Pathway Strategic Concern Resolution Verification (Systems, Projects,
   Hardware Deployments, Network Infrastructure, and Needs Assessments)
-- Plan-Committed Proposals Governance & Strict Project-Governed Rollup
-- Categorization Per Project: Table B.1 and B.2 inherit strictly from the
-  parent ICT Project charter in Part III.E, eliminating orphan cost leakages
+- Plan-Committed Proposals Governance & Strict Project-Governed Rollup:
+  Every proposal must bind to an ICT Project charter in Part III.E. No proposals
+  stand alone without a project, as all costs belong to an ICT Project.
+- Categorization Per Project: Table B.1 (Category) and Table B.2 (Fund Source)
+  inherit strictly from the parent ICT Project charter in Part III.E.
 - Strict Four-Way Financial Parity Engine (Tables B.1, B.2, B.3, and B.4)
 - Zero-Leakage Rollup: Reconciles all four investment matrices to 0.00 centavo discrepancy
 - Dynamic Multi-Year Horizon Support: Scales dynamically to 1, 2, 3, 4, 5+ year spans
@@ -135,8 +137,10 @@ class ISSPSingularityEngine:
         4. Information Systems -> ICT Projects (Part III.E)
         5. ICT Projects -> PMF Scorecard (Parts III.F.1 & III.F.2)
         6. Project & Proposal Integrity:
-           - Verifies approved proposals are bound to an ICT Project charter.
-           - Enforces that categorizations are strictly per project, not per proposal.
+           - Verifies all approved proposals are bound to an ICT Project charter.
+           - Enforces that no proposals stand alone without a project, as all proposals have costs
+             and their categorizations (Internal, Cross-Agency, Continuing, Office Productivity)
+             are strictly defined by their parent project.
            - Enforces that project-linked proposals have assigned outcomes and UACS object codes.
         7. Resource Deployments -> Tables B.1, B.2, B.3, B.4 Four-Way Parity (Part IV.B)
         8. Cross-Sectional Baselines (Annex 1 Hardware Obsolescence & Annex 2 DRBCP Continuity Funding)
@@ -557,8 +561,24 @@ class ISSPSingularityEngine:
         # -------------------------------------------------------------
         # 5.6 & 5.7: PLAN-COMMITTED PROPOSALS GOVERNANCE INTEGRITY
         # -------------------------------------------------------------
-        # In DICT methodology, all categorizations are per project.
-        # Only proposals bound to an authorized ICT Project compile into the plan.
+        # In DICT methodology, all proposals must bind to an authorized ICT Project.
+        # No proposals stand alone without an ICT Project, since all outlays belong to a project charter.
+        unlinked_approved_proposals = db.query(Proposal).filter(
+            Proposal.issp_period == issp_period,
+            func.lower(cast(Proposal.status, String)) == "approved",
+            Proposal.project_id.is_(None),
+            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+        ).all()
+
+        if unlinked_approved_proposals:
+            sample_names = ", ".join(f"'{p.item_name}'" for p in unlinked_approved_proposals[:3])
+            violations.append(
+                f"Part IV.A Project Binding Required: There are {len(unlinked_approved_proposals)} approved proposal line item(s) "
+                f"in the Intake Pool that are not yet bound to an ICT Project ({sample_names}). All proposals must be bound "
+                "to an ICT Project in the Projects Portfolio (Part III.E) to establish their official categorization "
+                "(Internal, Cross-Agency, Continuing Costs, Office Productivity, etc.) and be compiled into the plan."
+            )
+
         active_plan_proposals = db.query(Proposal).filter(
             Proposal.issp_period == issp_period,
             func.lower(cast(Proposal.status, String)) == "approved",
@@ -578,20 +598,6 @@ class ISSPSingularityEngine:
             violations.append(
                 f"Part IV.A Accounting Incomplete: There are {len(unassigned_uacs_proposals)} approved proposal line item(s) "
                 "without an assigned UACS Object Code (Table B.4). Administrators must verify UACS classifications prior to plan certification."
-            )
-
-        # Log quarantined proposals that remain in the intake pool
-        quarantined_unlinked_proposals = db.query(Proposal).filter(
-            Proposal.issp_period == issp_period,
-            func.lower(cast(Proposal.status, String)) == "approved",
-            Proposal.project_id.is_(None),
-            or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-        ).all()
-
-        if quarantined_unlinked_proposals:
-            logger.info(
-                f"Quarantined {len(quarantined_unlinked_proposals)} unlinked approved proposal(s) in Intake Pool "
-                "(excluded from compiled plan until assigned to an ICT Project)."
             )
 
         # -------------------------------------------------------------
@@ -665,15 +671,12 @@ class ISSPSingularityEngine:
         ).all()
 
         if critical_bias:
-            strat_cat_col = cast(Proposal.strategic_category, String)
-            uacs_col = cast(Proposal.uacs_object_code, String)
-
             cloud_backup_funding = db.query(func.sum(Proposal.total_cost)).filter(
                 Proposal.issp_period == issp_period,
                 func.lower(cast(Proposal.status, String)) == "approved",
                 Proposal.project_id.isnot(None),
                 or_(
-                    func.lower(uacs_col).like("%subscription%"),
+                    func.lower(cast(Proposal.uacs_object_code, String)).like("%subscription%"),
                     func.lower(Proposal.item_name).like("%cloud%"),
                     func.lower(Proposal.item_name).like("%dr%"),
                     func.lower(Proposal.item_name).like("%backup%"),

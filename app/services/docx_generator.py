@@ -356,12 +356,15 @@ def normalize_category_name(cat_str: str) -> str:
     return cat_str.strip() if cat_str else "Office Productivity"
 
 
-def resolve_proposal_category(itm: Any) -> str:
+def resolve_proposal_category(itm: Any, proj_lookup: Optional[Dict[str, Any]] = None) -> str:
     """
-    In DICT ISSP methodology, categorization is governed by the 
-    parent ICT Project or designated standalone operational bucket.
+    In DICT ISSP methodology, categorization is governed strictly by the 
+    parent ICT Project charter in Part III.E.
     """
     proj = getattr(itm, "project_rel", None)
+    if not proj and getattr(itm, "project_id", None) and proj_lookup:
+        proj = proj_lookup.get(str(itm.project_id))
+
     if proj and getattr(proj, "project_category", None):
         return normalize_category_name(clean_str(getattr(proj.project_category, "value", proj.project_category)))
     
@@ -823,6 +826,9 @@ def create_issp_docx(
     start_year = planning_years[0]
     end_year = planning_years[-1]
 
+    # Quick lookup for projects to ensure robust category and fund source resolution
+    proj_lookup = {str(p.id): p for p in projects if getattr(p, "id", None)}
+
     # Resolve Project groupings for PMF and TOC chapters
     internal_projects = [p for p in projects if "cross" not in clean_str(getattr(p, "project_category", "")).lower()]
     cross_projects = [p for p in projects if "cross" in clean_str(getattr(p, "project_category", "")).lower()]
@@ -1073,7 +1079,9 @@ def create_issp_docx(
 
     is_dept_wide = "department-wide" in scope_choice_clean or not scope_choice_clean
     is_dept_co = "central" in scope_choice_clean and not is_dept_wide
+    is_dept_co_only = is_dept_co and not has_reg and not has_bur
     is_agency_wide = "agency-wide" in scope_choice_clean
+    is_agency_co_only = is_agency_wide and not has_reg
     is_other_gov = "other" in scope_choice_clean
     is_lgu = "lgu" in scope_choice_clean
 
@@ -2012,6 +2020,9 @@ def create_issp_docx(
         status_str = clean_str(getattr(itm, "status", "")).lower()
         if status_str and status_str not in ["approved", "submitted"]:
             continue
+        # Strict rule: All proposals must be bound to an ICT Project
+        if getattr(itm, "project_id", None) is None:
+            continue
         prop_items.append(itm)
 
     # Dynamically determine categories list from strategic categories or defaults
@@ -2040,7 +2051,7 @@ def create_issp_docx(
     # Preserve all categories present on active line items without dropping custom ones
     seen_cats = {normalize_category_name(c[0]).lower() for c in active_categories_list}
     for itm in prop_items:
-        resolved_c = resolve_proposal_category(itm)
+        resolved_c = resolve_proposal_category(itm, proj_lookup)
         if resolved_c and normalize_category_name(resolved_c).lower() not in seen_cats:
             seen_cats.add(normalize_category_name(resolved_c).lower())
             active_categories_list.append((resolved_c, True))
@@ -2078,7 +2089,7 @@ def create_issp_docx(
         for cat_name, is_proj_linked in active_categories_list:
             matched_items = []
             for itm in prop_items:
-                strat_name = normalize_category_name(resolve_proposal_category(itm)).lower()
+                strat_name = normalize_category_name(resolve_proposal_category(itm, proj_lookup)).lower()
                 is_match = (normalize_category_name(cat_name).lower() == strat_name)
 
                 if is_match:
@@ -2159,6 +2170,8 @@ def create_issp_docx(
                     total_yr_cost += line_cost
 
                     proj = getattr(itm, "project_rel", None)
+                    if not proj and getattr(itm, "project_id", None):
+                        proj = proj_lookup.get(str(itm.project_id))
                     resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
                     deploy_loc = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location
 

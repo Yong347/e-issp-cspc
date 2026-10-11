@@ -147,6 +147,34 @@ export default function CeilingControl() {
     return { capex: num, mooe: 0 };
   }, []);
 
+  // Auto-dismiss alerts
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Modal escape key handler
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (activeDept) setActiveDept(null);
+        if (isEditingGlobal) setIsEditingGlobal(false);
+        if (editingUacsItem) setEditingUacsItem(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeDept, isEditingGlobal, editingUacsItem]);
+
   // -------------------------------------------------------------
   // DATA FETCHING PIPELINE
   // -------------------------------------------------------------
@@ -747,6 +775,31 @@ export default function CeilingControl() {
           </button>
         </div>
       </div>
+
+      {/* Real-time Status Notifications */}
+      {error && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
+            <span>{typeof error === "object" ? (error.message || JSON.stringify(error)) : error}</span>
+          </div>
+          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {success && (
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>{success}</span>
+          </div>
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Real-time Dry Run Validation Banner */}
       {validationResult && (

@@ -272,23 +272,11 @@ def get_dashboard_metrics(
     global_ceiling_row = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
     global_ceiling = float(global_ceiling_row.value) if global_ceiling_row else float(settings.GLOBAL_BUDGET_CEILING)
 
-    # Calculate spent strictly on project-bound or authorized standalone operational proposals
-    non_project_cats = db.query(StrategicCategory.name).filter(
-        StrategicCategory.is_project_linked == False,
-        StrategicCategory.is_active == True
-    ).all()
-    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-        if default_cat not in standalone_cat_names:
-            standalone_cat_names.append(default_cat)
-
+    # Calculate spent strictly on project-bound approved proposals
     total_spent = db.query(func.sum(Proposal.total_cost)).filter(
         Proposal.issp_period == active_period,
         func.lower(cast(Proposal.status, String)) == "approved",
-        or_(
-            Proposal.project_id.isnot(None),
-            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
-        ),
+        Proposal.project_id.isnot(None),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).scalar() or 0.0
 
@@ -3242,23 +3230,11 @@ def export_budget_csv(
 ):
     period = issp_period or get_active_issp_period(db)
     
-    # Query approved proposals that are project-linked OR authorized standalone operational expenses
-    non_project_cats = db.query(StrategicCategory.name).filter(
-        StrategicCategory.is_project_linked == False,
-        StrategicCategory.is_active == True
-    ).all()
-    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-        if default_cat not in standalone_cat_names:
-            standalone_cat_names.append(default_cat)
-
+    # Query approved proposals strictly bound to an ICT Project
     items = db.query(Proposal).filter(
         Proposal.issp_period == period,
         func.lower(cast(Proposal.status, String)) == "approved",
-        or_(
-            Proposal.project_id.isnot(None),
-            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
-        ),
+        Proposal.project_id.isnot(None),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).all()
 
@@ -3723,7 +3699,7 @@ def batch_approve_proposals(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """1-Click batch approval of submitted proposals with transactional COA audit logging."""
+    """1-Click batch approval of submitted proposals into the Intake Pool."""
     raw_ids = []
     if isinstance(payload, BatchApprovePayload):
         raw_ids = payload.proposal_ids
@@ -3758,16 +3734,6 @@ def batch_approve_proposals(
             if default_outcome:
                 p.outcome_id = default_outcome.id
 
-        # Guard: If item is categorized as a project item but unlinked, fallback to Office Productivity
-        is_project_cat = "project" in (p.strategic_category or "").lower()
-        if is_project_cat and not p.project_id:
-            p.strategic_category = "Office Productivity"
-            sc_obj = db.query(StrategicCategory).filter(
-                func.lower(StrategicCategory.name) == "office productivity"
-            ).first()
-            if sc_obj:
-                p.strategic_category_id = sc_obj.id
-
         old_status = p.status
         p.status = "Approved"
         p.version += 1
@@ -3780,7 +3746,7 @@ def batch_approve_proposals(
             proposal_id=p.id,
             ip_address=request.client.host if request.client else None,
             old_value={"status": old_status},
-            new_value={"status": "Approved", "outcome_id": p.outcome_id}
+            new_value={"status": "Approved", "outcome_id": p.outcome_id, "project_id": str(p.project_id) if p.project_id else None}
         )
 
     db.commit()
@@ -3900,15 +3866,6 @@ def approve_proposal(
                 detail="Approval Blocked: Please assign an Organizational Outcome (Part I.A.4) to this proposal via Override before approving."
             )
 
-    # PREVENT ORPHAN PROPOSAL LEAK:
-    # If categorized as an ICT project item, enforce project linkage before approval
-    is_project_cat = "project" in (proposal.strategic_category or "").lower()
-    if is_project_cat and not proposal.project_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Approval Blocked: Proposal '{proposal.item_name}' is categorized under '{proposal.strategic_category}'. Please link it to an ICT Project (Part III.E) or change its category to a standalone operational category (e.g. 'Office Productivity') before approving."
-        )
-
     old_status = proposal.status
     proposal.status = "Approved"
     proposal.version += 1
@@ -3922,11 +3879,19 @@ def approve_proposal(
         proposal_id=proposal.id,
         ip_address=request.client.host if request.client else None,
         old_value={"status": old_status},
-        new_value={"status": "Approved", "outcome_id": proposal.outcome_id}
+        new_value={
+            "status": "Approved", 
+            "outcome_id": proposal.outcome_id,
+            "project_id": str(proposal.project_id) if proposal.project_id else None
+        }
     )
     db.commit()
     db.refresh(proposal)
-    return {"status": "success", "message": "Proposal approved successfully.", "proposal_id": proposal.id}
+    return {
+        "status": "success", 
+        "message": "Proposal approved successfully into Intake Pool. Please bind it to an ICT Project to define its categorization in the plan.", 
+        "proposal_id": proposal.id
+    }
 
 
 @router.put("/proposals/{proposal_id}/return")
@@ -4009,7 +3974,6 @@ def admin_override_proposal(
                     ).first()
                     proposal.strategic_category_id = sc_row.id if sc_row else None
             else:
-                # Disconnected from project: assign standalone category if not specified
                 if payload.strategic_category is None:
                     proposal.strategic_category = "Office Productivity"
                     sc_row = db.query(StrategicCategory).filter(
@@ -4113,59 +4077,6 @@ def admin_override_proposal(
         db.rollback()
         logger.error(f"Override failure: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database failure during override.")
-
-
-@router.put("/proposals/{proposal_id}/uacs")
-def assign_proposal_uacs(
-    proposal_id: uuid.UUID,
-    payload: Dict[str, Any],
-    request: Request,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    """Explicitly assigns UACS Object Code and Expenditure Class to a proposal."""
-    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
-    if not proposal:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
-
-    uacs_code = payload.get("uacs_object_code")
-    exp_class = payload.get("expenditure_class")
-
-    old_vals = {
-        "uacs_object_code": proposal.uacs_object_code,
-        "expenditure_class": proposal.expenditure_class
-    }
-
-    if uacs_code:
-        proposal.uacs_object_code = str(uacs_code).strip()
-    if exp_class:
-        proposal.expenditure_class = str(exp_class).strip()
-    elif uacs_code:
-        if "(CO)" in str(uacs_code):
-            proposal.expenditure_class = "Capital Outlay"
-        elif "(MOOE)" in str(uacs_code):
-            proposal.expenditure_class = "Maintenance and Other Operating Expenses"
-
-    proposal.version += 1
-
-    log_audit_event(
-        db=db,
-        action="PROPOSAL_UACS_ASSIGNED",
-        module="PROPOSALS",
-        user_id=admin["id"],
-        department_id=proposal.department_id,
-        proposal_id=proposal.id,
-        ip_address=request.client.host if request.client else None,
-        old_value=old_vals,
-        new_value={
-            "uacs_object_code": proposal.uacs_object_code,
-            "expenditure_class": proposal.expenditure_class
-        }
-    )
-
-    db.commit()
-    db.refresh(proposal)
-    return {"status": "success", "message": "UACS object code assigned to proposal.", "proposal_id": str(proposal.id)}
 
 
 @router.delete("/proposals/{proposal_id}")
@@ -4301,30 +4212,18 @@ def trigger_document_generation(
     if not narrative:
         raise HTTPException(status_code=400, detail=f"Planning cycle '{target_period}' not configured.")
 
-    # Strict compilation alignment: Only pull approved proposals that are project-linked OR standalone operational
-    non_project_cats = db.query(StrategicCategory.name).filter(
-        StrategicCategory.is_project_linked == False,
-        StrategicCategory.is_active == True
-    ).all()
-    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-        if default_cat not in standalone_cat_names:
-            standalone_cat_names.append(default_cat)
-
+    # Strict compilation alignment: All proposals must be bound to an ICT Project
     approved_proposals = db.query(Proposal).filter(
         func.lower(cast(Proposal.status, String)) == "approved",
         Proposal.issp_period == target_period,
-        or_(
-            Proposal.project_id.isnot(None),
-            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
-        ),
+        Proposal.project_id.isnot(None),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).all()
 
     if not approved_proposals:
         raise HTTPException(
             status_code=400, 
-            detail="Compilation blocked: No approved proposals connected to ICT projects or standalone operations exist for this cycle."
+            detail="Compilation blocked: No approved proposals bound to ICT projects exist for this cycle. All proposals must be assigned to an ICT Project in Part III.E."
         )
 
     # Derive accurate parity figures directly from canonical parity calculator

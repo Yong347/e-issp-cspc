@@ -1,5 +1,6 @@
 // frontend/src/views/admin/Governance/CategorizationManager.jsx
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
@@ -46,12 +47,24 @@ import {
   Sparkles,
   SlidersHorizontal,
   Filter,
-  Info
+  Info,
+  ArrowRight,
+  FolderKanban,
+  Check
 } from "lucide-react";
 
 export default function CategorizationManager() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
+  const navigate = useNavigate();
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Active Navigation Tab: "uacs" | "strategic" | "funds" | "strategies" | "harmonization" | "thresholds"
   const [activeTab, setActiveTab] = useState("uacs");
@@ -82,12 +95,12 @@ export default function CategorizationManager() {
   const [editUacsDesc, setEditUacsDesc] = useState("");
 
   // -------------------------------------------------------------------------
-  // 2. STRATEGIC CATEGORIES STATE
+  // 2. STRATEGIC CATEGORIES STATE (PROJECT-GOVERNED BY DEFAULT)
   // -------------------------------------------------------------------------
   const [strategicCategories, setStrategicCategories] = useState([]);
   const [newCatName, setNewCatName] = useState("");
   const [newCatCode, setNewCatCode] = useState("");
-  const [newCatIsProject, setNewCatIsProject] = useState(false);
+  const [newCatIsProject, setNewCatIsProject] = useState(true); // Default to Project-Governed in DICT v.2026
   const [newCatIsRecurring, setNewCatIsRecurring] = useState(false);
   const [newCatDesc, setNewCatDesc] = useState("");
 
@@ -95,7 +108,7 @@ export default function CategorizationManager() {
   const [editingCat, setEditingCat] = useState(null);
   const [editCatName, setEditCatName] = useState("");
   const [editCatCode, setEditCatCode] = useState("");
-  const [editCatIsProject, setEditCatIsProject] = useState(false);
+  const [editCatIsProject, setEditCatIsProject] = useState(true);
   const [editCatIsRecurring, setEditCatIsRecurring] = useState(false);
   const [editCatDesc, setEditCatDesc] = useState("");
 
@@ -143,6 +156,38 @@ export default function CategorizationManager() {
 
   const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
 
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 7000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard navigation for closing edit modals on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (editingUacs) setEditingUacs(null);
+        if (editingCat) setEditingCat(null);
+        if (editingHarm) setEditingHarm(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editingUacs, editingCat, editingHarm]);
+
   // Dynamic derivation of active cycle years (handles arbitrary 1 to N-year spans)
   const cycleYears = useMemo(() => {
     if (planningYears && planningYears.length > 0) return planningYears;
@@ -177,6 +222,8 @@ export default function CategorizationManager() {
         getInflationSettings(token).catch(() => null)
       ]);
 
+      if (!isMountedRef.current) return;
+
       setUacsList(Array.isArray(uacsData) ? uacsData : []);
       setStrategicCategories(Array.isArray(catData) ? catData : []);
       setFundSources(Array.isArray(fundData) ? fundData : []);
@@ -208,9 +255,13 @@ export default function CategorizationManager() {
         setInflationRates(defaultRates);
       }
     } catch (err) {
-      setError(err.message || "Failed to load system categorizations.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to load system categorizations.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [token, cycleYears]);
 
@@ -236,16 +287,22 @@ export default function CategorizationManager() {
         is_subscription_default: newUacsIsSub,
         description: newUacsDesc.trim() || null
       });
-      setSuccess(`UACS Code '${newUacsCode.trim()}' registered successfully.`);
-      setNewUacsCode("");
-      setNewUacsTitle("");
-      setNewUacsDesc("");
-      setNewUacsIsSub(false);
+      if (isMountedRef.current) {
+        setSuccess(`UACS Code '${newUacsCode.trim()}' registered successfully.`);
+        setNewUacsCode("");
+        setNewUacsTitle("");
+        setNewUacsDesc("");
+        setNewUacsIsSub(false);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to register UACS code.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to register UACS code.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -272,13 +329,19 @@ export default function CategorizationManager() {
         is_subscription_default: editUacsIsSub,
         description: editUacsDesc.trim() || null
       });
-      setSuccess(`UACS Code '${editingUacs.uacs_code}' updated successfully.`);
-      setEditingUacs(null);
+      if (isMountedRef.current) {
+        setSuccess(`UACS Code '${editingUacs.uacs_code}' updated successfully.`);
+        setEditingUacs(null);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update UACS entry.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update UACS entry.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -288,15 +351,19 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteUacsEntry(token, id);
-      setSuccess(`UACS code '${code}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`UACS code '${code}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete UACS code.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete UACS code.");
+      }
     }
   };
 
   // =========================================================================
-  // 2. STRATEGIC CATEGORIES HANDLERS
+  // 2. STRATEGIC CATEGORIES HANDLERS (PROJECT-GOVERNED INTEGRATION)
   // =========================================================================
   const handleCreateCategory = async (e) => {
     e.preventDefault();
@@ -310,21 +377,27 @@ export default function CategorizationManager() {
       await createStrategicCategory(token, {
         name: newCatName.trim(),
         code: code,
-        is_project_linked: newCatIsProject,
+        is_project_linked: newCatIsProject !== undefined ? newCatIsProject : true,
         is_recurring_expense: newCatIsRecurring,
         description: newCatDesc.trim() || null
       });
-      setSuccess(`Strategic Category '${newCatName}' registered.`);
-      setNewCatName("");
-      setNewCatCode("");
-      setNewCatDesc("");
-      setNewCatIsProject(false);
-      setNewCatIsRecurring(false);
+      if (isMountedRef.current) {
+        setSuccess(`Strategic Category '${newCatName}' registered. Bind proposals to ICT Project charters to compile.`);
+        setNewCatName("");
+        setNewCatCode("");
+        setNewCatDesc("");
+        setNewCatIsProject(true);
+        setNewCatIsRecurring(false);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add category.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add category.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -332,7 +405,7 @@ export default function CategorizationManager() {
     setEditingCat(cat);
     setEditCatName(cat.name || "");
     setEditCatCode(cat.code || "");
-    setEditCatIsProject(Boolean(cat.is_project_linked));
+    setEditCatIsProject(cat.is_project_linked !== undefined ? Boolean(cat.is_project_linked) : true);
     setEditCatIsRecurring(Boolean(cat.is_recurring_expense));
     setEditCatDesc(cat.description || "");
   };
@@ -352,13 +425,19 @@ export default function CategorizationManager() {
         is_recurring_expense: editCatIsRecurring,
         description: editCatDesc.trim() || null
       });
-      setSuccess(`Strategic Category '${editCatName}' updated successfully.`);
-      setEditingCat(null);
+      if (isMountedRef.current) {
+        setSuccess(`Strategic Category '${editCatName}' updated successfully.`);
+        setEditingCat(null);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update category.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update category.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -368,10 +447,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteStrategicCategory(token, id);
-      setSuccess(`Category '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Category '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete category.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete category.");
+      }
     }
   };
 
@@ -392,15 +475,21 @@ export default function CategorizationManager() {
         code: code,
         description: newFundDesc.trim() || null
       });
-      setSuccess(`Fund Source '${newFundName}' added.`);
-      setNewFundName("");
-      setNewFundCode("");
-      setNewFundDesc("");
+      if (isMountedRef.current) {
+        setSuccess(`Fund Source '${newFundName}' added. Assign to ICT Projects in Part III.E.`);
+        setNewFundName("");
+        setNewFundCode("");
+        setNewFundDesc("");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add fund source.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add fund source.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -410,10 +499,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteFundSource(token, code);
-      setSuccess(`Fund Source '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Fund Source '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete fund source.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete fund source.");
+      }
     }
   };
 
@@ -434,15 +527,21 @@ export default function CategorizationManager() {
         code: code,
         description: newStratDesc.trim() || null
       });
-      setSuccess(`Development Strategy '${newStratName}' added.`);
-      setNewStratName("");
-      setNewStratCode("");
-      setNewStratDesc("");
+      if (isMountedRef.current) {
+        setSuccess(`Development Strategy '${newStratName}' registered.`);
+        setNewStratName("");
+        setNewStratCode("");
+        setNewStratDesc("");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add development strategy.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add development strategy.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -452,10 +551,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteDevelopmentStrategy(token, code);
-      setSuccess(`Development strategy '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Development strategy '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete development strategy.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete development strategy.");
+      }
     }
   };
 
@@ -475,15 +578,21 @@ export default function CategorizationManager() {
         is_mandatory: newHarmMandatory,
         description: newHarmDesc.trim() || null
       });
-      setSuccess(`Harmonization Criterion '${newHarmName}' added.`);
-      setNewHarmName("");
-      setNewHarmMandatory(false);
-      setNewHarmDesc("");
+      if (isMountedRef.current) {
+        setSuccess(`Harmonization Criterion '${newHarmName}' added.`);
+        setNewHarmName("");
+        setNewHarmMandatory(false);
+        setNewHarmDesc("");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add harmonization criterion.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add harmonization criterion.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -507,13 +616,19 @@ export default function CategorizationManager() {
         is_mandatory: editHarmMandatory,
         description: editHarmDesc.trim() || null
       });
-      setSuccess(`Harmonization Criterion '${editHarmName}' updated successfully.`);
-      setEditingHarm(null);
+      if (isMountedRef.current) {
+        setSuccess(`Harmonization Criterion '${editHarmName}' updated successfully.`);
+        setEditingHarm(null);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update criterion.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update criterion.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -523,10 +638,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteHarmonizationCriterion(token, id);
-      setSuccess(`Harmonization criterion '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Harmonization criterion '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete criterion.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete criterion.");
+      }
     }
   };
 
@@ -567,12 +686,18 @@ export default function CategorizationManager() {
         updatePolicySettings(token, policySettings),
         updateInflationSettings(token, { rates: cleanRates })
       ]);
-      setSuccess("Capitalization thresholds and multi-year inflation buffer settings saved successfully.");
+      if (isMountedRef.current) {
+        setSuccess("Capitalization thresholds and multi-year inflation buffer settings saved successfully.");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update policy settings.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update policy settings.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -662,11 +787,20 @@ export default function CategorizationManager() {
             </span>
           </div>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
-            Centralized governance console for all procurement parameters. Configure <strong>UACS Object Codes</strong>, <strong>Strategic Spending Categories</strong>, <strong>Fund Sources</strong>, <strong>Development Strategies</strong>, <strong>Harmonization Criteria</strong>, and <strong>Multi-Year Inflation Buffers</strong>.
+            Centralized governance console for all procurement parameters. All proposals are strictly project-governed; strategic spending categories in Table B.1 and fund sources in Table B.2 are linked to ICT Project charters in Part III.E [2]. Unlinked proposals remain in the Intake Pool until assigned.
           </p>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          <Link
+            to="/admin/projects/internal"
+            className="px-3 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl border border-slate-300 dark:border-slate-700 font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs text-xs"
+            title="Inspect project charters in Part III.E"
+          >
+            <FolderKanban className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+            <span>Projects Portfolio (III.E)</span>
+          </Link>
+
           <CompilerSyncButton 
             moduleName="budget" 
             activeCycle={activeCycle} 
@@ -925,7 +1059,7 @@ export default function CategorizationManager() {
       )}
 
       {/* ============================================================= */}
-      {/* TAB 2: STRATEGIC SPENDING CATEGORIES                          */}
+      {/* TAB 2: STRATEGIC SPENDING CATEGORIES (PROJECT-GOVERNED)      */}
       {/* ============================================================= */}
       {activeTab === "strategic" && (
         <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-5 shadow-xs animate-fadeIn">
@@ -933,10 +1067,10 @@ export default function CategorizationManager() {
             <div>
               <h3 className="font-bold text-xs uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2 font-serif">
                 <Tag className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>Strategic Procurement Spending Categories (Table B.1)</span>
+                <span>Strategic Procurement Spending Categories (Table B.1 &amp; Project Charters)</span>
               </h3>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                Manage the master categories used in Part IV.A budget tables and Table B.1. The four canonical categories are pre-configured. You can add dynamic custom categories.
+                Under DICT v.2026 rules, all proposals belong to an ICT Project [2]. Categories correspond to project charters in the <Link to="/admin/projects/internal" className="text-blue-600 dark:text-blue-400 font-bold underline">Projects Portfolio (Part III.E)</Link>.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -995,7 +1129,7 @@ export default function CategorizationManager() {
                     onChange={e => setNewCatIsProject(e.target.checked)}
                     className="w-4 h-4 accent-blue-600 rounded"
                   />
-                  <span>Project-Linked</span>
+                  <span>Project-Governed (Part III.E)</span>
                 </label>
 
                 <button
@@ -1056,7 +1190,9 @@ export default function CategorizationManager() {
                   </div>
 
                   <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                    <span>{cat.is_project_linked ? "Tied to ICT Projects" : "Standalone Line Items"}</span>
+                    <span className="text-blue-600 dark:text-blue-400 font-bold">
+                      {cat.is_project_linked ? "Project-Governed (Part III.E)" : "Intake Pool Category"}
+                    </span>
                     <span>{cat.is_recurring_expense ? "Recurring (MOOE)" : "Capital / MOOE"}</span>
                   </div>
                 </div>
@@ -1078,7 +1214,7 @@ export default function CategorizationManager() {
                 <span>Financing Fund Sources (Table B.2 &amp; Project Inheritance)</span>
               </h3>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                Fund Sources are set on each <strong>ICT Project</strong> in Part III.E, and all child proposals inherit that Fund Source automatically upon project linkage.
+                Fund Sources are set on each <strong>ICT Project</strong> in Part III.E, and all child proposals inherit that Fund Source automatically upon project linkage [2].
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -1140,7 +1276,8 @@ export default function CategorizationManager() {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {filteredFunds.map(fs => {
-              const isCanonical = ["GAA", "FAP", "LOCALLY_FUNDED", "OTHER_INCOME"].includes(fs.code);
+              const isCanonical = ["GAA", "FAP", "LOCALLY_FUNDED", "OTHER_INCOME"].includes(fs.code) ||
+                                  ["General Appropriations Act (GAA)", "Foreign-Assisted Projects (FAP)", "Locally Funded", "Other Income Generating Sources"].includes(fs.display_name);
 
               return (
                 <div key={fs.code} className="p-4 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5 flex justify-between items-start">
@@ -1751,7 +1888,7 @@ export default function CategorizationManager() {
                     className="w-4 h-4 accent-blue-600 rounded"
                   />
                   <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                    Project-Linked (Tied to Part III.E Initiatives)
+                    Project-Governed (Tied to ICT Project Charters in Part III.E)
                   </span>
                 </label>
 

@@ -1072,6 +1072,8 @@ def bootstrap_metadata(db):
     """
     Seeds the complete singular relational graph across Parts I, II, III, IV, and Annexes.
     Guarantees strict four-way financial parity and dynamic provenance without SUC hardcoding.
+    Every proposal is bound to an active ICT Project so that project-governed categorizations
+    and four-way financial parity reconcile with zero discrepancies.
     """
     baseline_period = getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
     agency_name = getattr(settings, "DEFAULT_AGENCY_NAME", "Department of Information and Communications Technology")
@@ -1090,10 +1092,10 @@ def bootstrap_metadata(db):
     # -------------------------------------------------------------
     logger.info("Seeding dynamic Strategic Categories...")
     default_categories = [
-        {"name": "Office Productivity", "code": "OFFICE_PRODUCTIVITY", "is_project_linked": False, "is_recurring_expense": False, "order_index": 1, "description": "Desktop workstations, administrative laptops, office peripherals, and personal productivity tools."},
+        {"name": "Office Productivity", "code": "OFFICE_PRODUCTIVITY", "is_project_linked": True, "is_recurring_expense": False, "order_index": 1, "description": "Desktop workstations, administrative laptops, office peripherals, and personal productivity tools."},
         {"name": "Internal ICT Projects", "code": "INTERNAL_ICT_PROJECT", "is_project_linked": True, "is_recurring_expense": False, "order_index": 2, "description": "Mission-critical internal ICT programs, containerization, portal modernization, and agency infrastructure."},
         {"name": "Cross-Agency ICT Projects", "code": "CROSS_AGENCY_ICT_PROJECT", "is_project_linked": True, "is_recurring_expense": False, "order_index": 3, "description": "Multi-agency cooperative projects, National Single Window, and PeGIF API gateways."},
-        {"name": "Continuing Costs/Expenses", "code": "CONTINUING_COSTS", "is_project_linked": False, "is_recurring_expense": True, "order_index": 4, "description": "Recurring institutional operating subscriptions, GovCloud standby hosting, ISP bandwidth, and maintenance."}
+        {"name": "Continuing Costs/Expenses", "code": "CONTINUING_COSTS", "is_project_linked": True, "is_recurring_expense": True, "order_index": 4, "description": "Recurring institutional operating subscriptions, GovCloud standby hosting, ISP bandwidth, and maintenance."}
     ]
     strat_cat_instances = {}
     for cat_data in default_categories:
@@ -1101,6 +1103,9 @@ def bootstrap_metadata(db):
         if not cat_obj:
             cat_obj = StrategicCategory(**cat_data)
             db.add(cat_obj)
+            db.flush()
+        else:
+            cat_obj.is_project_linked = True
             db.flush()
         strat_cat_instances[cat_data["name"]] = cat_obj
 
@@ -2085,12 +2090,14 @@ def bootstrap_metadata(db):
         db.flush()
 
     # -------------------------------------------------------------
-    # 9. ICT PROJECTS (Part III.E.1 Internal & III.E.2 Cross-Agency)
+    # 9. ICT PROJECTS (Part III.E: Internal, Cross-Agency, Continuing & Office Productivity)
     # -------------------------------------------------------------
-    logger.info("Seeding Strategic ICT Projects (Part III.E)...")
+    logger.info("Seeding Strategic ICT Projects across all portfolio categories (Part III.E)...")
     canonical_project_titles = {
         "Citizen Frontline Portal Modernization and GovCloud Migration Project",
-        "National Single Window & Inter-Agency Interoperability Project"
+        "National Single Window & Inter-Agency Interoperability Project",
+        "Workstation Modernization & Office Productivity Project",
+        "GovCloud High-Availability & Disaster Recovery Infrastructure Project"
     }
 
     orphan_projects = db.query(IctProject).filter(
@@ -2108,6 +2115,7 @@ def bootstrap_metadata(db):
         db.delete(op_proj)
     db.flush()
 
+    # 9.1 Internal ICT Project (Part III.E.1)
     proj_frontline_modernization = db.query(IctProject).filter(
         IctProject.issp_period == baseline_period,
         IctProject.project_title == "Citizen Frontline Portal Modernization and GovCloud Migration Project"
@@ -2150,6 +2158,7 @@ def bootstrap_metadata(db):
         db.add(proj_frontline_modernization)
         db.flush()
 
+    # 9.2 Cross-Agency ICT Project (Part III.E.2)
     proj_cross_nsw = db.query(IctProject).filter(
         IctProject.issp_period == baseline_period,
         IctProject.project_title == "National Single Window & Inter-Agency Interoperability Project"
@@ -2194,6 +2203,92 @@ def bootstrap_metadata(db):
         db.add(proj_cross_nsw)
         db.flush()
 
+    # 9.3 Office Productivity Project (Governing Desktop, Laptop, and Office Suite Deployments)
+    proj_office_productivity = db.query(IctProject).filter(
+        IctProject.issp_period == baseline_period,
+        IctProject.project_title == "Workstation Modernization & Office Productivity Project"
+    ).first()
+    if not proj_office_productivity:
+        proj_office_productivity = IctProject(
+            issp_period=baseline_period,
+            system_id=None,
+            project_title="Workstation Modernization & Office Productivity Project",
+            project_category="Office Productivity",
+            description="Comprehensive procurement and deployment of enterprise mobile workstations, desktop clusters, and institutional productivity suites across administrative and operational units.",
+            objectives="Equip personnel with secure, high-performance computing devices and cloud office suites to maintain sub-second operational productivity and prevent hardware obsolescence bottlenecks.",
+            aligns_pip=False,
+            aligns_ncsp=True,
+            aligns_egmp=True,
+            aligns_pcb=True,
+            aligns_others=False,
+            aligns_others_specify=None,
+            harmonizes_national_priority=True,
+            harmonizes_resource_optimization=True,
+            harmonizes_pegif=False,
+            harmonizes_cross_collaboration=False,
+            harmonizes_scalability=True,
+            duration_start_year=2026,
+            duration_end_year=2028,
+            annual_deliverables={
+                "Year 1": "Procurement and deployment of 10 enterprise laptops and initial rollout of 60 office productivity cloud licenses.",
+                "Year 2": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
+                "Year 3": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
+                "2026": "Procurement and deployment of 10 enterprise laptops and initial rollout of 60 office productivity cloud licenses.",
+                "2027": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
+                "2028": "Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses."
+            },
+            year_1_deliverables="Procurement and deployment of 10 enterprise laptops and initial rollout of 60 office productivity cloud licenses.",
+            year_2_deliverables="Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
+            year_3_deliverables="Deployment of 5 enterprise laptops and renewal of 60 office cloud licenses.",
+            implementing_unit="Administrative and Financial Management Service",
+            funding_source="General Appropriations Act (GAA)"
+        )
+        db.add(proj_office_productivity)
+        db.flush()
+
+    # 9.4 Continuing Costs Operations Project (Governing Cloud Standby, DR Failover & Maintenance)
+    proj_continuing_operations = db.query(IctProject).filter(
+        IctProject.issp_period == baseline_period,
+        IctProject.project_title == "GovCloud High-Availability & Disaster Recovery Infrastructure Project"
+    ).first()
+    if not proj_continuing_operations:
+        proj_continuing_operations = IctProject(
+            issp_period=baseline_period,
+            system_id=dms_system.id,
+            project_title="GovCloud High-Availability & Disaster Recovery Infrastructure Project",
+            project_category="Continuing Costs/Expenses",
+            description="Continuing operational subscriptions for GovCloud disaster recovery standby compute clusters, automated off-site database replication, and bandwidth maintenance.",
+            objectives="Guarantee sub-4-hour Recovery Time Objective (RTO) and sub-1-hour Recovery Point Objective (RPO) for all institutional public portals and registries.",
+            aligns_pip=True,
+            aligns_ncsp=True,
+            aligns_egmp=True,
+            aligns_pcb=True,
+            aligns_others=False,
+            aligns_others_specify=None,
+            harmonizes_national_priority=True,
+            harmonizes_resource_optimization=True,
+            harmonizes_pegif=True,
+            harmonizes_cross_collaboration=False,
+            harmonizes_scalability=True,
+            duration_start_year=2026,
+            duration_end_year=2028,
+            annual_deliverables={
+                "Year 1": "GovCloud DR standby environment activation and initial database replication configuration.",
+                "Year 2": "Continuation of GovCloud standby subscription and execution of annual failover drill.",
+                "Year 3": "Continuation of GovCloud standby subscription and failover verification.",
+                "2026": "GovCloud DR standby environment activation and initial database replication configuration.",
+                "2027": "Continuation of GovCloud standby subscription and execution of annual failover drill.",
+                "2028": "Continuation of GovCloud standby subscription and failover verification."
+            },
+            year_1_deliverables="GovCloud DR standby environment activation and initial database replication configuration.",
+            year_2_deliverables="Continuation of GovCloud standby subscription and execution of annual failover drill.",
+            year_3_deliverables="Continuation of GovCloud standby subscription and failover verification.",
+            implementing_unit="Information and Communications Technology Division (ICTD)",
+            funding_source="General Appropriations Act (GAA)"
+        )
+        db.add(proj_continuing_operations)
+        db.flush()
+
     # -------------------------------------------------------------
     # 10. PMF METRICS FRAMEWORK (Part III.F)
     # -------------------------------------------------------------
@@ -2201,7 +2296,9 @@ def bootstrap_metadata(db):
     canonical_metric_indicators = {
         "Percentage of citizen services adopting online digital processing modules",
         "Average public service transaction completion duration",
-        "PeGIF-compliant API endpoints deployed and registered on NGDX"
+        "PeGIF-compliant API endpoints deployed and registered on NGDX",
+        "Percentage of administrative personnel equipped with compliant mobile workstations",
+        "GovCloud standby failover drill verification and uptime index"
     }
     db.query(PerformanceMetric).filter(
         PerformanceMetric.issp_period == baseline_period,
@@ -2242,27 +2339,54 @@ def bootstrap_metadata(db):
             "annual_targets": {"2026": "1 gateway", "2027": "3 gateways", "2028": "5 gateways"},
             "collection_method": "API gateway transaction audit logs",
             "responsibility": "Information and Communications Technology Division (ICTD)"
+        },
+        {
+            "project_id": proj_office_productivity.id,
+            "project_title": proj_office_productivity.project_title,
+            "result_hierarchy": "Immediate Outcome",
+            "indicator": "Percentage of administrative personnel equipped with compliant mobile workstations",
+            "baseline": "40%",
+            "target": "100%",
+            "annual_targets": {"2026": "65%", "2027": "85%", "2028": "100%"},
+            "collection_method": "Property and inventory asset audit reports",
+            "responsibility": "Administrative and Financial Management Service"
+        },
+        {
+            "project_id": proj_continuing_operations.id,
+            "project_title": proj_continuing_operations.project_title,
+            "result_hierarchy": "Immediate Outcome",
+            "indicator": "GovCloud standby failover drill verification and uptime index",
+            "baseline": "95.0% uptime",
+            "target": "99.9% uptime with sub-4-hour RTO",
+            "annual_targets": {"2026": "99.0%", "2027": "99.5%", "2028": "99.9%"},
+            "collection_method": "GovCloud monitoring telemetry and annual DR drill audit logs",
+            "responsibility": "Information and Communications Technology Division (ICTD)"
         }
     ]
     for pm in pmf_metrics:
-        if not db.query(PerformanceMetric).filter(
+        existing_pm = db.query(PerformanceMetric).filter(
             PerformanceMetric.issp_period == baseline_period,
             PerformanceMetric.project_title == pm["project_title"],
             PerformanceMetric.indicator == pm["indicator"]
-        ).first():
+        ).first()
+        if not existing_pm:
             db.add(PerformanceMetric(issp_period=baseline_period, **pm))
+        else:
+            existing_pm.project_id = pm["project_id"]
+            existing_pm.annual_targets = pm["annual_targets"]
+            existing_pm.target = pm["target"]
     db.flush()
 
     # -------------------------------------------------------------
-    # 11. PART IV.A DETAILED RESOURCE DEPLOYMENT
+    # 11. PART IV.A DETAILED RESOURCE DEPLOYMENT (ALL BOUND TO PROJECTS)
     # -------------------------------------------------------------
-    logger.info("Seeding Part IV.A Detailed Resource Line Items...")
+    logger.info("Seeding Part IV.A Detailed Resource Line Items (Strictly Project-Bound)...")
     canonical_items_config = [
         {
             "item_name": "High-Performance Mobile Workstation Laptop",
             "department_id": ict_dept.id,
             "outcome_id": oo_gas.id,
-            "project_id": None,
+            "project_id": proj_office_productivity.id,  # Bound to Office Productivity Project
             "needs_assessment_id": na2.id,
             "strategic_category_id": getattr(strat_cat_instances.get("Office Productivity"), "id", None),
             "category": "Hardware",
@@ -2285,7 +2409,7 @@ def bootstrap_metadata(db):
             "item_name": "Office Productivity Suite Cloud Subscription",
             "department_id": admin_dept.id,
             "outcome_id": oo_gas.id,
-            "project_id": None,
+            "project_id": proj_office_productivity.id,  # Bound to Office Productivity Project
             "needs_assessment_id": None,
             "strategic_category_id": getattr(strat_cat_instances.get("Office Productivity"), "id", None),
             "category": "Subscription",
@@ -2308,7 +2432,7 @@ def bootstrap_metadata(db):
             "item_name": "GovCloud Microservices Migration Contractor",
             "department_id": ict_dept.id,
             "outcome_id": oo_frontline.id,
-            "project_id": proj_frontline_modernization.id,
+            "project_id": proj_frontline_modernization.id,  # Bound to Internal ICT Project
             "needs_assessment_id": na1.id,
             "strategic_category_id": getattr(strat_cat_instances.get("Internal ICT Projects"), "id", None),
             "category": "Software",
@@ -2331,7 +2455,7 @@ def bootstrap_metadata(db):
             "item_name": "PeGIF & NGDX Integration Engineering Consultant",
             "department_id": ict_dept.id,
             "outcome_id": oo_gas.id,
-            "project_id": proj_cross_nsw.id,
+            "project_id": proj_cross_nsw.id,  # Bound to Cross-Agency ICT Project
             "needs_assessment_id": None,
             "strategic_category_id": getattr(strat_cat_instances.get("Cross-Agency ICT Projects"), "id", None),
             "category": "Software",
@@ -2354,7 +2478,7 @@ def bootstrap_metadata(db):
             "item_name": "GovCloud Disaster Recovery Standby Subscription",
             "department_id": ict_dept.id,
             "outcome_id": oo_gas.id,
-            "project_id": None,
+            "project_id": proj_continuing_operations.id,  # Bound to Continuing Costs Operations Project
             "needs_assessment_id": na3.id,
             "strategic_category_id": getattr(strat_cat_instances.get("Continuing Costs/Expenses"), "id", None),
             "category": "Subscription",
