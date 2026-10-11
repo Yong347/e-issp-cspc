@@ -18,7 +18,10 @@ Strictly adheres to official DICT ISSP v.2026 Guidelines and statutory order:
     * Part I: Agency Profile & Strategic Context (A, B.1, B.2, C)
     * Part II: Current ICT Assessment (A, B1, B2, C, D)
     * Part III: Proposed ICT Strategy (A1, A2, B, C, D, E1/E2 Charters, F1/F2/F3 PMF)
+      - Information System Cards render Target Implementation Year and UACS Code & Class
+      - ICT Project Charters reflect linked line items and full computed costs
     * Part IV: Resource Requirements (A. Detailed Annual Deployments, B. Parity Tables B.1-B.4)
+      - Systems flow directly into Part IV.A annual tables and Part IV.B Tables B.1–B.4
     * Annex 1: Existing ICT Asset Inventory (1. Equipment, 2. Software - Real Aggregations)
     * Annex 2: Disaster Recovery & Business Continuity Plan (DRBCP Sections 1-6 + KPIs)
 =============================================================================
@@ -306,7 +309,7 @@ def fmt_currency(val: Any) -> str:
 
 
 def clean_str(val: Any, default: str = "") -> str:
-    """Extracts clean non-null string value safely without dropping test data."""
+    """Extracts clean non-null string value safely without dropping valid entries."""
     if val is None:
         return default
     s = str(getattr(val, "value", val) or "").strip()
@@ -528,7 +531,10 @@ def render_cybersecurity_checklist(doc, cyber_list: List[Any], is_proposed: bool
 
 
 def render_information_system_card_docx(doc, sys_obj: Any, is_proposed: bool = False, projects: List[Any] = None):
-    """Renders an official DICT Information System Specification Card in Word format."""
+    """
+    Renders an official DICT Information System Specification Card in Word format.
+    Renders Target Implementation Year, UACS Object Code & Class, and Linked ICT Project.
+    """
     tbl = doc.add_table(rows=1, cols=2)
     tbl.style = 'Table Grid'
     set_table_borders(tbl)
@@ -604,6 +610,23 @@ def render_information_system_card_docx(doc, sys_obj: Any, is_proposed: bool = F
     if is_proposed:
         cost_val = fmt_currency(getattr(sys_obj, "proposed_cost", 0))
         add_card_row("ESTIMATED PROPOSED COST", cost_val, is_mono=True, is_highlight=True)
+
+        target_yr = getattr(sys_obj, "target_year", None)
+        if target_yr:
+            add_card_row("TARGET IMPLEMENTATION YEAR", f"FY {target_yr}", is_mono=True)
+
+        uacs_val = getattr(sys_obj, "uacs_object_code", None)
+        exp_val = getattr(sys_obj, "expenditure_class", None)
+        if not uacs_val:
+            cost_dec = Decimal(str(getattr(sys_obj, "proposed_cost", 0) or 0))
+            uacs_val = (
+                "50604070 01 - ICT Software (Perpetual CO)" 
+                if cost_dec >= Decimal("50000.00") 
+                else "50211030 00 - Consulting/Outsourced Development (MOOE)"
+            )
+        if not exp_val:
+            exp_val = "Capital Outlay" if "(CO)" in str(uacs_val) else "Maintenance and Other Operating Expenses"
+        add_card_row("UACS OBJECT CODE & CLASS", f"{clean_str(uacs_val)} ({clean_str(exp_val)})")
 
         proj_title = None
         if getattr(sys_obj, "project_parent", None):
@@ -759,6 +782,31 @@ def render_project_charter_card(doc, proj: Any, is_cross: bool = False, planning
         add_charter_row(f"YEAR {idx + 1} DELIVERABLES (FY {yr})", clean_str(m_text, "N/A"))
 
     add_charter_row("IMPLEMENTING UNIT", clean_str(proj.implementing_unit, "ICT Management Office"))
+
+    # Linked Project Components (Part IV.A line items & systems)
+    linked_props = [
+        itm for itm in getattr(proj, "resource_items", []) 
+        if not getattr(itm, "is_archived", False) 
+        and str(getattr(itm, "status", "")).lower() == "approved"
+        and (str(getattr(itm, "project_id", "")) == str(proj.id))
+    ]
+    linked_sys = list(getattr(proj, "linked_systems", []) or [])
+    if getattr(proj, "information_system", None) and proj.information_system not in linked_sys:
+        linked_sys.append(proj.information_system)
+
+    components_lines = []
+    for s in linked_sys:
+        s_cost = fmt_currency(getattr(s, "proposed_cost", 0))
+        components_lines.append(f"• [SYSTEM] {clean_str(s.name)} - 1 unit - {s_cost}")
+    for itm in linked_props:
+        if itm.system_id and any(str(s.id).lower() == str(itm.system_id).lower() for s in linked_sys):
+            continue
+        itm_cost = fmt_currency(getattr(itm, "total_cost", 0))
+        components_lines.append(f"• {clean_str(itm.item_name)} ({clean_str(getattr(itm, 'category', 'Hardware'))}) - {getattr(itm, 'total_qty', 1)} units - {itm_cost}")
+
+    if components_lines:
+        add_charter_row("PROJECT COMPONENTS (PART IV.A)", "\n".join(components_lines))
+
     add_charter_row("TOTAL PROJECT COST", fmt_currency(proj.computed_total_project_cost), is_mono=True, is_highlight=True)
     add_charter_row("FUNDING SOURCE", clean_str(getattr(proj.funding_source, 'value', proj.funding_source), "GAA"))
 
@@ -2039,6 +2087,64 @@ def create_issp_docx(
             continue
         prop_items.append(itm)
 
+    # Defensively ensure any approved systems with proposed_cost > 0 bound to a project are represented
+    existing_sys_ids = {str(getattr(itm, "system_id", "")).lower() for itm in prop_items if getattr(itm, "system_id", None)}
+    existing_prop_names = {clean_str(getattr(itm, "item_name", "")).lower() for itm in prop_items}
+    for s in (systems or []):
+        sub_status = clean_str(getattr(s, "submission_status", "Approved")).lower()
+        cost_val = Decimal(str(getattr(s, "proposed_cost", 0) or 0))
+        p_id = getattr(s, "project_id", None)
+        s_id_str = str(s.id).lower()
+        s_name_clean = clean_str(s.name).lower()
+
+        if (
+            sub_status == "approved" 
+            and cost_val > Decimal("0.00") 
+            and p_id 
+            and s_id_str not in existing_sys_ids
+            and f"system development: {s_name_clean}" not in existing_prop_names
+            and f"system enhancement: {s_name_clean}" not in existing_prop_names
+            and s_name_clean not in existing_prop_names
+        ):
+            t_year = getattr(s, "target_year", None) or start_year
+            t_idx = t_year - start_year + 1
+            if t_idx < 1: t_idx = 1
+            
+            p_obj = proj_lookup.get(str(p_id))
+            strat_cat = clean_str(getattr(p_obj, "project_category", "Internal ICT Projects")) if p_obj else "Internal ICT Projects"
+            f_source = clean_str(getattr(p_obj, "funding_source", "General Appropriations Act (GAA)")) if p_obj else "General Appropriations Act (GAA)"
+
+            class SyntheticSystemProposal:
+                def __init__(self, sys, cost, t_yr, t_i, strat, fund, prj):
+                    self.id = sys.id
+                    self.system_id = sys.id
+                    self.project_id = prj.id if prj else None
+                    self.project_rel = prj
+                    sys_st = clean_str(getattr(sys, "status", "For Development"))
+                    prefix = "System Enhancement" if "enhancement" in sys_st.lower() else "System Development"
+                    self.item_name = f"{prefix}: {clean_str(sys.name)}"
+                    self.category = "Software"
+                    self.strategic_category = strat
+                    self.fund_source = fund
+                    self.office_location = clean_str(getattr(sys, "system_owner_office", "Central Office"))
+                    self.target_office_automated = self.office_location
+                    self.unit_cost = cost
+                    self.total_cost = cost
+                    self.total_qty = 1
+                    self.status = "Approved"
+                    self.is_archived = False
+                    self.uacs_object_code = getattr(sys, "uacs_object_code", None) or ("50604070 01 - ICT Software (Perpetual CO)" if cost >= Decimal("50000.00") else "50211030 00 - Consulting/Outsourced Development (MOOE)")
+                    self.expenditure_class = getattr(sys, "expenditure_class", None) or ("Capital Outlay" if "(CO)" in self.uacs_object_code else "Maintenance and Other Operating Expenses")
+                    self.yearly_quantities = {str(t_yr): 1, f"Year {t_i}": 1}
+                    self.year_1_qty = 1 if t_i == 1 else 0
+                    self.year_2_qty = 1 if t_i == 2 else 0
+                    self.year_3_qty = 1 if t_i == 3 else 0
+
+            synth = SyntheticSystemProposal(s, cost_val, t_year, t_idx, strat_cat, f_source, p_obj)
+            prop_items.append(synth)
+            existing_sys_ids.add(s_id_str)
+            existing_prop_names.add(synth.item_name.lower())
+
     # Dynamically determine categories list from strategic categories or defaults
     canonical_categories = [
         ("Office Productivity", False),
@@ -2149,71 +2255,170 @@ def create_issp_docx(
             r_cat.cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
             r_cat.cells[5].paragraphs[0].add_run(fmt_currency(cat_subtotal)).font.bold = True
 
-            for exp_class_name in ["Capital Outlay", "Maintenance and Other Operating Expenses"]:
-                is_co_target = "capital" in exp_class_name.lower()
-                exp_items = [
-                    (itm, q) for itm, q in cat_items
-                    if ("capital" in clean_str(getattr(itm, "expenditure_class", "")).lower()) == is_co_target
-                ]
-                if not exp_items:
-                    continue
+            if is_proj_linked:
+                # Group items by their parent project
+                project_groups = {}
+                for itm, q in cat_items:
+                    pid = str(itm.project_id) if itm.project_id else "unassigned"
+                    if pid not in project_groups:
+                        p_obj = proj_lookup.get(pid) if pid != "unassigned" else None
+                        p_title = clean_str(getattr(p_obj, "project_title", None)) or (f"Project #{pid[:8]}" if pid != "unassigned" else "General Project Outlays")
+                        project_groups[pid] = (p_title, [])
+                    project_groups[pid][1].append((itm, q))
 
-                exp_subtotal = sum(
-                    Decimal(q) * get_adjusted_unit_cost_for_year(db_session, Decimal(str(itm.unit_cost or 0)), yr, start_year)
-                    for itm, q in exp_items
-                )
+                for pid, (p_title, p_items) in project_groups.items():
+                    p_subtotal = sum(
+                        Decimal(q) * get_adjusted_unit_cost_for_year(db_session, Decimal(str(itm.unit_cost or 0)), yr, start_year)
+                        for itm, q in p_items
+                    )
 
-                r_exp = iv_a_table.add_row()
-                prevent_row_split(r_exp)
-                for c_i in range(6):
-                    set_cell_shading(r_exp.cells[c_i], "F8FAFC")
-                    set_cell_margins(r_exp.cells[c_i], top=30, bottom=30, left=60, right=60)
-                r_exp.cells[0].paragraphs[0].paragraph_format.left_indent = Inches(0.15)
-                run_exp = r_exp.cells[0].paragraphs[0].add_run(exp_class_name.upper())
-                run_exp.font.bold = True
-                run_exp.font.size = Pt(7.0)
-                r_exp.cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                run_exp_tot = r_exp.cells[5].paragraphs[0].add_run(fmt_currency(exp_subtotal))
-                run_exp_tot.font.bold = True
-                run_exp_tot.font.size = Pt(7.0)
+                    r_proj = iv_a_table.add_row()
+                    prevent_row_split(r_proj)
+                    for c_i in range(6):
+                        set_cell_shading(r_proj.cells[c_i], "F1F5F9")
+                        set_cell_margins(r_proj.cells[c_i], top=35, bottom=35, left=60, right=60)
+                    r_proj.cells[0].paragraphs[0].paragraph_format.left_indent = Inches(0.12)
+                    run_pr = r_proj.cells[0].paragraphs[0].add_run(f"[{p_title.upper()}]")
+                    run_pr.font.bold = True
+                    run_pr.font.size = Pt(7.2)
+                    run_pr.font.color.rgb = RGBColor(30, 58, 138)
+                    r_proj.cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    run_pr_tot = r_proj.cells[5].paragraphs[0].add_run(fmt_currency(p_subtotal))
+                    run_pr_tot.font.bold = True
+                    run_pr_tot.font.size = Pt(7.2)
 
-                for itm, qty_int in exp_items:
-                    u_cost = Decimal(str(itm.unit_cost or 0))
-                    adj_unit = get_adjusted_unit_cost_for_year(db_session, u_cost, yr, start_year)
-                    line_cost = Decimal(qty_int) * adj_unit
-                    total_yr_cost += line_cost
+                    for exp_class_name in ["Capital Outlay", "Maintenance and Other Operating Expenses"]:
+                        is_co_target = "capital" in exp_class_name.lower()
+                        exp_items = [
+                            (itm, q) for itm, q in p_items
+                            if ("capital" in clean_str(getattr(itm, "expenditure_class", "")).lower()) == is_co_target
+                        ]
+                        if not exp_items:
+                            continue
 
-                    proj = getattr(itm, "project_rel", None)
-                    if not proj and getattr(itm, "project_id", None):
-                        proj = proj_lookup.get(str(itm.project_id))
-                    resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
-                    deploy_loc = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location
+                        exp_subtotal = sum(
+                            Decimal(q) * get_adjusted_unit_cost_for_year(db_session, Decimal(str(itm.unit_cost or 0)), yr, start_year)
+                            for itm, q in exp_items
+                        )
 
-                    row = iv_a_table.add_row()
-                    prevent_row_split(row)
-                    vals = [
-                        clean_str(itm.item_name),
-                        clean_str(deploy_loc, "Central Office"),
-                        clean_str(getattr(resolved_fund, 'value', resolved_fund), "GAA"),
-                        fmt_currency(adj_unit),
-                        str(qty_int),
-                        fmt_currency(line_cost)
+                        r_exp = iv_a_table.add_row()
+                        prevent_row_split(r_exp)
+                        for c_i in range(6):
+                            set_cell_shading(r_exp.cells[c_i], "F8FAFC")
+                            set_cell_margins(r_exp.cells[c_i], top=30, bottom=30, left=60, right=60)
+                        r_exp.cells[0].paragraphs[0].paragraph_format.left_indent = Inches(0.22)
+                        run_exp = r_exp.cells[0].paragraphs[0].add_run(exp_class_name.upper())
+                        run_exp.font.bold = True
+                        run_exp.font.size = Pt(7.0)
+                        r_exp.cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        run_exp_tot = r_exp.cells[5].paragraphs[0].add_run(fmt_currency(exp_subtotal))
+                        run_exp_tot.font.bold = True
+                        run_exp_tot.font.size = Pt(7.0)
+
+                        for itm, qty_int in exp_items:
+                            u_cost = Decimal(str(itm.unit_cost or 0))
+                            adj_unit = get_adjusted_unit_cost_for_year(db_session, u_cost, yr, start_year)
+                            line_cost = Decimal(qty_int) * adj_unit
+                            total_yr_cost += line_cost
+
+                            proj = getattr(itm, "project_rel", None)
+                            if not proj and getattr(itm, "project_id", None):
+                                proj = proj_lookup.get(str(itm.project_id))
+                            resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
+                            deploy_loc = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location
+
+                            row = iv_a_table.add_row()
+                            prevent_row_split(row)
+                            vals = [
+                                clean_str(itm.item_name),
+                                clean_str(deploy_loc, "Central Office"),
+                                clean_str(getattr(resolved_fund, 'value', resolved_fund), "GAA"),
+                                fmt_currency(adj_unit),
+                                str(qty_int),
+                                fmt_currency(line_cost)
+                            ]
+                            for i, v in enumerate(vals):
+                                cell = row.cells[i]
+                                cell.width = widths_iva[i]
+                                set_cell_margins(cell, top=30, bottom=30, left=60, right=60)
+                                p_cell = cell.paragraphs[0]
+                                p_cell.paragraph_format.space_before = Pt(0)
+                                p_cell.paragraph_format.space_after = Pt(0)
+                                if i == 0:
+                                    p_cell.paragraph_format.left_indent = Inches(0.32)
+                                r = p_cell.add_run(v)
+                                r.font.size = Pt(7.0)
+                                if i in [3, 5]:
+                                    p_cell.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                                elif i == 4:
+                                    p_cell.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                # Non-project-linked categories
+                for exp_class_name in ["Capital Outlay", "Maintenance and Other Operating Expenses"]:
+                    is_co_target = "capital" in exp_class_name.lower()
+                    exp_items = [
+                        (itm, q) for itm, q in cat_items
+                        if ("capital" in clean_str(getattr(itm, "expenditure_class", "")).lower()) == is_co_target
                     ]
-                    for i, v in enumerate(vals):
-                        cell = row.cells[i]
-                        cell.width = widths_iva[i]
-                        set_cell_margins(cell, top=30, bottom=30, left=60, right=60)
-                        p_cell = cell.paragraphs[0]
-                        p_cell.paragraph_format.space_before = Pt(0)
-                        p_cell.paragraph_format.space_after = Pt(0)
-                        if i == 0:
-                            p_cell.paragraph_format.left_indent = Inches(0.25)
-                        r = p_cell.add_run(v)
-                        r.font.size = Pt(7.0)
-                        if i in [3, 5]:
-                            p_cell.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                        elif i == 4:
-                            p_cell.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    if not exp_items:
+                        continue
+
+                    exp_subtotal = sum(
+                        Decimal(q) * get_adjusted_unit_cost_for_year(db_session, Decimal(str(itm.unit_cost or 0)), yr, start_year)
+                        for itm, q in exp_items
+                    )
+
+                    r_exp = iv_a_table.add_row()
+                    prevent_row_split(r_exp)
+                    for c_i in range(6):
+                        set_cell_shading(r_exp.cells[c_i], "F8FAFC")
+                        set_cell_margins(r_exp.cells[c_i], top=30, bottom=30, left=60, right=60)
+                    r_exp.cells[0].paragraphs[0].paragraph_format.left_indent = Inches(0.15)
+                    run_exp = r_exp.cells[0].paragraphs[0].add_run(exp_class_name.upper())
+                    run_exp.font.bold = True
+                    run_exp.font.size = Pt(7.0)
+                    r_exp.cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    run_exp_tot = r_exp.cells[5].paragraphs[0].add_run(fmt_currency(exp_subtotal))
+                    run_exp_tot.font.bold = True
+                    run_exp_tot.font.size = Pt(7.0)
+
+                    for itm, qty_int in exp_items:
+                        u_cost = Decimal(str(itm.unit_cost or 0))
+                        adj_unit = get_adjusted_unit_cost_for_year(db_session, u_cost, yr, start_year)
+                        line_cost = Decimal(qty_int) * adj_unit
+                        total_yr_cost += line_cost
+
+                        proj = getattr(itm, "project_rel", None)
+                        if not proj and getattr(itm, "project_id", None):
+                            proj = proj_lookup.get(str(itm.project_id))
+                        resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
+                        deploy_loc = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location
+
+                        row = iv_a_table.add_row()
+                        prevent_row_split(row)
+                        vals = [
+                            clean_str(itm.item_name),
+                            clean_str(deploy_loc, "Central Office"),
+                            clean_str(getattr(resolved_fund, 'value', resolved_fund), "GAA"),
+                            fmt_currency(adj_unit),
+                            str(qty_int),
+                            fmt_currency(line_cost)
+                        ]
+                        for i, v in enumerate(vals):
+                            cell = row.cells[i]
+                            cell.width = widths_iva[i]
+                            set_cell_margins(cell, top=30, bottom=30, left=60, right=60)
+                            p_cell = cell.paragraphs[0]
+                            p_cell.paragraph_format.space_before = Pt(0)
+                            p_cell.paragraph_format.space_after = Pt(0)
+                            if i == 0:
+                                p_cell.paragraph_format.left_indent = Inches(0.25)
+                            r = p_cell.add_run(v)
+                            r.font.size = Pt(7.0)
+                            if i in [3, 5]:
+                                p_cell.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                            elif i == 4:
+                                p_cell.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         gr_row = iv_a_table.add_row()
         prevent_row_split(gr_row)

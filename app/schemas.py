@@ -526,7 +526,8 @@ class EGovernmentChecklistResponse(EGovernmentChecklistCreate):
 class InformationSystemCreate(BaseModel):
     """
     Department-friendly intake model for Information Systems proposals.
-    Includes direct linkage to major ICT Projects (Part III.E).
+    Includes direct linkage to major ICT Projects (Part III.E), target fiscal year,
+    and UACS object code integration for 4-way parity.
     """
     department_id: Optional[int] = Field(default=None, description="Proposing Department ID")
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = Field(default=None, description="Linked Section 8.0 Needs Assessment")
@@ -538,9 +539,14 @@ class InformationSystemCreate(BaseModel):
     rejection_reason: Optional[str] = None
     classification: Optional[Union[SystemClassification, str]] = Field(default="Operations - Frontline Service")
     
-    # Financial Cost Proposal (Aggregated into Part III.E Project Costs)
+    # Financial Cost Proposal (Aggregated into Part III.E Project Costs & Part IV.A)
     proposed_cost: Decimal = Field(default=Decimal("0.00"), ge=0, description="Estimated total budget or development outlay for this system")
     is_client_facing: bool = Field(default=True, description="Public/client facing or internal back-office")
+
+    # Target implementation fiscal year, UACS Object Code, and Expenditure Class for 4-way parity
+    target_year: Optional[int] = Field(default=None, description="Target year when development/enhancement will be executed")
+    uacs_object_code: Optional[str] = Field(default="50604070 01 - ICT Software (Perpetual CO)", description="UACS Object Code")
+    expenditure_class: Optional[str] = Field(default="Capital Outlay", description="Capital Outlay | Maintenance and Other Operating Expenses")
 
     # 100% DICT Template Multi-Classification Checkboxes (Template Pages 11 & 20)
     is_support_to_operations: bool = Field(default=False, description="Support to Operations")
@@ -582,10 +588,15 @@ class InformationSystemCreate(BaseModel):
     def coerce_ids(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('status', 'classification', 'hosting_type', 'frontline_hosting_type', 'development_strategy', mode='before')
+    @field_validator('status', 'classification', 'hosting_type', 'frontline_hosting_type', 'development_strategy', 'expenditure_class', mode='before')
     @classmethod
     def coerce_str_enums(cls, v: Any) -> str:
         return str(getattr(v, 'value', v) or "")
+
+    @field_validator('uacs_object_code', mode='before')
+    @classmethod
+    def clean_uacs_input(cls, v: Any) -> Optional[str]:
+        return clean_optional_string(v) or "50604070 01 - ICT Software (Perpetual CO)"
 
     @model_validator(mode='after')
     def sync_frontline_and_hosting(self) -> 'InformationSystemCreate':
@@ -633,6 +644,9 @@ class InformationSystemUpdate(BaseModel):
     classification: Optional[str] = None
     proposed_cost: Optional[Decimal] = Field(None, ge=0)
     is_client_facing: Optional[bool] = None
+    target_year: Optional[int] = None
+    uacs_object_code: Optional[str] = None
+    expenditure_class: Optional[str] = None
     is_support_to_operations: Optional[bool] = None
     is_general_administrative: Optional[bool] = None
     is_operations: Optional[bool] = None
@@ -665,7 +679,7 @@ class InformationSystemUpdate(BaseModel):
     def coerce_ids(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
 
-    @field_validator('status', 'classification', 'hosting_type', 'frontline_hosting_type', 'development_strategy', mode='before')
+    @field_validator('status', 'classification', 'hosting_type', 'frontline_hosting_type', 'development_strategy', 'expenditure_class', mode='before')
     @classmethod
     def coerce_str_enums(cls, v: Any) -> Optional[str]:
         if v is None:
@@ -681,6 +695,9 @@ class InformationSystemResponse(InformationSystemCreate):
     needs_assessment_title: Optional[str] = None
     proposed_cost: Decimal = Decimal("0.00")
     is_client_facing: bool = True
+    target_year: Optional[int] = None
+    uacs_object_code: Optional[str] = "50604070 01 - ICT Software (Perpetual CO)"
+    expenditure_class: Optional[str] = "Capital Outlay"
 
     @field_validator('id', 'strategic_concern_id', 'needs_assessment_id', 'project_id', mode='before')
     @classmethod
@@ -696,6 +713,9 @@ class SystemApprovalPayload(BaseModel):
     status: str = Field(default="For Development", description="Operational | For Development | For Enhancement")
     action: str = Field(default="APPROVE", description="APPROVE | RETURN")
     rejection_reason: Optional[str] = None
+    target_year: Optional[int] = None
+    uacs_object_code: Optional[str] = None
+    expenditure_class: Optional[str] = None
 
     @field_validator('strategic_concern_id', 'project_id', mode='before')
     @classmethod
@@ -987,6 +1007,7 @@ class ProposalCreatePayload(BaseModel):
     subscription_type: Optional[str] = Field(None, description="Subscription type designation")
     project_key: Optional[str] = Field(None, description="Project key identifier")
     project_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Strategic ICT Project ID")
+    system_id: Optional[Union[uuid.UUID, str]] = Field(None, description="Linked Information System ID")
     
     category: Optional[str] = Field(default="Hardware", description="Hardware, Software, Subscription, or Services")
     strategic_category: Optional[str] = Field(default="Office Productivity", description="Dynamic Strategic Category")
@@ -1028,7 +1049,7 @@ class ProposalCreatePayload(BaseModel):
     uacs_object_code: Optional[str] = None
     expenditure_class: Optional[str] = None
 
-    @field_validator('project_id', 'needs_assessment_id', mode='before')
+    @field_validator('project_id', 'needs_assessment_id', 'system_id', mode='before')
     @classmethod
     def coerce_uuid_selectors(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)
@@ -1134,6 +1155,7 @@ class ProposalResponse(BaseModel):
     outcome_id: Optional[int] = None
     project_id: Optional[Union[uuid.UUID, str]] = None
     project_title: Optional[str] = None 
+    system_id: Optional[Union[uuid.UUID, str]] = None
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = None
     strategic_category_id: Optional[int] = None
     
@@ -1172,7 +1194,7 @@ class ProposalResponse(BaseModel):
     is_expansion: bool = False
     outcome: Optional[OrganizationalOutcomeResponse] = None
 
-    @field_validator('id', 'project_id', 'needs_assessment_id', mode='before')
+    @field_validator('id', 'project_id', 'needs_assessment_id', 'system_id', mode='before')
     @classmethod
     def coerce_uuid_fields(cls, v: Any) -> Any:
         return coerce_optional_uuid(v) or v
@@ -1217,6 +1239,7 @@ class AdminOverridePayload(BaseModel):
     yearly_quantities: Optional[Dict[str, int]] = None
     justification: Optional[str] = None
     project_id: Optional[Union[uuid.UUID, str]] = None
+    system_id: Optional[Union[uuid.UUID, str]] = None
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = None
     strategic_category_id: Optional[int] = None
     category: Optional[str] = None
@@ -1232,7 +1255,7 @@ class AdminOverridePayload(BaseModel):
     canvas_expiration_date: Optional[datetime] = None
     supplier_name: Optional[str] = None
 
-    @field_validator('project_id', 'needs_assessment_id', mode='before')
+    @field_validator('project_id', 'needs_assessment_id', 'system_id', mode='before')
     @classmethod
     def coerce_project_id(cls, v: Any) -> Any:
         return coerce_optional_uuid(v)

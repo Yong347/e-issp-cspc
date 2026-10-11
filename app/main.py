@@ -8,6 +8,7 @@ Core Capabilities:
 - Automated Default User & Metadata Bootstrapping on Fresh Deployments
 - Dialect-Agnostic Schema Alignment & Native Operator Cleaning (Postgres/SQLite)
 - Resilience Patching for Cryptographic Decryption & JSON Serialization
+- Information System Target Year, UACS Accounting & 4-Way Parity Schema Sync
 - CORS Security Middleware & Structured JSON Error Handlers
 - Single Source of Truth Router Registrations (Auth, Dept, Admin, Supply)
 - Root Route & Frontend SPA Distribution Serving
@@ -69,7 +70,8 @@ from app.database.models import (
     StrategicCategory,
     UacsCatalogItem,
     SystemTaxonomy,
-    DynamicChecklistCriteria
+    DynamicChecklistCriteria,
+    IsspPlanArchive
 )
 from app.database.session import engine, db_session, SessionLocal
 
@@ -217,8 +219,10 @@ def patch_runtime_enum_columns():
         ("existing_inventory", "office_location"): (OfficeLocation, False),
         ("information_systems", "status"): (SystemStatus, False),
         ("information_systems", "classification"): (SystemClassification, False),
+        ("information_systems", "frontline_hosting_type"): (SystemHostingType, False),
         ("information_systems", "hosting_type"): (SystemHostingType, False),
         ("information_systems", "development_strategy"): (DevelopmentStrategy, False),
+        ("information_systems", "expenditure_class"): (ExpenditureClass, False),
         ("ict_projects", "project_category"): (ProjectCategory, False),
         ("ict_projects", "funding_source"): (FundSource, False),
         ("master_narratives", "scope_choice"): (ScopeChoice, False),
@@ -266,7 +270,8 @@ def align_database_schemas(engine):
     Defensively inspects target database tables at runtime and:
     1. Defensively drops legacy document tree tables and PostgreSQL types.
     2. Converts legacy native ENUM columns to standard VARCHAR types to prevent InvalidTextRepresentation.
-    3. Synchronizes missing columns for DICT v.2026 specifications.
+    3. Synchronizes missing columns for DICT v.2026 specifications, including
+       Information System target_year, uacs_object_code, expenditure_class, and issp_core.system_id.
     4. Ensures zero hardcoded deletion of user-created projects or institutional names.
     5. Preserves user-provided signatory names on the cover page without overwriting them on startup.
     6. Seeds initial baseline records for dynamic strategic categories, UACS catalog, and policy settings ONLY if empty.
@@ -699,6 +704,29 @@ def align_database_schemas(engine):
         table_names = inspector.get_table_names()
 
         # ==========================================================
+        # 0. ENSURE 'issp_plan_archives' TABLE EXISTS FOR ARCHIVAL
+        # ==========================================================
+        if "issp_plan_archives" not in table_names:
+            logger.info("Defensive Sync: Creating 'issp_plan_archives' table if missing.")
+            id_col_type = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "SERIAL PRIMARY KEY"
+            safe_exec(conn, text(f"""
+                CREATE TABLE IF NOT EXISTS issp_plan_archives (
+                    id {id_col_type},
+                    issp_period VARCHAR(50) NOT NULL,
+                    agency_name VARCHAR(255) NOT NULL,
+                    start_year INTEGER NOT NULL,
+                    end_year INTEGER NOT NULL,
+                    certified_grand_total NUMERIC(15, 2) DEFAULT 0.00 NOT NULL,
+                    pdf_vault_url VARCHAR(500),
+                    docx_vault_url VARCHAR(500),
+                    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    archived_by_user VARCHAR(255),
+                    notes TEXT
+                );
+            """))
+            safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_issp_plan_archives_issp_period ON issp_plan_archives (issp_period);"))
+
+        # ==========================================================
         # 3. COLUMN SYNCHRONIZATION FOR DICT v.2026 SPECIFICATIONS
         # ==========================================================
 
@@ -782,7 +810,7 @@ def align_database_schemas(engine):
                     WHERE (present_situation_text IS NULL OR present_situation_text = '') AND present_situation_html IS NOT NULL AND present_situation_html != '';
                 """))
 
-        # Patch 'information_systems' table (Part II.C & Part III.D specifications)
+        # Patch 'information_systems' table (Part II.C & Part III.D specifications with target_year and UACS accounting)
         if "information_systems" in table_names:
             sys_cols = [c['name'] for c in inspector.get_columns('information_systems')]
             columns_to_sync_sys = {
@@ -822,7 +850,10 @@ def align_database_schemas(engine):
                 "is_deployed_on_shared_platform": f"BOOLEAN DEFAULT {bool_false}",
                 "processes_personal_information": f"BOOLEAN DEFAULT {bool_false}",
                 "has_undergone_pia": f"BOOLEAN DEFAULT {bool_false}",
-                "pia_target_date_text": "VARCHAR(100)"
+                "pia_target_date_text": "VARCHAR(100)",
+                "target_year": "INTEGER",
+                "uacs_object_code": "VARCHAR(150) DEFAULT '50604070 01 - ICT Software (Perpetual CO)'",
+                "expenditure_class": "VARCHAR(100) DEFAULT 'Capital Outlay'"
             }
             for col_name, col_def in columns_to_sync_sys.items():
                 if col_name not in sys_cols:
@@ -839,6 +870,8 @@ def align_database_schemas(engine):
                 safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_submission_status ON information_systems (submission_status)"))
             if "ix_information_systems_project_id" not in sys_indexes:
                 safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_project_id ON information_systems (project_id)"))
+            if "ix_information_systems_target_year" not in sys_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_target_year ON information_systems (target_year)"))
 
             # Backfill submission_status & link department_id where matching system_owner_office
             safe_exec(conn, text("UPDATE information_systems SET submission_status = 'Approved' WHERE submission_status IS NULL OR submission_status = ''"))
@@ -863,6 +896,38 @@ def align_database_schemas(engine):
                     LIMIT 1
                 )
                 WHERE project_id IS NULL;
+            """))
+
+            # Backfill target_year, uacs_object_code, and expenditure_class for existing information_systems
+            if is_sqlite:
+                safe_exec(conn, text("""
+                    UPDATE information_systems
+                    SET target_year = CAST(SUBSTR(issp_period, 1, 4) AS INTEGER)
+                    WHERE target_year IS NULL AND issp_period IS NOT NULL AND issp_period LIKE '%-%';
+                """))
+            else:
+                safe_exec(conn, text("""
+                    UPDATE information_systems
+                    SET target_year = CAST(SUBSTRING(issp_period FROM 1 FOR 4) AS INTEGER)
+                    WHERE target_year IS NULL AND issp_period IS NOT NULL AND issp_period LIKE '%-%';
+                """))
+
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET target_year = 2026
+                WHERE target_year IS NULL;
+            """))
+
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET uacs_object_code = '50604070 01 - ICT Software (Perpetual CO)'
+                WHERE uacs_object_code IS NULL OR uacs_object_code = '';
+            """))
+
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET expenditure_class = 'Capital Outlay'
+                WHERE expenditure_class IS NULL OR expenditure_class = '';
             """))
 
             # Synchronize is_client_facing with is_frontline_service
@@ -915,6 +980,39 @@ def align_database_schemas(engine):
                   AND (is_operations = 0 OR is_operations IS NULL);
             """))
 
+            # PostgreSQL Foreign Key Constraints
+            if not is_sqlite:
+                safe_exec(conn, text("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'fk_info_sys_department_id'
+                        ) THEN
+                            ALTER TABLE information_systems 
+                            ADD CONSTRAINT fk_info_sys_department_id 
+                            FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL;
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'fk_info_sys_needs_assessment_id'
+                        ) THEN
+                            ALTER TABLE information_systems 
+                            ADD CONSTRAINT fk_info_sys_needs_assessment_id 
+                            FOREIGN KEY (needs_assessment_id) REFERENCES needs_assessments(id) ON DELETE SET NULL;
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'fk_info_sys_project_id'
+                        ) THEN
+                            ALTER TABLE information_systems 
+                            ADD CONSTRAINT fk_info_sys_project_id 
+                            FOREIGN KEY (project_id) REFERENCES ict_projects(id) ON DELETE SET NULL;
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN
+                        NULL;
+                    END $$;
+                """))
+
         # Patch 'organizational_outcomes' table
         if "organizational_outcomes" in table_names:
             oo_cols = [c['name'] for c in inspector.get_columns('organizational_outcomes')]
@@ -950,11 +1048,12 @@ def align_database_schemas(engine):
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'strategic_concerns'.")
                     safe_exec(conn, text(f"ALTER TABLE strategic_concerns ADD COLUMN {col_name} {col_def}"))
 
-        # Patch 'issp_core' table (Unified Proposals Ledger)
+        # Patch 'issp_core' table (Unified Proposals Ledger with system_id linkage)
         if "issp_core" in table_names:
             core_cols = [c['name'] for c in inspector.get_columns('issp_core')]
             columns_to_sync_core = {
                 "project_id": f"{uuid_type}",
+                "system_id": f"{uuid_type}",
                 "needs_assessment_id": f"{uuid_type}",
                 "strategic_category_id": "INTEGER",
                 "outcome_id": "INTEGER",
@@ -984,6 +1083,42 @@ def align_database_schemas(engine):
                 if col_name not in core_cols:
                     logger.info(f"Defensive Sync: Appending missing column '{col_name}' to 'issp_core'.")
                     safe_exec(conn, text(f"ALTER TABLE issp_core ADD COLUMN {col_name} {col_def}"))
+
+            # Index and foreign key for issp_core.system_id
+            core_indexes = [ix['name'] for ix in inspector.get_indexes('issp_core')]
+            if "ix_issp_core_system_id" not in core_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_issp_core_system_id ON issp_core (system_id)"))
+
+            # Backfill issp_core.system_id from matching information_systems
+            safe_exec(conn, text("""
+                UPDATE issp_core
+                SET system_id = (
+                    SELECT id FROM information_systems
+                    WHERE LOWER(TRIM(information_systems.name)) = LOWER(TRIM(issp_core.item_name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('System Development: ' || TRIM(information_systems.name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('System Enhancement: ' || TRIM(information_systems.name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('Software Development: ' || TRIM(information_systems.name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('Software Engineering: ' || TRIM(information_systems.name))
+                    LIMIT 1
+                )
+                WHERE system_id IS NULL;
+            """))
+
+            if not is_sqlite:
+                safe_exec(conn, text("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'fk_issp_core_system_id'
+                        ) THEN
+                            ALTER TABLE issp_core 
+                            ADD CONSTRAINT fk_issp_core_system_id 
+                            FOREIGN KEY (system_id) REFERENCES information_systems(id) ON DELETE SET NULL;
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN
+                        NULL;
+                    END $$;
+                """))
 
         # Patch 'existing_inventory' table
         if "existing_inventory" in table_names:
@@ -1265,6 +1400,7 @@ async def lifespan(app: FastAPI):
     Handles application startup and shutdown procedures safely.
     Defensively verifies schemas, purges legacy tables, patches runtime enums,
     auto-bootstraps fresh databases with required users and metadata,
+    synchronizes information systems with the proposal ledger,
     and automatically executes cycle expiration / rollover checks.
     """
     agency_label = getattr(settings, "DEFAULT_AGENCY_NAME", "INSTITUTIONAL")
@@ -1327,7 +1463,24 @@ async def lifespan(app: FastAPI):
     except Exception as seed_err:
         logger.warning(f"Auto-seed during startup note: {str(seed_err)}")
 
-    # 5. Automated Lifecycle Rollover Evaluation on Startup
+    # 5. Automated Synchronization of Information Systems with Part IV.A Proposal Ledger
+    try:
+        with SessionLocal() as db:
+            from app.utils.helpers import sync_system_proposal
+            from app.database.models import InformationSystem
+            all_systems = db.query(InformationSystem).all()
+            synced_count = 0
+            for sys_item in all_systems:
+                if getattr(sys_item, "proposed_cost", 0) and float(sys_item.proposed_cost) > 0:
+                    sync_system_proposal(db, sys_item)
+                    synced_count += 1
+            if synced_count > 0:
+                db.commit()
+                logger.info(f"Synchronized {synced_count} information system(s) with Part IV.A proposal ledger.")
+    except Exception as sync_err:
+        logger.warning(f"Startup system proposal synchronization note: {str(sync_err)}")
+
+    # 6. Automated Lifecycle Rollover Evaluation on Startup
     try:
         with SessionLocal() as db:
             from app.services.lifecycle_service import ISSPLifecycleEngine
@@ -1336,7 +1489,7 @@ async def lifespan(app: FastAPI):
     except Exception as lc_err:
         logger.warning(f"Lifecycle startup check note: {str(lc_err)}")
 
-    # 6. Scan and Log Registered Routing Tables
+    # 7. Scan and Log Registered Routing Tables
     logger.info("Scanning active API routing tables...")
     routes_registered = []
     for route in app.routes:

@@ -9,6 +9,7 @@ Core Capabilities:
 - Dynamic Planning Cycle & Statutory 3-Year Horizon (Zero Hardcoding)
 - Compounded Multi-Year Annual Inflation Rate & Unit Cost Calculation
 - DBM Capitalization Thresholding & Dynamic UACS Accounting Engine
+- Information System & Resource Proposal Bi-Directional Synchronization
 - Annex 1 Hardware Obsolescence Quota & Anti-Loop Replacement Enforcement
 - Section 8.0 Needs Assessment, Multi-Pathway Resolution & PIA Audit Checks
 - Strict Project-Governed Rollup & Multi-Pathway Strategic Concern Validation
@@ -662,7 +663,7 @@ def classify_uacs_and_expenditure(
     Enforces DBM thresholds, in-house software capitalization, and mandatory MOOE subscriptions:
     - In-house developed software is always Capital Outlay (50604070 01 - ICT Software Perpetual CO).
     - Subscriptions / Cloud licenses are ALWAYS MOOE (50299070 00 - ICT Software Subscription MOOE).
-    - Training/Seminars are always MOOE (50202010 00 - Training Expenses MOOE) per DICT Guidelines.
+    - Training/Seminars are always MOOE (50202010 00 - Training Expenses MOOE) per DICT Guidelines [2].
     - Consulting / Contractors are always MOOE (50211030 00 - Consulting/Outsourced Development MOOE).
     - Physical hardware: >= capitalization threshold is Capital Outlay; < threshold is Semi-Expendable MOOE.
     """
@@ -713,7 +714,7 @@ def classify_uacs_and_expenditure(
                     pass
             return "50299070 00 - ICT Software Subscription (MOOE)", "Maintenance and Other Operating Expenses"
 
-        # Mandated by DICT Guidelines: Training Expenses under UACS 50202010 00
+        # Mandated by DICT Guidelines: Training Expenses under UACS 50202010 00 [2]
         if "training" in cat_val or any(k in item_lower for k in ["training", "seminar", "workshop", "certification course"]):
             if session:
                 try:
@@ -903,7 +904,195 @@ def calculate_financial_summaries(db: Session, issp_period: str, only_approved: 
 
 
 # =========================================================================
-# 7. CROSS-SECTIONAL DEPENDENCY AUDITORS
+# 7. INFORMATION SYSTEM & PROPOSAL SYNCHRONIZATION HELPER
+# =========================================================================
+
+def sync_system_proposal(db: Session, system: Any) -> Optional[Any]:
+    """
+    Synchronizes an Information System (Part III.D) with a corresponding
+    Proposal in issp_core (Part IV.A).
+    Ensures that when an Information System is proposed or for development/enhancement
+    with proposed_cost > 0:
+    1. It has an exact Proposal in Part IV.A with matching target_year and UACS code.
+    2. It rolls up into the parent ICT project's total cost (computed_total_project_cost).
+    3. It flows into 4-way parity (Tables B.1, B.2, B.3, B.4) under the target fiscal year.
+    4. It appears in the compiled PDF, DOCX, and DBM CSV export.
+    """
+    from app.database.models import (
+        Proposal, IctProject, StrategicCategory, StrategicConcern, 
+        OrganizationalOutcome
+    )
+
+    if not system or not getattr(system, "id", None):
+        return None
+
+    cost = Decimal(str(getattr(system, "proposed_cost", 0) or 0))
+    is_operational = str(getattr(system, "status", "")).strip().lower() == "operational"
+
+    # Search for an existing linked proposal by system_id or naming pattern
+    prop = db.query(Proposal).filter(
+        Proposal.issp_period == system.issp_period,
+        or_(
+            Proposal.system_id == system.id,
+            func.lower(Proposal.item_name) == func.lower(f"System Development: {system.name}"),
+            func.lower(Proposal.item_name) == func.lower(f"System Enhancement: {system.name}"),
+            func.lower(Proposal.item_name) == func.lower(f"Software Development: {system.name}"),
+            func.lower(Proposal.item_name) == func.lower(f"Software Engineering: {system.name}"),
+            func.lower(Proposal.item_name) == func.lower(system.name)
+        )
+    ).first()
+
+    # If operational or zero cost, retire any proposal
+    if (is_operational and cost <= Decimal("0.00")) or cost <= Decimal("0.00"):
+        if prop:
+            prop.is_archived = True
+            db.flush()
+        return None
+
+    # Determine start_year of the cycle and target_year
+    start_yr = 2026
+    if system.issp_period and "-" in system.issp_period:
+        try:
+            start_yr = int(system.issp_period.split("-")[0].strip())
+        except Exception:
+            start_yr = 2026
+
+    target_yr = getattr(system, "target_year", None)
+    if not target_yr:
+        target_yr = start_yr
+        system.target_year = target_yr
+
+    try:
+        target_yr = int(target_yr)
+    except Exception:
+        target_yr = start_yr
+
+    yr_idx = target_yr - start_yr + 1
+    if yr_idx < 1:
+        yr_idx = 1
+
+    yearly_quantities = {
+        str(target_yr): 1,
+        f"Year {yr_idx}": 1
+    }
+
+    # UACS and expenditure class
+    uacs_code = getattr(system, "uacs_object_code", None)
+    exp_class = getattr(system, "expenditure_class", None)
+    if not uacs_code:
+        uacs_code = "50604070 01 - ICT Software (Perpetual CO)" if cost >= Decimal("50000.00") else "50211030 00 - Consulting/Outsourced Development (MOOE)"
+        system.uacs_object_code = uacs_code
+    if not exp_class:
+        exp_class = "Capital Outlay" if "(CO)" in uacs_code else "Maintenance and Other Operating Expenses"
+        system.expenditure_class = exp_class
+
+    # Project, strategic category, and funding source
+    project_id = getattr(system, "project_id", None)
+    strat_cat = "Internal ICT Projects"
+    fund_source = "General Appropriations Act (GAA)"
+    strat_cat_id = None
+
+    if project_id:
+        proj = db.query(IctProject).filter(IctProject.id == project_id).first()
+        if proj:
+            strat_cat = str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects")
+            fund_source = str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)")
+            sc_obj = db.query(StrategicCategory).filter(func.lower(StrategicCategory.name) == func.lower(strat_cat)).first()
+            if sc_obj:
+                strat_cat_id = sc_obj.id
+
+    # Organizational Outcome
+    outcome_id = None
+    if getattr(system, "strategic_concern_id", None):
+        concern = db.query(StrategicConcern).filter(StrategicConcern.id == system.strategic_concern_id).first()
+        if concern and concern.outcome_id:
+            outcome_id = concern.outcome_id
+
+    if not outcome_id:
+        default_oo = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == system.issp_period).first()
+        if default_oo:
+            outcome_id = default_oo.id
+
+    # Status mapping
+    sub_status = str(getattr(system, "submission_status", "Approved") or "Approved").lower()
+    if sub_status == "approved":
+        prop_status = "Approved"
+    elif sub_status == "submitted":
+        prop_status = "Submitted"
+    elif sub_status == "returned":
+        prop_status = "Returned"
+    else:
+        prop_status = "Draft"
+
+    sys_status_str = str(getattr(system, "status", "For Development") or "For Development")
+    prefix = "System Enhancement" if "enhancement" in sys_status_str.lower() else "System Development"
+    item_name = f"{prefix}: {system.name}"
+
+    if not prop:
+        prop = Proposal(
+            id=uuid.uuid4(),
+            system_id=system.id,
+            department_id=system.department_id or 1,
+            issp_period=system.issp_period,
+            outcome_id=outcome_id,
+            project_id=project_id,
+            needs_assessment_id=getattr(system, "needs_assessment_id", None),
+            strategic_category_id=strat_cat_id,
+            category="Software",
+            strategic_category=strat_cat,
+            office_location=system.system_owner_office or "Central Office",
+            fund_source=fund_source,
+            uacs_object_code=uacs_code,
+            expenditure_class=exp_class,
+            status=prop_status,
+            item_key="other",
+            item_name=item_name,
+            unit_cost=cost,
+            yearly_quantities=yearly_quantities,
+            total_qty=1,
+            total_cost=cost,
+            justification=system.description_and_purpose or f"Approved system outlay for {system.name}.",
+            system_development_status=sys_status_str,
+            target_office_automated=system.system_owner_office or "Central Office",
+            is_archived=False
+        )
+        db.add(prop)
+    else:
+        prop.system_id = system.id
+        prop.project_id = project_id
+        prop.department_id = system.department_id or prop.department_id or 1
+        prop.issp_period = system.issp_period
+        if outcome_id:
+            prop.outcome_id = outcome_id
+        if getattr(system, "needs_assessment_id", None):
+            prop.needs_assessment_id = system.needs_assessment_id
+        prop.item_name = item_name
+        prop.category = "Software"
+        prop.strategic_category = strat_cat
+        if strat_cat_id:
+            prop.strategic_category_id = strat_cat_id
+        prop.fund_source = fund_source
+        prop.uacs_object_code = uacs_code
+        prop.expenditure_class = exp_class
+        prop.unit_cost = cost
+        prop.total_cost = cost
+        prop.total_qty = 1
+        prop.yearly_quantities = yearly_quantities
+        prop.status = prop_status
+        prop.system_development_status = sys_status_str
+        prop.target_office_automated = system.system_owner_office or prop.target_office_automated or "Central Office"
+        prop.justification = system.description_and_purpose or prop.justification
+        prop.is_archived = False
+
+    if hasattr(prop, "sync_payload"):
+        prop.sync_payload()
+
+    db.flush()
+    return prop
+
+
+# =========================================================================
+# 8. CROSS-SECTIONAL DEPENDENCY AUDITORS
 # =========================================================================
 
 def verify_canvas_compliance(
@@ -1272,7 +1461,7 @@ def verify_drbcp_funding(db: Session, issp_period: str) -> Tuple[bool, str]:
 
 
 # =========================================================================
-# 8. CENTRALIZED COA AUDIT LOGGING HELPER
+# 9. CENTRALIZED COA AUDIT LOGGING HELPER
 # =========================================================================
 
 def sanitize_for_json(obj: Any) -> Any:

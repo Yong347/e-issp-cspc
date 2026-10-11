@@ -65,7 +65,8 @@ from app.utils.helpers import (
     log_audit_event,
     get_governance_policy,
     verify_canvas_compliance,
-    verify_annex1_obsolescence_link
+    verify_annex1_obsolescence_link,
+    sync_system_proposal
 )
 
 logger = logging.getLogger(__name__)
@@ -671,6 +672,7 @@ def create_merged_proposal(
             )
 
     resolved_project_id = coerce_optional_uuid(payload.project_id)
+    resolved_system_id = coerce_optional_uuid(getattr(payload, "system_id", None))
     resolved_category = payload.category or "Hardware"
     resolved_strategic_cat = payload.strategic_category or "Office Productivity"
     resolved_fund_source = payload.fund_source or "General Appropriations Act (GAA)"
@@ -741,6 +743,7 @@ def create_merged_proposal(
         issp_period=active_period,
         outcome_id=resolved_outcome_id,
         project_id=resolved_project_id,
+        system_id=resolved_system_id,
         needs_assessment_id=resolved_needs_assessment_id,
         strategic_category_id=strat_cat_id,
         category=getattr(resolved_category, "value", str(resolved_category)),
@@ -783,7 +786,8 @@ def create_merged_proposal(
             "category": str(db_proposal.category),
             "total_cost": str(db_proposal.total_cost),
             "total_qty": db_proposal.total_qty,
-            "project_id": str(resolved_project_id) if resolved_project_id else None
+            "project_id": str(resolved_project_id) if resolved_project_id else None,
+            "system_id": str(resolved_system_id) if resolved_system_id else None
         }
     )
 
@@ -866,6 +870,7 @@ def duplicate_proposal(
         issp_period=original.issp_period,
         outcome_id=original.outcome_id,
         project_id=original.project_id,
+        system_id=original.system_id,
         needs_assessment_id=original.needs_assessment_id,
         strategic_category_id=original.strategic_category_id,
         category=original.category,
@@ -968,6 +973,10 @@ def update_merged_proposal(
         else:
             proposal.fund_source = str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)")
             proposal.strategic_category = str(getattr(proj.project_category, "value", proj.project_category) or "Internal ICT Projects")
+
+    resolved_system_id = coerce_optional_uuid(getattr(payload, "system_id", None))
+    if resolved_system_id is not None:
+        proposal.system_id = resolved_system_id
 
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
     payload.yearly_quantities = aligned_quantities
@@ -1230,6 +1239,7 @@ def submit_proposal(
     payload_to_verify = ProposalCreatePayload(
         outcome_id=proposal.outcome_id,
         project_id=proposal.project_id,
+        system_id=proposal.system_id,
         needs_assessment_id=proposal.needs_assessment_id,
         category=proposal.category or "Hardware",
         strategic_category=proposal.strategic_category or "Office Productivity",
@@ -1289,7 +1299,7 @@ def submit_proposal(
         department_id=user["department_id"],
         proposal_id=proposal.id,
         ip_address=client_ip,
-        old_value={"status": old_status},
+        new_value={"status": old_status},
         new_value={"status": "Submitted", "total_cost": str(proposal.total_cost)}
     )
     
@@ -1419,6 +1429,27 @@ def create_department_proposed_system(
     if cost < Decimal("0.00"):
         raise HTTPException(status_code=400, detail="Proposed cost cannot be negative.")
 
+    # Target year default if not supplied
+    if not dumped.get("target_year") and active_period and "-" in active_period:
+        try:
+            dumped["target_year"] = int(active_period.split("-")[0].strip())
+        except Exception:
+            dumped["target_year"] = 2026
+
+    # UACS and expenditure class defaults
+    if not dumped.get("uacs_object_code"):
+        dumped["uacs_object_code"] = (
+            "50604070 01 - ICT Software (Perpetual CO)" 
+            if cost >= Decimal("50000.00") 
+            else "50211030 00 - Consulting/Outsourced Development (MOOE)"
+        )
+    if not dumped.get("expenditure_class"):
+        dumped["expenditure_class"] = (
+            "Capital Outlay" 
+            if "(CO)" in (dumped.get("uacs_object_code") or "") 
+            else "Maintenance and Other Operating Expenses"
+        )
+
     # Verify linked needs assessment exists if provided
     needs_assessment_id = coerce_optional_uuid(getattr(payload, "needs_assessment_id", None))
     if needs_assessment_id:
@@ -1502,6 +1533,8 @@ def create_department_proposed_system(
 
     db.add(db_system)
     db.flush()
+
+    sync_system_proposal(db, db_system)
 
     client_ip = request.client.host if (request and request.client) else "Unknown"
     log_audit_event(
@@ -1604,6 +1637,9 @@ def update_department_proposed_system(
     if "hosting_type" in update_data and "frontline_hosting_type" not in update_data:
         system.frontline_hosting_type = update_data["hosting_type"] or "Online"
 
+    if "uacs_object_code" in update_data and "expenditure_class" not in update_data:
+        system.expenditure_class = "Capital Outlay" if "(CO)" in (system.uacs_object_code or "") else "Maintenance and Other Operating Expenses"
+
     new_cost = getattr(system, "proposed_cost", Decimal("0.00")) or Decimal("0.00")
 
     client_ip = request.client.host if (request and request.client) else "Unknown"
@@ -1622,6 +1658,7 @@ def update_department_proposed_system(
         }
     )
 
+    sync_system_proposal(db, system)
     db.commit()
     db.refresh(system)
 
@@ -1664,6 +1701,12 @@ def delete_department_proposed_system(
         )
 
     sys_name = system.name
+
+    # Remove any synchronized proposal in issp_core as well
+    db.query(Proposal).filter(
+        Proposal.system_id == system.id
+    ).delete(synchronize_session=False)
+
     db.delete(system)
 
     client_ip = request.client.host if (request and request.client) else "Unknown"
@@ -1729,6 +1772,7 @@ def submit_department_proposed_system(
         new_value={"system_id": str(system.id), "name": system.name, "status": "Submitted"}
     )
 
+    sync_system_proposal(db, system)
     db.commit()
     db.refresh(system)
     return {"status": "success", "message": f"Information System '{system.name}' submitted to MIS Review Queue."}

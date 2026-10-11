@@ -3,6 +3,7 @@ import io
 import re
 import time
 import json
+import uuid
 import base64
 import logging
 import mimetypes
@@ -46,7 +47,8 @@ from app.utils.helpers import (
     get_cycle_year_range, 
     get_adjusted_unit_cost_for_year,
     get_governance_policy,
-    get_active_issp_period
+    get_active_issp_period,
+    sync_system_proposal
 )
 
 logger = logging.getLogger(__name__)
@@ -374,6 +376,21 @@ def compile_issp_document(self, metadata: dict):
         
         export_format = metadata.get("export_format", "pdf").lower().strip()
         
+        # Ensure any approved systems with costs are synchronized to Part IV.A proposals ledger
+        try:
+            sys_to_sync = db.query(InformationSystem).filter(
+                InformationSystem.issp_period == issp_period,
+                func.lower(cast(InformationSystem.submission_status, String)) == "approved",
+                InformationSystem.proposed_cost > 0
+            ).all()
+            for s_item in sys_to_sync:
+                sync_system_proposal(db, s_item)
+            if sys_to_sync:
+                db.commit()
+        except Exception as sync_e:
+            db.rollback()
+            logger.debug(f"System sync note in compile task: {sync_e}")
+
         safe_update_progress(task_ref, "PROGRESS", 15, "Certifying graph singularity and legal linkages...")
         try:
             ISSPSingularityEngine.validate_complete_issp_graph(db, issp_period)
@@ -756,6 +773,15 @@ def render_information_system_full_spec(
     pia_target_text = f"No, Not Conducted (Target: {pia_target_date})" if (not pia_answered_yes and pia_target_date) else ("Yes" if pia_answered_yes else "No")
 
     proposed_cost_row = f'<tr><td class="bold">ESTIMATED PROPOSED COST</td><td class="font-mono bold" style="color:#047857;">{fmt_currency(proposed_cost or 0)}</td></tr>' if is_proposed else ''
+    
+    # Target Year & UACS Accounting specifications for Part III.D integration
+    target_year_val = getattr(s, "target_year", None)
+    target_year_row = f'<tr><td class="bold">TARGET IMPLEMENTATION YEAR</td><td class="font-mono bold" style="color:#1e3a8a;">FY {target_year_val}</td></tr>' if (is_proposed and target_year_val) else ''
+    
+    uacs_val = getattr(s, "uacs_object_code", None)
+    exp_class_val = getattr(s, "expenditure_class", None) or "Capital Outlay"
+    uacs_row = f'<tr><td class="bold">UACS OBJECT CODE &amp; CLASS</td><td class="font-mono">{clean_uacs_title(uacs_val) or uacs_val} ({exp_class_val})</td></tr>' if (is_proposed and uacs_val) else ''
+    
     linked_project_row = f'<tr><td class="bold">LINKED ICT PROJECT (PART III.E)</td><td class="bold" style="color:#1e3a8a;">{linked_proj_title}</td></tr>' if (is_proposed and linked_proj_title) else ''
 
     return f"""
@@ -778,6 +804,8 @@ def render_information_system_full_spec(
         </tr>
         {f'<tr><td class="bold">STATUS</td><td class="bold" style="color:#1d4ed8;">{status_label}</td></tr>' if is_proposed else ''}
         {proposed_cost_row}
+        {target_year_row}
+        {uacs_row}
         {linked_project_row}
         {f'<tr><td class="bold">ENHANCEMENT DETAILS</td><td style="text-align: justify;">{enhancement_details}</td></tr>' if (is_proposed and 'enhancement' in status_label.lower() and enhancement_details) else ''}
         <tr>
@@ -823,7 +851,7 @@ def render_information_system_full_spec(
             </td>
         </tr>
         <tr>
-            <td class="bold">PRIVACY IMPACT ASSESSMENT (PIA)</td>
+            <td class="bold">PRIVACY IMPACT ASSESSMENT (PIA) [1]</td>
             <td>
                 Is the system processing personal information?<br/>
                 &nbsp;&nbsp;{'[X] Yes' if s.processes_personal_information else '[ ] Yes'}&nbsp;&nbsp;&nbsp;&nbsp;
@@ -1961,6 +1989,7 @@ def generate_complete_issp_html(
         if getattr(proj, "information_system", None) and proj.information_system not in linked_sys:
             linked_sys.append(proj.information_system)
 
+        linked_sys_ids = {str(s.id).lower() for s in linked_sys}
         components_rows = ""
         for s in linked_sys:
             components_rows += f"""
@@ -1973,6 +2002,8 @@ def generate_complete_issp_html(
             """
 
         for itm in linked_props:
+            if itm.system_id and str(itm.system_id).lower() in linked_sys_ids:
+                continue
             components_rows += f"""
             <tr>
                 <td style="border: 1px solid #cbd5e1; padding: 2px 4px;">{itm.item_name}</td>

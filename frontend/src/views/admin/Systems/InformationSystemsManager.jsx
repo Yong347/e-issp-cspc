@@ -52,13 +52,28 @@ import {
   CheckSquare,
   Tag,
   Coins,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Calendar
 } from "lucide-react";
 
 export default function InformationSystemsManager() {
   const { user } = useAuth();
-  const { activeCycle } = useCycle();
+  const { activeCycle, planningYears } = useCycle();
   const location = useLocation();
+
+  // Active planning horizon sequence (strictly dynamic, zero hardcoding)
+  const activeYears = useMemo(() => {
+    if (planningYears && planningYears.length > 0) return planningYears;
+    if (activeCycle && activeCycle.includes("-")) {
+      const parts = activeCycle.split("-");
+      const start = parseInt(parts[0], 10);
+      if (!isNaN(start)) {
+        return [start, start + 1, start + 2];
+      }
+    }
+    const currentYear = new Date().getFullYear();
+    return [currentYear, currentYear + 1, currentYear + 2];
+  }, [planningYears, activeCycle]);
 
   // Core Data States
   const [systems, setSystems] = useState([]);
@@ -102,6 +117,9 @@ export default function InformationSystemsManager() {
   const [reviewAction, setReviewAction] = useState("APPROVE"); // "APPROVE" | "RETURN"
   const [reviewStatus, setReviewStatus] = useState("For Development");
   const [reviewProposedCost, setReviewProposedCost] = useState("0");
+  const [reviewTargetYear, setReviewTargetYear] = useState("");
+  const [reviewUacsCode, setReviewUacsCode] = useState("50604070 01 - ICT Software (Perpetual CO)");
+  const [reviewExpClass, setReviewExpClass] = useState("Capital Outlay");
   const [reviewConcernId, setReviewConcernId] = useState("");
   const [reviewProjectId, setReviewProjectId] = useState("");
   const [reviewDevStrategy, setReviewDevStrategy] = useState("Outsourced");
@@ -128,6 +146,9 @@ export default function InformationSystemsManager() {
     status: "Operational", // Operational | For Development | For Enhancement
     classification: "Operations - Frontline Service",
     proposed_cost: "",
+    target_year: "",
+    uacs_object_code: "50604070 01 - ICT Software (Perpetual CO)",
+    expenditure_class: "Capital Outlay",
     is_client_facing: true,
     
     // Independent Multi-Classification Checkboxes
@@ -276,6 +297,7 @@ export default function InformationSystemsManager() {
 
     setForm({
       ...initialFormState,
+      target_year: activeYears[0] || 2026,
       status: resolvedStatus
     });
     setError(null);
@@ -322,6 +344,9 @@ export default function InformationSystemsManager() {
       status: sys.status?.value || sys.status || "Operational",
       classification: classStr || "Operations - Frontline Service",
       proposed_cost: sys.proposed_cost !== undefined ? String(sys.proposed_cost) : "",
+      target_year: sys.target_year || activeYears[0] || 2026,
+      uacs_object_code: sys.uacs_object_code || "50604070 01 - ICT Software (Perpetual CO)",
+      expenditure_class: sys.expenditure_class || (sys.uacs_object_code?.includes("(CO)") ? "Capital Outlay" : "Maintenance and Other Operating Expenses"),
       is_client_facing: sys.is_client_facing !== undefined ? Boolean(sys.is_client_facing) : true,
       is_support_to_operations: isSupport,
       is_general_administrative: isAdmin,
@@ -354,7 +379,7 @@ export default function InformationSystemsManager() {
     setIsModalOpen(true);
   };
 
-  // Open Administrative Review Modal (Populates both Department Inputs & Technical Stack)
+  // Open Administrative Review Modal (Populates both Department Inputs & Technical Stack + Target Year & UACS)
   const handleOpenReviewModal = (sys) => {
     setReviewingSystem(sys);
     setReviewAction("APPROVE");
@@ -367,6 +392,12 @@ export default function InformationSystemsManager() {
       p => (sys.project_id && String(p.id) === String(sys.project_id)) || String(p.system_id) === String(sys.id)
     );
     setReviewProjectId(sys.project_id || (linkedProj ? String(linkedProj.id) : ""));
+
+    // Set Target Year and UACS for review modal
+    setReviewTargetYear(sys.target_year ? parseInt(sys.target_year, 10) : (activeYears[0] || 2026));
+    const initialUacs = sys.uacs_object_code || "50604070 01 - ICT Software (Perpetual CO)";
+    setReviewUacsCode(initialUacs);
+    setReviewExpClass(sys.expenditure_class || (initialUacs.includes("(CO)") ? "Capital Outlay" : "Maintenance and Other Operating Expenses"));
 
     // Pre-populate technical architecture defaults for the Administrator to confirm
     setReviewDevStrategy(sys.development_strategy?.value || sys.development_strategy || "Outsourced");
@@ -411,8 +442,12 @@ export default function InformationSystemsManager() {
       } else {
         // APPROVE: First update the system with all technical specifications confirmed by the Admin
         const parsedCost = parseFloat(reviewProposedCost) || 0.0;
+        const targetYearNum = parseInt(reviewTargetYear, 10) || activeYears[0] || 2026;
         const updatePayload = {
           proposed_cost: parsedCost,
+          target_year: targetYearNum,
+          uacs_object_code: reviewUacsCode,
+          expenditure_class: reviewExpClass,
           project_id: reviewProjectId || null,
           development_strategy: reviewDevStrategy,
           development_platform: reviewPlatform.trim(),
@@ -431,16 +466,19 @@ export default function InformationSystemsManager() {
 
         await updateInformationSystem(token, reviewingSystem.id, updatePayload);
 
-        // Finalize review approval
+        // Finalize review approval with Target Year & UACS classifications
         await reviewProposedSystem(token, reviewingSystem.id, {
           action: "APPROVE",
           status: reviewStatus,
+          target_year: targetYearNum,
+          uacs_object_code: reviewUacsCode,
+          expenditure_class: reviewExpClass,
           strategic_concern_id: reviewConcernId || null,
           project_id: reviewProjectId || null,
           rejection_reason: null
         });
 
-        setSuccess(`System '${reviewingSystem.name}' approved! Technical specs committed and linked to Part III.E & Part IV.A.`);
+        setSuccess(`System '${reviewingSystem.name}' approved! Technical specs committed and linked to Part III.E & Part IV.A under FY ${targetYearNum}.`);
       }
 
       setReviewingSystem(null);
@@ -505,11 +543,18 @@ export default function InformationSystemsManager() {
     }
     const classificationStr = classTokens.join(", ") || "Operations";
 
+    const targetYearVal = form.status !== "Operational" 
+      ? (form.target_year ? parseInt(form.target_year, 10) : activeYears[0])
+      : null;
+
     const payload = {
       ...form,
       name: form.name.trim(),
       classification: classificationStr,
       proposed_cost: parseFloat(form.proposed_cost) || 0.0,
+      target_year: targetYearVal,
+      uacs_object_code: form.uacs_object_code || "50604070 01 - ICT Software (Perpetual CO)",
+      expenditure_class: form.expenditure_class || (form.uacs_object_code?.includes("(CO)") ? "Capital Outlay" : "Maintenance and Other Operating Expenses"),
       is_client_facing: Boolean(form.is_client_facing),
       is_support_to_operations: Boolean(form.is_support_to_operations),
       is_general_administrative: Boolean(form.is_general_administrative),
@@ -761,7 +806,7 @@ export default function InformationSystemsManager() {
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between gap-2.5 shadow-xs animate-fadeIn">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
@@ -975,6 +1020,31 @@ export default function InformationSystemsManager() {
                     <p className="text-[11px] leading-relaxed italic whitespace-pre-wrap">
                       "{sys.rejection_reason}"
                     </p>
+                  </div>
+                )}
+
+                {/* Target Year & UACS Accounting Badge Row */}
+                {statusLabel !== "Operational" && (
+                  <div className="grid grid-cols-2 gap-2 text-[10.5px] font-mono">
+                    <div className="p-2.5 bg-blue-50/50 dark:bg-blue-955/20 border border-blue-200 dark:border-blue-900/40 rounded-xl space-y-0.5">
+                      <span className="text-[9px] uppercase font-bold text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                        <Calendar className="w-3 h-3" />
+                        <span>Target Fiscal Year</span>
+                      </span>
+                      <span className="font-bold text-slate-900 dark:text-white">
+                        FY {sys.target_year || activeYears[0]}
+                      </span>
+                    </div>
+
+                    <div className="p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl space-y-0.5">
+                      <span className="text-[9px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                        <Tag className="w-3 h-3 text-emerald-600" />
+                        <span>Accounting Class</span>
+                      </span>
+                      <span className="font-bold text-slate-900 dark:text-white truncate block" title={sys.uacs_object_code || "Capital Outlay"}>
+                        {sys.expenditure_class || (sys.uacs_object_code?.includes("(CO)") ? "Capital Outlay" : "MOOE")}
+                      </span>
+                    </div>
                   </div>
                 )}
 
@@ -1241,6 +1311,38 @@ export default function InformationSystemsManager() {
                         placeholder="0.00"
                         className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono font-bold"
                       />
+                    </div>
+                  </div>
+
+                  {/* Target Implementation Year & UACS Object Code (Table B.4) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-slate-500">Target Implementation Year</label>
+                      <select
+                        value={reviewTargetYear || activeYears[0]}
+                        onChange={e => setReviewTargetYear(parseInt(e.target.value, 10))}
+                        className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono font-bold text-xs"
+                      >
+                        {activeYears.map(yr => (
+                          <option key={yr} value={yr}>FY {yr}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-slate-500">UACS Object Code (Table B.4)</label>
+                      <select
+                        value={reviewUacsCode}
+                        onChange={e => {
+                          const code = e.target.value;
+                          setReviewUacsCode(code);
+                          setReviewExpClass(code.includes("(CO)") ? "Capital Outlay" : "Maintenance and Other Operating Expenses");
+                        }}
+                        className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs"
+                      >
+                        <option value="50604070 01 - ICT Software (Perpetual CO)">50604070 01 - ICT Software (Perpetual CO) [Capital Outlay]</option>
+                        <option value="50211030 00 - Consulting/Outsourced Development (MOOE)">50211030 00 - Consulting/Outsourced Development (MOOE) [MOOE]</option>
+                        <option value="50299070 00 - ICT Software Subscription (MOOE)">50299070 00 - ICT Software Subscription (MOOE) [MOOE]</option>
+                      </select>
                     </div>
                   </div>
 
@@ -1560,23 +1662,72 @@ export default function InformationSystemsManager() {
 
               {/* Proposed Development Cost */}
               {form.status !== "Operational" && (
-                <div className="space-y-1 p-3 bg-emerald-50/50 dark:bg-emerald-955/20 border border-emerald-200 dark:border-emerald-900/40 rounded-xl animate-fadeIn">
-                  <label className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1 font-mono">
-                    <Coins className="w-3.5 h-3.5" />
-                    <span>Estimated Proposed Development Cost (PHP ₱)</span>
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={form.proposed_cost}
-                    onChange={e => setForm({ ...form, proposed_cost: e.target.value })}
-                    placeholder="0.00"
-                    className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono font-bold"
-                  />
-                  <span className="text-[9.5px] text-slate-500 dark:text-slate-400 block pt-0.5">
-                    Will be aggregated automatically into Part IV.A budget line items upon approval.
-                  </span>
+                <div className="space-y-3 p-3.5 bg-emerald-50/50 dark:bg-emerald-955/20 border border-emerald-200 dark:border-emerald-900/40 rounded-xl animate-fadeIn">
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1 font-mono">
+                      <Coins className="w-3.5 h-3.5" />
+                      <span>Estimated Proposed Development Cost (PHP ₱)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={form.proposed_cost}
+                      onChange={e => {
+                        const costVal = parseFloat(e.target.value) || 0;
+                        setForm(prev => ({
+                          ...prev,
+                          proposed_cost: e.target.value,
+                          uacs_object_code: costVal >= 50000 ? "50604070 01 - ICT Software (Perpetual CO)" : "50211030 00 - Consulting/Outsourced Development (MOOE)",
+                          expenditure_class: costVal >= 50000 ? "Capital Outlay" : "Maintenance and Other Operating Expenses"
+                        }));
+                      }}
+                      placeholder="0.00"
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono font-bold"
+                    />
+                    <span className="text-[9.5px] text-slate-500 dark:text-slate-400 block pt-0.5">
+                      Will be aggregated automatically into Part IV.A budget line items upon approval.
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400 font-mono">
+                        Target Implementation Year
+                      </label>
+                      <select
+                        value={form.target_year || activeYears[0]}
+                        onChange={e => setForm({ ...form, target_year: parseInt(e.target.value, 10) })}
+                        className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono font-bold text-xs"
+                      >
+                        {activeYears.map(yr => (
+                          <option key={yr} value={yr}>FY {yr}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-400 font-mono">
+                        UACS Object Code (Table B.4)
+                      </label>
+                      <select
+                        value={form.uacs_object_code}
+                        onChange={e => {
+                          const code = e.target.value;
+                          setForm({
+                            ...form,
+                            uacs_object_code: code,
+                            expenditure_class: code.includes("(CO)") ? "Capital Outlay" : "Maintenance and Other Operating Expenses"
+                          });
+                        }}
+                        className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white font-mono text-xs"
+                      >
+                        <option value="50604070 01 - ICT Software (Perpetual CO)">50604070 01 - ICT Software (Perpetual CO) [Capital Outlay]</option>
+                        <option value="50211030 00 - Consulting/Outsourced Development (MOOE)">50211030 00 - Consulting/Outsourced Development (MOOE) [MOOE]</option>
+                        <option value="50299070 00 - ICT Software Subscription (MOOE)">50299070 00 - ICT Software Subscription (MOOE) [MOOE]</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -1767,7 +1918,7 @@ export default function InformationSystemsManager() {
                   <input
                     type="text" required value={form.external_users} onChange={e => setForm({ ...form, external_users: e.target.value })}
                     placeholder="e.g. General Citizens, Business Entities"
-                    className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white"
+                    className="w-full p-2 bg-slate-50 dark:bg-slate-955 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white"
                   />
                 </div>
               </div>
@@ -1945,10 +2096,26 @@ export default function InformationSystemsManager() {
 
               {viewingSystem.proposed_cost !== undefined && parseFloat(viewingSystem.proposed_cost) > 0 && (
                 <div className="p-3 bg-emerald-50 dark:bg-emerald-955/30 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-center justify-between font-mono">
-                  <span className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">Estimated Development Outlay:</span>
+                  <span className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">
+                    Estimated Development Outlay:
+                  </span>
                   <span className="font-bold text-emerald-700 dark:text-emerald-400 text-sm">{formatPHP(viewingSystem.proposed_cost)}</span>
                 </div>
               )}
+
+              {/* Target Year & UACS Display in Detail Modal */}
+              <div className="grid grid-cols-2 gap-2.5 font-mono text-[10px]">
+                <div className="p-2.5 bg-blue-50/50 dark:bg-blue-955/20 border border-blue-200 dark:border-blue-900/40 rounded-xl space-y-0.5">
+                  <span className="text-[8.5px] uppercase font-bold text-blue-600 dark:text-blue-400">Target Implementation Year</span>
+                  <span className="font-bold text-slate-900 dark:text-white text-xs">FY {viewingSystem.target_year || activeYears[0]}</span>
+                </div>
+                <div className="p-2.5 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl space-y-0.5">
+                  <span className="text-[8.5px] uppercase font-bold text-slate-500 dark:text-slate-400">Expenditure Class</span>
+                  <span className="font-bold text-slate-900 dark:text-white text-xs truncate block" title={viewingSystem.uacs_object_code}>
+                    {viewingSystem.expenditure_class || (viewingSystem.uacs_object_code?.includes("(CO)") ? "Capital Outlay" : "MOOE")}
+                  </span>
+                </div>
+              </div>
 
               <div className="space-y-1">
                 <span className="text-[9.5px] uppercase font-bold text-slate-400 block font-mono">Description &amp; Purpose</span>
@@ -2124,4 +2291,3 @@ export default function InformationSystemsManager() {
     </div>
   );
 }
-

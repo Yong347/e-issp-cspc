@@ -140,7 +140,10 @@ export function humanizeFieldName(fieldKey) {
     is_expansion: "Expansion Project",
     office_location: "Deployment Location",
     annual_deliverables: "Annual Deliverables",
-    harmonization_criteria: "Harmonization Framework Criteria"
+    harmonization_criteria: "Harmonization Framework Criteria",
+    target_year: "Target Implementation Year",
+    proposed_cost: "Proposed Development Cost",
+    frontline_hosting_type: "Frontline Hosting Mode"
   };
 
   if (specialMap[fieldKey]) {

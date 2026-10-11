@@ -58,6 +58,19 @@ import {
   Tag 
 } from "lucide-react";
 
+/**
+ * Strips numeric accounting code prefixes to display clean, official account titles.
+ * Example: "50604050 03 - ICT Equipment (CO)" -> "ICT Equipment (CO)"
+ */
+const cleanUacsTitle = (uacsStr) => {
+  if (!uacsStr) return "";
+  const s = String(uacsStr).trim();
+  if (s.includes(" - ")) {
+    return s.split(" - ", 2)[1].trim();
+  }
+  return s.replace(/^\d{8}(?:\s+\d{2})?\s*[-–]?\s*/, "").trim() || s;
+};
+
 // Default Canonical Harmonization Framework Criteria (DICT ISSP Guidelines v.2026)
 const CANONICAL_HARMONIZATION_CRITERIA = [
   { id: 1, name: "National Prioritization (PDP 2023-2028)", is_mandatory: false, description: "Alignment with National Development Goals" },
@@ -796,13 +809,17 @@ export default function InternalProjectsManager() {
     return projects.filter(p => !((p.project_category || "").toLowerCase().includes("cross")) && parseFloat(p.computed_total_project_cost || 0) === 0).length;
   }, [projects]);
 
-  // Projected Cost in Link Modal
+  // Projected Cost in Link Modal (Aggregates both selected proposals and selected systems)
   const projectedModalCost = useMemo(() => {
     if (!linkingProject) return 0;
-    return allAvailableProposals
+    const propsCost = allAvailableProposals
       .filter(p => selectedProposalIds.includes(String(p.id)))
       .reduce((acc, p) => acc + (parseFloat(p.total_cost) || 0), 0);
-  }, [linkingProject, selectedProposalIds, allAvailableProposals]);
+    const sysCost = systems
+      .filter(s => selectedSystemIds.includes(String(s.id)))
+      .reduce((acc, s) => acc + (parseFloat(s.proposed_cost) || 0), 0);
+    return propsCost + sysCost;
+  }, [linkingProject, selectedProposalIds, allAvailableProposals, systems, selectedSystemIds]);
     
   // Filter Pipeline for Main List (Integrated with Dynamic Categories)
   const filteredProjects = useMemo(() => {
@@ -1189,6 +1206,9 @@ export default function InternalProjectsManager() {
                     name: matchSys.name,
                     status: matchSys.status?.value || matchSys.status || "Operational",
                     proposed_cost: parseFloat(matchSys.proposed_cost || 0),
+                    target_year: matchSys.target_year || null,
+                    uacs_object_code: matchSys.uacs_object_code || null,
+                    expenditure_class: matchSys.expenditure_class || null,
                     classification: matchSys.classification?.value || matchSys.classification || ""
                   });
                 }
@@ -1419,15 +1439,17 @@ export default function InternalProjectsManager() {
                                 </td>
                                 <td className="p-2.5 font-bold">
                                   <div>{sys.name}</div>
-                                  <div className="text-[9px] text-slate-400 dark:text-slate-500 font-mono font-normal">{sys.classification || "Information System"}</div>
+                                  <div className="text-[9px] text-slate-400 dark:text-slate-500 font-mono font-normal">
+                                    {sys.uacs_object_code ? cleanUacsTitle(sys.uacs_object_code) : (sys.classification || "Information System")}
+                                  </div>
                                 </td>
-                                <td className="p-2.5 text-slate-500 dark:text-slate-400">Central Office</td>
+                                <td className="p-2.5 text-slate-500 dark:text-slate-400 font-mono text-[10px]">
+                                  {sys.target_year ? `FY ${sys.target_year}` : "Central Office"}
+                                </td>
                                 <td className="p-2.5 text-center font-mono font-bold">1</td>
                                 <td className="p-2.5 text-right font-mono text-slate-600 dark:text-slate-400">{formatPHP(sys.proposed_cost)}</td>
-                                <td className="p-2.5 text-right font-mono text-xs text-blue-600 dark:text-blue-400">
-                                  <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-955 dark:text-blue-300 text-[8.5px] font-bold" title="Budgeted in Part IV.A detailed proposals">
-                                    Part IV.A Mapped
-                                  </span>
+                                <td className="p-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400 text-xs">
+                                  {formatPHP(sys.proposed_cost)}
                                 </td>
                                 <td className="p-2.5 text-center font-mono font-bold text-[9px] uppercase">
                                   <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-955 dark:text-blue-300">

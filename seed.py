@@ -109,7 +109,8 @@ from app.services.issp_engine import ISSPSingularityEngine
 from app.utils.helpers import (
     calculate_financial_summaries,
     get_default_dynamic_cycle,
-    get_active_issp_period
+    get_active_issp_period,
+    sync_system_proposal
 )
 
 logging.basicConfig(level=logging.INFO, format="[ISSP SEEDER] %(asctime)s - %(levelname)s: %(message)s", force=True)
@@ -269,7 +270,9 @@ def patch_runtime_enum_columns():
         ("information_systems", "status"): (SystemStatus, False),
         ("information_systems", "classification"): (SystemClassification, False),
         ("information_systems", "frontline_hosting_type"): (SystemHostingType, False),
+        ("information_systems", "hosting_type"): (SystemHostingType, False),
         ("information_systems", "development_strategy"): (DevelopmentStrategy, False),
+        ("information_systems", "expenditure_class"): (ExpenditureClass, False),
         ("ict_projects", "project_category"): (ProjectCategory, False),
         ("ict_projects", "funding_source"): (FundSource, False),
         ("master_narratives", "scope_choice"): (ScopeChoice, False),
@@ -317,9 +320,11 @@ def align_database_schemas(engine):
     Defensively inspects target database tables at runtime.
     1. Purges legacy document tree tables and converts old native enums to VARCHAR.
     2. Synchronizes missing columns and sets dynamic defaults across multi-year horizon tables.
-    3. Guarantees ON DELETE CASCADE from master_narratives to issp_core, budget_ceilings, etc.
-    4. Ensures the presence of issp_plan_archives table for pre-deletion archival.
-    5. Releases NOT NULL constraints on issp_core.created_by_students and issp_core.outcome_id.
+    3. Harmonizes Information Systems with project_id, proposed_cost, target_year, uacs_object_code, and expenditure_class.
+    4. Harmonizes issp_core with system_id foreign key to establish clean 1-to-1 linkage.
+    5. Guarantees ON DELETE CASCADE from master_narratives to issp_core, budget_ceilings, etc.
+    6. Ensures the presence of issp_plan_archives table for pre-deletion archival.
+    7. Releases NOT NULL constraints on issp_core.created_by_students and issp_core.outcome_id.
     """
     logger.info("Running defensive schema alignment and data sanitization...")
     is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
@@ -845,6 +850,7 @@ def align_database_schemas(engine):
                 "aligns_pcb": f"BOOLEAN DEFAULT {bool_false}",
                 "aligns_others": f"BOOLEAN DEFAULT {bool_false}",
                 "aligns_others_specify": "VARCHAR(255)",
+                "harmonization_criteria": "JSON DEFAULT '{}'",
                 "harmonizes_national_priority": f"BOOLEAN DEFAULT {bool_false}",
                 "harmonizes_resource_optimization": f"BOOLEAN DEFAULT {bool_false}",
                 "harmonizes_pegif": f"BOOLEAN DEFAULT {bool_false}",
@@ -865,11 +871,14 @@ def align_database_schemas(engine):
                 if col_name not in proj_cols:
                     safe_exec(conn, text(f"ALTER TABLE ict_projects ADD COLUMN {col_name} {col_def}"))
 
-        # 5. Patch 'issp_core' table
+            safe_exec(conn, text("UPDATE ict_projects SET harmonization_criteria = '{}' WHERE harmonization_criteria IS NULL;"))
+
+        # 5. Patch 'issp_core' table (Unified Proposals Ledger with system_id linkage)
         if "issp_core" in table_names:
             core_cols_map = {c['name']: str(c['type']).upper() for c in inspector.get_columns('issp_core')}
             columns_to_sync_core = {
                 "project_id": f"{uuid_type}",
+                "system_id": f"{uuid_type}",
                 "needs_assessment_id": f"{uuid_type}",
                 "strategic_category_id": "INTEGER",
                 "item_key": "VARCHAR(100)",
@@ -900,6 +909,42 @@ def align_database_schemas(engine):
                 if col_name not in core_cols_map:
                     safe_exec(conn, text(f"ALTER TABLE issp_core ADD COLUMN {col_name} {col_def}"))
 
+            # Index and foreign key for issp_core.system_id
+            core_indexes = [ix['name'] for ix in inspector.get_indexes('issp_core')]
+            if "ix_issp_core_system_id" not in core_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_issp_core_system_id ON issp_core (system_id)"))
+
+            # Backfill issp_core.system_id from matching information_systems
+            safe_exec(conn, text("""
+                UPDATE issp_core
+                SET system_id = (
+                    SELECT id FROM information_systems
+                    WHERE LOWER(TRIM(information_systems.name)) = LOWER(TRIM(issp_core.item_name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('System Development: ' || TRIM(information_systems.name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('System Enhancement: ' || TRIM(information_systems.name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('Software Development: ' || TRIM(information_systems.name))
+                       OR LOWER(TRIM(issp_core.item_name)) = LOWER('Software Engineering: ' || TRIM(information_systems.name))
+                    LIMIT 1
+                )
+                WHERE system_id IS NULL;
+            """))
+
+            if not is_sqlite:
+                safe_exec(conn, text("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'fk_issp_core_system_id'
+                        ) THEN
+                            ALTER TABLE issp_core 
+                            ADD CONSTRAINT fk_issp_core_system_id 
+                            FOREIGN KEY (system_id) REFERENCES information_systems(id) ON DELETE SET NULL;
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN
+                        NULL;
+                    END $$;
+                """))
+
         # 6. Patch 'existing_inventory' table
         if "existing_inventory" in table_names:
             inv_cols = [c['name'] for c in inspector.get_columns('existing_inventory')]
@@ -925,7 +970,7 @@ def align_database_schemas(engine):
                 if col_name not in inv_cols:
                     safe_exec(conn, text(f"ALTER TABLE existing_inventory ADD COLUMN {col_name} {col_def}"))
 
-        # 7. Patch 'information_systems' table
+        # 7. Patch 'information_systems' table (Part II.C & Part III.D specifications with target_year and UACS accounting)
         if "information_systems" in table_names:
             sys_cols = [c['name'] for c in inspector.get_columns('information_systems')]
             columns_to_sync_sys = {
@@ -933,11 +978,14 @@ def align_database_schemas(engine):
                 "strategic_concern_id": f"{uuid_type}",
                 "department_id": "INTEGER",
                 "needs_assessment_id": f"{uuid_type}",
+                "project_id": f"{uuid_type}",
                 "submission_status": "VARCHAR(50) DEFAULT 'Approved'",
                 "rejection_reason": "TEXT",
                 "name": "VARCHAR(255) DEFAULT ''",
                 "status": "VARCHAR(50) DEFAULT 'Operational'",
                 "classification": "VARCHAR(100) DEFAULT 'Operations - Frontline Service'",
+                "proposed_cost": "NUMERIC(15, 2) DEFAULT 0.00",
+                "is_client_facing": f"BOOLEAN DEFAULT {bool_true}",
                 "is_support_to_operations": f"BOOLEAN DEFAULT {bool_false}",
                 "is_general_administrative": f"BOOLEAN DEFAULT {bool_false}",
                 "is_operations": f"BOOLEAN DEFAULT {bool_true}",
@@ -962,7 +1010,10 @@ def align_database_schemas(engine):
                 "is_deployed_on_shared_platform": f"BOOLEAN DEFAULT {bool_false}",
                 "processes_personal_information": f"BOOLEAN DEFAULT {bool_false}",
                 "has_undergone_pia": f"BOOLEAN DEFAULT {bool_false}",
-                "pia_target_date_text": "VARCHAR(100)"
+                "pia_target_date_text": "VARCHAR(100)",
+                "target_year": "INTEGER",
+                "uacs_object_code": "VARCHAR(150) DEFAULT '50604070 01 - ICT Software (Perpetual CO)'",
+                "expenditure_class": "VARCHAR(100) DEFAULT 'Capital Outlay'"
             }
             for col_name, col_def in columns_to_sync_sys.items():
                 if col_name not in sys_cols:
@@ -977,6 +1028,10 @@ def align_database_schemas(engine):
                 safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_needs_assessment_id ON information_systems (needs_assessment_id)"))
             if "ix_information_systems_submission_status" not in sys_indexes:
                 safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_submission_status ON information_systems (submission_status)"))
+            if "ix_information_systems_project_id" not in sys_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_project_id ON information_systems (project_id)"))
+            if "ix_information_systems_target_year" not in sys_indexes:
+                safe_exec(conn, text("CREATE INDEX IF NOT EXISTS ix_information_systems_target_year ON information_systems (target_year)"))
 
             # Backfill submission_status & link department_id where matching system_owner_office
             safe_exec(conn, text("UPDATE information_systems SET submission_status = 'Approved' WHERE submission_status IS NULL OR submission_status = ''"))
@@ -990,6 +1045,56 @@ def align_database_schemas(engine):
                 WHERE department_id IS NULL 
                   AND system_owner_office IS NOT NULL 
                   AND system_owner_office <> '';
+            """))
+
+            # Backfill information_systems.project_id from existing ict_projects.system_id
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET project_id = (
+                    SELECT id FROM ict_projects
+                    WHERE ict_projects.system_id = information_systems.id
+                    LIMIT 1
+                )
+                WHERE project_id IS NULL;
+            """))
+
+            # Backfill target_year, uacs_object_code, and expenditure_class for existing information_systems
+            if is_sqlite:
+                safe_exec(conn, text(f"""
+                    UPDATE information_systems
+                    SET target_year = CAST(SUBSTR(issp_period, 1, 4) AS INTEGER)
+                    WHERE target_year IS NULL AND issp_period IS NOT NULL AND issp_period LIKE '%-%';
+                """))
+            else:
+                safe_exec(conn, text(f"""
+                    UPDATE information_systems
+                    SET target_year = CAST(SUBSTRING(issp_period FROM 1 FOR 4) AS INTEGER)
+                    WHERE target_year IS NULL AND issp_period IS NOT NULL AND issp_period LIKE '%-%';
+                """))
+
+            safe_exec(conn, text(f"""
+                UPDATE information_systems
+                SET target_year = {start_year}
+                WHERE target_year IS NULL;
+            """))
+
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET uacs_object_code = '50604070 01 - ICT Software (Perpetual CO)'
+                WHERE uacs_object_code IS NULL OR uacs_object_code = '';
+            """))
+
+            safe_exec(conn, text("""
+                UPDATE information_systems
+                SET expenditure_class = 'Capital Outlay'
+                WHERE expenditure_class IS NULL OR expenditure_class = '';
+            """))
+
+            # Synchronize is_client_facing with is_frontline_service
+            safe_exec(conn, text(f"""
+                UPDATE information_systems 
+                SET is_client_facing = is_frontline_service 
+                WHERE is_client_facing IS NULL;
             """))
 
             if not is_sqlite:
@@ -1010,6 +1115,14 @@ def align_database_schemas(engine):
                             ALTER TABLE information_systems 
                             ADD CONSTRAINT fk_info_sys_needs_assessment_id 
                             FOREIGN KEY (needs_assessment_id) REFERENCES needs_assessments(id) ON DELETE SET NULL;
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'fk_info_sys_project_id'
+                        ) THEN
+                            ALTER TABLE information_systems 
+                            ADD CONSTRAINT fk_info_sys_project_id 
+                            FOREIGN KEY (project_id) REFERENCES ict_projects(id) ON DELETE SET NULL;
                         END IF;
                     EXCEPTION WHEN OTHERS THEN
                         NULL;
@@ -1896,7 +2009,7 @@ def bootstrap_metadata(db):
     # -------------------------------------------------------------
     # 8. INFORMATION SYSTEMS (Part II.C & Part III.D)
     # -------------------------------------------------------------
-    logger.info("Seeding Information Systems (Parts II.C & III.D) with multi-classification support...")
+    logger.info("Seeding Information Systems (Parts II.C & III.D) with target year, UACS code & expenditure class...")
 
     canonical_system_names = {
         "Human Resource Management Information System (HRMIS)",
@@ -1950,7 +2063,12 @@ def bootstrap_metadata(db):
             processes_data_from_others=True,
             is_deployed_on_shared_platform=False,
             processes_personal_information=True,
-            has_undergone_pia=True
+            has_undergone_pia=True,
+            proposed_cost=Decimal("0.00"),
+            target_year=start_year,
+            uacs_object_code="50604070 01 - ICT Software (Perpetual CO)",
+            expenditure_class="Capital Outlay",
+            is_client_facing=False
         )
         db.add(hrmis_system)
         db.flush()
@@ -1964,6 +2082,10 @@ def bootstrap_metadata(db):
         hrmis_system.is_operations = False
         hrmis_system.is_frontline_service = False
         hrmis_system.is_non_frontline_service = False
+        hrmis_system.target_year = start_year
+        hrmis_system.uacs_object_code = "50604070 01 - ICT Software (Perpetual CO)"
+        hrmis_system.expenditure_class = "Capital Outlay"
+        hrmis_system.is_client_facing = False
         db.flush()
 
     # 8.2 Part II.C & III.D: Existing System Scheduled for Enhancement (Operations - Frontline)
@@ -2004,7 +2126,12 @@ def bootstrap_metadata(db):
             processes_data_from_others=True,
             is_deployed_on_shared_platform=True,
             processes_personal_information=True,
-            has_undergone_pia=True
+            has_undergone_pia=True,
+            proposed_cost=Decimal("0.00"),
+            target_year=start_year,
+            uacs_object_code="50604070 01 - ICT Software (Perpetual CO)",
+            expenditure_class="Capital Outlay",
+            is_client_facing=True
         )
         db.add(frontline_system)
         db.flush()
@@ -2019,6 +2146,10 @@ def bootstrap_metadata(db):
         frontline_system.is_operations = True
         frontline_system.is_frontline_service = True
         frontline_system.is_non_frontline_service = False
+        frontline_system.target_year = start_year
+        frontline_system.uacs_object_code = "50604070 01 - ICT Software (Perpetual CO)"
+        frontline_system.expenditure_class = "Capital Outlay"
+        frontline_system.is_client_facing = True
         db.flush()
 
     # 8.3 Part II.C: Operational Administrative System (Support to Operations)
@@ -2057,7 +2188,12 @@ def bootstrap_metadata(db):
             processes_data_from_others=True,
             is_deployed_on_shared_platform=True,
             processes_personal_information=True,
-            has_undergone_pia=True
+            has_undergone_pia=True,
+            proposed_cost=Decimal("0.00"),
+            target_year=start_year,
+            uacs_object_code="50604070 01 - ICT Software (Perpetual CO)",
+            expenditure_class="Capital Outlay",
+            is_client_facing=False
         )
         db.add(dms_system)
         db.flush()
@@ -2071,6 +2207,10 @@ def bootstrap_metadata(db):
         dms_system.is_operations = False
         dms_system.is_frontline_service = False
         dms_system.is_non_frontline_service = False
+        dms_system.target_year = start_year
+        dms_system.uacs_object_code = "50604070 01 - ICT Software (Perpetual CO)"
+        dms_system.expenditure_class = "Capital Outlay"
+        dms_system.is_client_facing = False
         db.flush()
 
     # 8.4 Part II.C: Operational System for Strategic Concern 3 (Support to Operations)
@@ -2104,7 +2244,12 @@ def bootstrap_metadata(db):
             system_owner_office="Planning, Policy, and Monitoring Division",
             is_integrated_with_others=False,
             processes_personal_information=False,
-            has_undergone_pia=True
+            has_undergone_pia=True,
+            proposed_cost=Decimal("0.00"),
+            target_year=start_year,
+            uacs_object_code="50604070 01 - ICT Software (Perpetual CO)",
+            expenditure_class="Capital Outlay",
+            is_client_facing=False
         )
         db.add(policy_system)
         db.flush()
@@ -2118,6 +2263,10 @@ def bootstrap_metadata(db):
         policy_system.is_operations = False
         policy_system.is_frontline_service = False
         policy_system.is_non_frontline_service = False
+        policy_system.target_year = start_year
+        policy_system.uacs_object_code = "50604070 01 - ICT Software (Perpetual CO)"
+        policy_system.expenditure_class = "Capital Outlay"
+        policy_system.is_client_facing = False
         db.flush()
 
     # 8.5 Part II.C: Operational System for Strategic Concern 4 (Operations - Non-Frontline)
@@ -2151,7 +2300,12 @@ def bootstrap_metadata(db):
             system_owner_office="Planning, Policy, and Monitoring Division",
             is_integrated_with_others=False,
             processes_personal_information=False,
-            has_undergone_pia=True
+            has_undergone_pia=True,
+            proposed_cost=Decimal("0.00"),
+            target_year=start_year,
+            uacs_object_code="50604070 01 - ICT Software (Perpetual CO)",
+            expenditure_class="Capital Outlay",
+            is_client_facing=False
         )
         db.add(extension_system)
         db.flush()
@@ -2165,6 +2319,10 @@ def bootstrap_metadata(db):
         extension_system.is_operations = True
         extension_system.is_frontline_service = False
         extension_system.is_non_frontline_service = True
+        extension_system.target_year = start_year
+        extension_system.uacs_object_code = "50604070 01 - ICT Software (Perpetual CO)"
+        extension_system.expenditure_class = "Capital Outlay"
+        extension_system.is_client_facing = False
         db.flush()
 
     # -------------------------------------------------------------
@@ -2212,6 +2370,13 @@ def bootstrap_metadata(db):
             aligns_pcb=True,
             aligns_others=False,
             aligns_others_specify=None,
+            harmonization_criteria={
+                "National Prioritization (PDP 2023-2028)": True,
+                "Resource Optimization (GovNet, GovCloud)": True,
+                "PeGIF Standardized APIs & Interoperability": True,
+                "Cross-Agency Collaboration (JMC / MOA)": True,
+                "Scalability and Sustainability (SPAR / PREXC)": True
+            },
             harmonizes_national_priority=True,
             harmonizes_resource_optimization=True,
             harmonizes_pegif=True,
@@ -2236,6 +2401,10 @@ def bootstrap_metadata(db):
         db.add(proj_frontline_modernization)
         db.flush()
 
+    # Link frontline_system.project_id
+    frontline_system.project_id = proj_frontline_modernization.id
+    db.flush()
+
     # 9.2 Cross-Agency ICT Project (Part III.E.2)
     proj_cross_nsw = db.query(IctProject).filter(
         IctProject.issp_period == baseline_period,
@@ -2255,6 +2424,13 @@ def bootstrap_metadata(db):
             aligns_pcb=True,
             aligns_others=False,
             aligns_others_specify=None,
+            harmonization_criteria={
+                "National Prioritization (PDP 2023-2028)": True,
+                "Resource Optimization (GovNet, GovCloud)": True,
+                "PeGIF Standardized APIs & Interoperability": True,
+                "Cross-Agency Collaboration (JMC / MOA)": True,
+                "Scalability and Sustainability (SPAR / PREXC)": True
+            },
             harmonizes_national_priority=True,
             harmonizes_resource_optimization=True,
             harmonizes_pegif=True,
@@ -2300,6 +2476,13 @@ def bootstrap_metadata(db):
             aligns_pcb=True,
             aligns_others=False,
             aligns_others_specify=None,
+            harmonization_criteria={
+                "National Prioritization (PDP 2023-2028)": True,
+                "Resource Optimization (GovNet, GovCloud)": True,
+                "PeGIF Standardized APIs & Interoperability": False,
+                "Cross-Agency Collaboration (JMC / MOA)": False,
+                "Scalability and Sustainability (SPAR / PREXC)": True
+            },
             harmonizes_national_priority=True,
             harmonizes_resource_optimization=True,
             harmonizes_pegif=False,
@@ -2343,6 +2526,13 @@ def bootstrap_metadata(db):
             aligns_pcb=True,
             aligns_others=False,
             aligns_others_specify=None,
+            harmonization_criteria={
+                "National Prioritization (PDP 2023-2028)": True,
+                "Resource Optimization (GovNet, GovCloud)": True,
+                "PeGIF Standardized APIs & Interoperability": True,
+                "Cross-Agency Collaboration (JMC / MOA)": False,
+                "Scalability and Sustainability (SPAR / PREXC)": True
+            },
             harmonizes_national_priority=True,
             harmonizes_resource_optimization=True,
             harmonizes_pegif=True,
@@ -2366,6 +2556,10 @@ def bootstrap_metadata(db):
         )
         db.add(proj_continuing_operations)
         db.flush()
+
+    # Link dms_system.project_id
+    dms_system.project_id = proj_continuing_operations.id
+    db.flush()
 
     # -------------------------------------------------------------
     # 10. PMF METRICS FRAMEWORK (Part III.F)
@@ -2456,7 +2650,7 @@ def bootstrap_metadata(db):
     db.flush()
 
     # -------------------------------------------------------------
-    # 11. PART IV.A DETAILED RESOURCE DEPLOYMENT (ALL BOUND TO PROJECTS)
+    # 11. PART IV.A DETAILED RESOURCE DEPLOYMENT (ALL BOUND TO PROJECTS & SYSTEMS)
     # -------------------------------------------------------------
     logger.info("Seeding Part IV.A Detailed Resource Line Items (Strictly Project-Bound)...")
     canonical_items_config = [
@@ -2465,6 +2659,7 @@ def bootstrap_metadata(db):
             "department_id": ict_dept.id,
             "outcome_id": oo_gas.id,
             "project_id": proj_office_productivity.id,  # Bound to Office Productivity Project
+            "system_id": None,
             "needs_assessment_id": na2.id,
             "strategic_category_id": getattr(strat_cat_instances.get("Office Productivity"), "id", None),
             "category": "Hardware",
@@ -2488,6 +2683,7 @@ def bootstrap_metadata(db):
             "department_id": admin_dept.id,
             "outcome_id": oo_gas.id,
             "project_id": proj_office_productivity.id,  # Bound to Office Productivity Project
+            "system_id": None,
             "needs_assessment_id": None,
             "strategic_category_id": getattr(strat_cat_instances.get("Office Productivity"), "id", None),
             "category": "Subscription",
@@ -2511,6 +2707,7 @@ def bootstrap_metadata(db):
             "department_id": ict_dept.id,
             "outcome_id": oo_frontline.id,
             "project_id": proj_frontline_modernization.id,  # Bound to Internal ICT Project
+            "system_id": frontline_system.id,               # Directly bound to frontline_system
             "needs_assessment_id": na1.id,
             "strategic_category_id": getattr(strat_cat_instances.get("Internal ICT Projects"), "id", None),
             "category": "Software",
@@ -2534,6 +2731,7 @@ def bootstrap_metadata(db):
             "department_id": ict_dept.id,
             "outcome_id": oo_gas.id,
             "project_id": proj_cross_nsw.id,  # Bound to Cross-Agency ICT Project
+            "system_id": frontline_system.id, # Interoperability gateway for frontline services
             "needs_assessment_id": None,
             "strategic_category_id": getattr(strat_cat_instances.get("Cross-Agency ICT Projects"), "id", None),
             "category": "Software",
@@ -2557,6 +2755,7 @@ def bootstrap_metadata(db):
             "department_id": ict_dept.id,
             "outcome_id": oo_gas.id,
             "project_id": proj_continuing_operations.id,  # Bound to Continuing Costs Operations Project
+            "system_id": dms_system.id,                    # Standby hosting for core archives
             "needs_assessment_id": na3.id,
             "strategic_category_id": getattr(strat_cat_instances.get("Continuing Costs/Expenses"), "id", None),
             "category": "Subscription",
@@ -2611,6 +2810,12 @@ def bootstrap_metadata(db):
         leg.is_archived = True
         leg.sync_payload()
 
+    db.flush()
+
+    # Synchronize any Information Systems that carry proposed costs
+    for sys_item in [hrmis_system, frontline_system, dms_system, policy_system, extension_system]:
+        if getattr(sys_item, "proposed_cost", 0) and float(sys_item.proposed_cost) > 0:
+            sync_system_proposal(db, sys_item)
     db.flush()
 
     # -------------------------------------------------------------

@@ -10,6 +10,7 @@
  * - 1-Click Proposal Duplication (duplicateProposal)
  * - Proposed Information Systems & Platform Upgrades (Part III.D Enterprise Applications)
  * - Direct Strategic ICT Project Linkage (project_id) on Proposals and Information Systems
+ * - Multi-Year Horizon Target Implementation Year & UACS Accounting on Information Systems
  * - Pre-Approved Standard Equipment & COTS Software Catalog
  * - Section 8.0 Department Needs Assessment Full Lifecycle (Create, Read, Update, Delete)
  * - Quotation Validity & Canvas Expiration Guards (DBM & COA Procurement Rules)
@@ -75,7 +76,14 @@ function humanizeFieldName(fieldKey) {
     canvas_expiration_date: "Quotation Expiration Date",
     supplier_name: "Supplier Name",
     proposed_cost: "Proposed Development Cost",
-    system_development_status: "System Development Status"
+    target_year: "Target Implementation Year",
+    system_development_status: "System Development Status",
+    created_by_students: "In-House Turnover",
+    is_in_house_turnover: "In-House Turnover",
+    is_expansion: "Expansion Project",
+    office_location: "Deployment Location",
+    frontline_hosting_type: "Frontline Hosting Mode",
+    hosting_mode: "Hosting Mode"
   };
 
   if (specialMap[fieldKey]) {
@@ -101,6 +109,7 @@ async function handleResponse(res, fallbackMessage) {
     // Global 401 Unauthorized Interceptor: Clears session and redirects with return path
     if (res.status === 401 && typeof window !== "undefined") {
       localStorage.removeItem("access_token");
+      localStorage.removeItem("token");
       localStorage.removeItem("user_role");
       localStorage.removeItem("department_id");
       localStorage.removeItem("user_email");
@@ -195,6 +204,7 @@ function sanitizeProposalPayload(payload) {
   // 2. Coerce Empty Strings and "null" literals to real nulls
   const nullableFields = [
     "project_id", 
+    "system_id",
     "needs_assessment_id", 
     "outcome_id", 
     "strategic_category_id", 
@@ -229,7 +239,8 @@ function sanitizeProposalPayload(payload) {
 
 /**
  * Normalizes system proposal payloads for simplified intake (Part III.D).
- * Sanitizes proposed_cost, binds project_id, sets technical fallbacks, and cleans string values.
+ * Sanitizes proposed_cost, target_year, binds project_id, sets technical fallbacks,
+ * and cleans string values for 4-way parity and project rollup.
  *
  * @param {Object} payload - Raw system proposal payload
  * @returns {Object} Sanitized payload
@@ -243,6 +254,11 @@ function sanitizeSystemPayload(payload) {
     sanitized.proposed_cost = isNaN(parsedCost) || parsedCost < 0 ? 0 : parsedCost;
   }
 
+  if (sanitized.target_year !== undefined && sanitized.target_year !== null && sanitized.target_year !== "") {
+    const parsedYear = parseInt(sanitized.target_year, 10);
+    sanitized.target_year = isNaN(parsedYear) ? null : parsedYear;
+  }
+
   const nullableFields = [
     "project_id",
     "needs_assessment_id",
@@ -251,7 +267,10 @@ function sanitizeSystemPayload(payload) {
     "enhancement_details",
     "pia_target_date_text",
     "internal_integrated_systems",
-    "external_integrated_systems"
+    "external_integrated_systems",
+    "target_year",
+    "uacs_object_code",
+    "expenditure_class"
   ];
   nullableFields.forEach(field => {
     if (sanitized[field] === "" || sanitized[field] === "null" || sanitized[field] === "undefined") {
@@ -987,9 +1006,9 @@ export async function getDeptSystemDetail(systemId, customToken = null) {
 /**
  * Drafts a new Information System proposal or platform enhancement (Part III.D).
  * Automatically sanitizes inputs, binds project_id, enforces non-negative proposed costs,
- * and links to Section 8.0 Needs Assessments without requiring technical architecture jargon.
+ * preserves target_year and UACS accounting classifications, and links to Section 8.0 Needs Assessments.
  *
- * @param {Object} payload - InformationSystemCreate schema (including project_id)
+ * @param {Object} payload - InformationSystemCreate schema (including target_year, uacs_object_code, expenditure_class, project_id)
  * @param {string|null} customToken - Optional override token
  */
 export async function createProposedSystem(payload, customToken = null) {
@@ -1004,9 +1023,10 @@ export async function createProposedSystem(payload, customToken = null) {
 
 /**
  * Updates an existing Information System proposal in Draft or Returned status.
+ * Preserves target_year, uacs_object_code, expenditure_class, and project_id.
  *
  * @param {string} systemId - UUID of the proposed system
- * @param {Object} payload - InformationSystemUpdate schema (including project_id)
+ * @param {Object} payload - InformationSystemUpdate schema (including target_year, uacs_object_code, expenditure_class, project_id)
  * @param {string|null} customToken - Optional override token
  */
 export async function updateProposedSystem(systemId, payload, customToken = null) {

@@ -8,9 +8,12 @@ Singularity Relational Core:
 - Master Governance Root (MasterNarrative: Cover Sheet, Scope, DRBCP & Vault)
 - Permanent Historical Plan Archives (IsspPlanArchive: Pre-Deletion Preservation)
 - Program Outcomes (Part I.A.4) -> Strategic Concerns (Part II.A)
-- Information Systems Register (Parts II.C & III.D) with Multi-Classification
-- ICT Projects Portfolio (Part III.E) with Dynamic Harmonization Framework
+- Information Systems Register (Parts II.C & III.D) with Multi-Classification,
+  Target Year, and UACS Classification
+- ICT Projects Portfolio (Part III.E) with Dynamic Harmonization Framework &
+  Direct System Cost Aggregation
 - Unified Proposals Ledger (Part IV.A) with Dynamic 3-Year Compounded Targets
+  and Bi-directional Information System Linkage
 - Annex 1 Master Inventory (Equipment & Software) with Anti-Loop EOL Tracking
 - Annex 2 Disaster Recovery and Business Continuity Plan (DRBCP)
 =============================================================================
@@ -1149,7 +1152,8 @@ class InformationSystem(Base):
     following official DICT v.2026 specifications.
     Supports independent checkboxes for multi-classification (Support, Admin, Operations).
     Supports department proposals, needs assessment linkage, proposed budget estimation,
-    direct linkage to an ICT Project (Part III.E), and administrative review states.
+    direct linkage to an ICT Project (Part III.E), target implementation year,
+    UACS accounting codes, and administrative review states.
     """
     __tablename__ = "information_systems"
 
@@ -1202,6 +1206,21 @@ class InformationSystem(Base):
         Boolean, default=True, server_default=text("true"), nullable=False
     )
 
+    # Target Implementation Year, UACS Object Code & Expenditure Class for 4-Way Parity Integration
+    target_year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    uacs_object_code: Mapped[Optional[str]] = mapped_column(
+        String(150), 
+        default="50604070 01 - ICT Software (Perpetual CO)", 
+        server_default=text("'50604070 01 - ICT Software (Perpetual CO)'"), 
+        nullable=True
+    )
+    expenditure_class: Mapped[Optional[str]] = mapped_column(
+        String(100), 
+        default="Capital Outlay", 
+        server_default=text("'Capital Outlay'"), 
+        nullable=True
+    )
+
     # Independent Multi-Classification Checkboxes
     is_support_to_operations: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     is_general_administrative: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
@@ -1222,7 +1241,7 @@ class InformationSystem(Base):
     data_storage_type: Mapped[str] = mapped_column(String(200), default="Cloud / On-premise Storage", server_default=text("'Cloud / On-premise Storage'"), nullable=False)
 
     internal_users: Mapped[str] = mapped_column(Text, default="Department Personnel", server_default=text("'Department Personnel'"), nullable=False)
-    external_users: Mapped[str] = mapped_column(Text, default="General Public", server_default=text("'General Public'"), nullable=False)
+    external_users: Mapped[Text] = mapped_column(Text, default="General Public", server_default=text("'General Public'"), nullable=False)
     system_owner_office: Mapped[str] = mapped_column(String(200), default="Department Office", server_default=text("'Department Office'"), nullable=False)
 
     is_integrated_with_others: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -1242,6 +1261,12 @@ class InformationSystem(Base):
     needs_assessment: Mapped[Optional["NeedsAssessment"]] = relationship("NeedsAssessment", back_populates="proposed_systems")
     projects: Mapped[List["IctProject"]] = relationship("IctProject", foreign_keys="IctProject.system_id", back_populates="information_system")
     project_parent: Mapped[Optional["IctProject"]] = relationship("IctProject", foreign_keys=[project_id], back_populates="linked_systems")
+    proposal_rel: Mapped[Optional["Proposal"]] = relationship(
+        "Proposal", 
+        foreign_keys="Proposal.system_id", 
+        back_populates="system_rel", 
+        uselist=False
+    )
     bia_record: Mapped[Optional["BusinessImpactAnalysis"]] = relationship("BusinessImpactAnalysis", back_populates="system", uselist=False)
 
     @property
@@ -1353,21 +1378,51 @@ class IctProject(Base):
     def computed_total_project_cost(self) -> Decimal:
         """
         Dynamically computes the exact total project cost from active, approved 
-        child line items in Part IV.A for this project in the active planning cycle.
+        child line items in Part IV.A and linked Information Systems for this project 
+        in the active planning cycle.
         Guarantees exact mathematical parity with Tables B.1, B.2, B.3, and B.4.
         """
         try:
             sess = object_session(self)
             if sess is not None:
+                # 1. Sum all approved proposals in issp_core linked to this project
                 proposal_sum = sess.query(func.sum(Proposal.total_cost)).filter(
                     Proposal.project_id == self.id,
                     Proposal.issp_period == self.issp_period,
                     func.lower(cast(Proposal.status, String)) == "approved",
                     or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
                 ).scalar() or Decimal("0.00")
-                return Decimal(str(proposal_sum)).quantize(Decimal("0.01"))
+
+                # 2. Add approved Information Systems whose proposed_cost is not yet synced in a Proposal row
+                accounted_system_ids = {
+                    str(r[0]) for r in sess.query(Proposal.system_id).filter(
+                        Proposal.project_id == self.id,
+                        Proposal.issp_period == self.issp_period,
+                        Proposal.system_id.isnot(None),
+                        func.lower(cast(Proposal.status, String)) == "approved",
+                        or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
+                    ).all() if r[0]
+                }
+
+                unaccounted_systems = sess.query(InformationSystem).filter(
+                    InformationSystem.issp_period == self.issp_period,
+                    or_(
+                        InformationSystem.project_id == self.id,
+                        InformationSystem.id == self.system_id
+                    ),
+                    func.lower(cast(InformationSystem.submission_status, String)) == "approved",
+                    InformationSystem.proposed_cost > 0
+                ).all()
+
+                extra_cost = Decimal("0.00")
+                for s in unaccounted_systems:
+                    if str(s.id) not in accounted_system_ids:
+                        extra_cost += Decimal(str(s.proposed_cost or 0))
+
+                return (Decimal(str(proposal_sum)) + extra_cost).quantize(Decimal("0.01"))
             else:
                 total = Decimal("0.00")
+                accounted_sids = set()
                 for itm in (getattr(self, "resource_items", []) or []):
                     if (
                         str(getattr(itm, "project_id", "")) == str(self.id)
@@ -1376,6 +1431,21 @@ class IctProject(Base):
                     ):
                         tc = getattr(itm, "total_cost", Decimal("0.00")) or Decimal("0.00")
                         total += Decimal(str(tc))
+                        if getattr(itm, "system_id", None):
+                            accounted_sids.add(str(itm.system_id))
+
+                all_sys = list(getattr(self, "linked_systems", []) or [])
+                if getattr(self, "information_system", None) and self.information_system not in all_sys:
+                    all_sys.append(self.information_system)
+
+                for s in all_sys:
+                    if (
+                        str(getattr(s, "submission_status", "Approved")).lower() == "approved"
+                        and str(s.id) not in accounted_sids
+                    ):
+                        cost_val = getattr(s, "proposed_cost", Decimal("0.00")) or Decimal("0.00")
+                        total += Decimal(str(cost_val))
+
                 return total.quantize(Decimal("0.01"))
         except Exception:
             return Decimal("0.00")
@@ -1447,6 +1517,7 @@ class Proposal(Base):
     outcome_id is nullable to allow department users to submit raw technical proposals.
     created_by_students and is_in_house_turnover are explicitly mapped columns to prevent
     database NotNullViolation constraints while remaining fully synchronized.
+    Now directly relates to InformationSystem via system_id foreign key.
     """
     __tablename__ = "issp_core"
 
@@ -1473,6 +1544,12 @@ class Proposal(Base):
     project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID,
         ForeignKey("ict_projects.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
+    system_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID,
+        ForeignKey("information_systems.id", ondelete="SET NULL"),
         nullable=True,
         index=True
     )
@@ -1557,6 +1634,11 @@ class Proposal(Base):
     department: Mapped[Department] = relationship("Department", back_populates="proposals")
     outcome: Mapped[Optional[OrganizationalOutcome]] = relationship("OrganizationalOutcome", back_populates="proposals")
     project_rel: Mapped[Optional["IctProject"]] = relationship("IctProject", back_populates="resource_items")
+    system_rel: Mapped[Optional["InformationSystem"]] = relationship(
+        "InformationSystem",
+        foreign_keys=[system_id],
+        back_populates="proposal_rel"
+    )
     needs_assessment: Mapped[Optional["NeedsAssessment"]] = relationship("NeedsAssessment", back_populates="proposals")
     master_narrative: Mapped[Optional["MasterNarrative"]] = relationship("MasterNarrative", back_populates="proposals")
     strategic_category_rel: Mapped[Optional["StrategicCategory"]] = relationship("StrategicCategory", back_populates="proposals")
@@ -1614,6 +1696,8 @@ class Proposal(Base):
         self.payload["is_expansion"] = self.is_expansion
         self.payload["uacs_object_code"] = self.uacs_object_code
         self.payload["expenditure_class"] = self.expenditure_class
+        if self.system_id:
+            self.payload["system_id"] = str(self.system_id)
 
 
 ResourceRequirementItem = Proposal
@@ -2019,6 +2103,7 @@ def sync_information_system_classification(mapper, connection, target: Informati
     Synchronizes the classification display string with the independent multi-classification checkboxes.
     Guarantees that at least one classification is selected (defaults to Operations if none).
     Ensures submission_status has a safe default and aligns is_client_facing with is_frontline_service.
+    Guarantees target_year, uacs_object_code, and expenditure_class have clean defaults.
     """
     if not target.is_support_to_operations and not target.is_general_administrative and not target.is_operations:
         target.is_operations = True
@@ -2053,6 +2138,23 @@ def sync_information_system_classification(mapper, connection, target: Informati
         target.is_client_facing = bool(target.is_frontline_service)
     elif target.is_frontline_service is None and target.is_client_facing is not None:
         target.is_frontline_service = bool(target.is_client_facing)
+
+    # Defensive defaults for target_year, uacs_object_code, and expenditure_class
+    if target.target_year is None and target.issp_period and "-" in target.issp_period:
+        try:
+            target.target_year = int(target.issp_period.split("-")[0].strip())
+        except Exception:
+            pass
+
+    if not getattr(target, "uacs_object_code", None):
+        cost_val = Decimal(str(target.proposed_cost or 0))
+        target.uacs_object_code = (
+            "50604070 01 - ICT Software (Perpetual CO)" 
+            if cost_val >= Decimal("50000.00") 
+            else "50211030 00 - Consulting/Outsourced Development (MOOE)"
+        )
+    if not getattr(target, "expenditure_class", None):
+        target.expenditure_class = "Capital Outlay" if "(CO)" in (target.uacs_object_code or "") else "Maintenance and Other Operating Expenses"
 
 
 @event.listens_for(IctProject, 'before_insert')

@@ -175,7 +175,8 @@ from app.utils.helpers import (
     get_governance_policy,
     get_adjusted_unit_cost_for_year,
     sanitize_for_json,
-    get_default_dynamic_cycle
+    get_default_dynamic_cycle,
+    sync_system_proposal
 )
 
 logger = logging.getLogger(__name__)
@@ -260,6 +261,9 @@ class SystemApprovalPayload(BaseModel):
     status: str = Field(default="For Development", description="Operational | For Development | For Enhancement")
     action: str = Field(default="APPROVE", description="APPROVE | RETURN")
     rejection_reason: Optional[str] = None
+    target_year: Optional[int] = None
+    uacs_object_code: Optional[str] = None
+    expenditure_class: Optional[str] = None
 
 
 class ProjectLinksPayload(BaseModel):
@@ -2210,6 +2214,8 @@ def create_information_system(
         **dumped
     )
     db.add(db_system)
+    db.flush()
+    sync_system_proposal(db, db_system)
     db.commit()
     db.refresh(db_system)
 
@@ -2264,6 +2270,8 @@ def update_information_system(
     if "hosting_type" in update_data and "frontline_hosting_type" not in update_data:
         db_system.frontline_hosting_type = update_data["hosting_type"] or "Online"
 
+    db.flush()
+    sync_system_proposal(db, db_system)
     db.commit()
     db.refresh(db_system)
 
@@ -2330,6 +2338,13 @@ def review_and_classify_system(
     system.status = payload.status
     system.rejection_reason = None
 
+    if payload.target_year:
+        system.target_year = payload.target_year
+    if payload.uacs_object_code:
+        system.uacs_object_code = payload.uacs_object_code
+    if payload.expenditure_class:
+        system.expenditure_class = payload.expenditure_class
+
     if payload.strategic_concern_id:
         sc_val = str(payload.strategic_concern_id).strip()
         if sc_val and sc_val.lower() not in ("none", "null", ""):
@@ -2363,108 +2378,9 @@ def review_and_classify_system(
     if target_project:
         target_project.system_id = system.id
         system.project_id = target_project.id
-        strat_cat_name = str(getattr(target_project.project_category, "value", target_project.project_category) or "Internal ICT Projects")
-        fund_source_val = str(getattr(target_project.funding_source, "value", target_project.funding_source) or "General Appropriations Act (GAA)")
-    else:
-        strat_cat_name = "Internal ICT Projects"
-        fund_source_val = "General Appropriations Act (GAA)"
 
-    sc_obj = db.query(StrategicCategory).filter(
-        func.lower(StrategicCategory.name) == func.lower(strat_cat_name)
-    ).first()
-    strat_cat_id = sc_obj.id if sc_obj else None
-
-    # Resolve Target Program Outcome
-    target_outcome_id = None
-    if system.strategic_concern_id:
-        concern = db.query(StrategicConcern).filter(StrategicConcern.id == system.strategic_concern_id).first()
-        if concern and concern.outcome_id:
-            target_outcome_id = concern.outcome_id
-    
-    if not target_outcome_id:
-        default_outcome = db.query(OrganizationalOutcome).filter(
-            OrganizationalOutcome.issp_period == system.issp_period
-        ).first()
-        if default_outcome:
-            target_outcome_id = default_outcome.id
-
-    # Update or Bind matching Proposal line item in Part IV.A
-    linked_props = db.query(Proposal).filter(
-        Proposal.issp_period == system.issp_period,
-        or_(
-            func.lower(Proposal.item_name) == func.lower(f"Software Engineering: {system.name}"),
-            func.lower(Proposal.item_name) == func.lower(f"Software Development: {system.name}"),
-            func.lower(Proposal.item_name) == func.lower(f"Information System Outlay: {system.name}"),
-            func.lower(Proposal.item_name) == func.lower(system.name),
-            and_(
-                Proposal.needs_assessment_id.isnot(None),
-                Proposal.needs_assessment_id == system.needs_assessment_id
-            ) if system.needs_assessment_id else False
-        )
-    ).all()
-
-    proposed_cost = getattr(system, "proposed_cost", Decimal("0.00")) or Decimal("0.00")
-
-    for p in linked_props:
-        if proj_uuid:
-            p.project_id = proj_uuid
-        p.strategic_category = strat_cat_name
-        p.strategic_category_id = strat_cat_id or p.strategic_category_id
-        p.fund_source = fund_source_val
-        if proposed_cost > Decimal("0.00") and p.unit_cost != proposed_cost:
-            p.unit_cost = proposed_cost
-            p.total_cost = proposed_cost
-        if not p.outcome_id and target_outcome_id:
-            p.outcome_id = target_outcome_id
-        p.status = "Approved"
-
-    if not linked_props and proposed_cost > Decimal("0.00"):
-        start_yr = str(system.issp_period.split("-")[0]) if "-" in system.issp_period else "2026"
-        target_dept_id = system.department_id or 1
-        dept = db.query(Department).filter(Department.id == target_dept_id).first()
-        automated_office = dept.name if dept else (system.system_owner_office or "Central Office")
-
-        uacs_code, exp_class = classify_uacs_and_expenditure(
-            item_name=f"Software Development: {system.name}",
-            unit_cost=proposed_cost,
-            strategic_category=strat_cat_name,
-            category="Software",
-            created_by_students=False,
-            db=db
-        )
-        if not proj_uuid:
-            matched_proj = db.query(IctProject).filter(
-                IctProject.issp_period == system.issp_period,
-                func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
-            ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
-            if matched_proj:
-                proj_uuid = matched_proj.id
-                strat_cat_name = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
-                fund_source_val = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
-        new_prop = Proposal(
-            department_id=target_dept_id,
-            issp_period=system.issp_period,
-            outcome_id=target_outcome_id,
-            project_id=proj_uuid,
-            needs_assessment_id=system.needs_assessment_id,
-            strategic_category_id=strat_cat_id,
-            category="Software",
-            strategic_category=strat_cat_name,
-            office_location=automated_office,
-            fund_source=fund_source_val,
-            uacs_object_code=uacs_code,
-            expenditure_class=exp_class,
-            status="Approved",
-            item_name=f"Software Development: {system.name}",
-            unit_cost=proposed_cost,
-            yearly_quantities={start_yr: 1, "Year 1": 1},
-            total_qty=1,
-            total_cost=proposed_cost,
-            justification=f"Approved development and implementation outlay for {system.name}.",
-            system_development_status=system.status,
-            target_office_automated=automated_office
-        )
-        db.add(new_prop)
+    # Synchronize the system proposal to Part IV.A
+    sync_system_proposal(db, system)
 
     log_audit_event(
         db=db,
@@ -2521,6 +2437,9 @@ def delete_information_system(
 
     db.query(BusinessImpactAnalysis).filter(BusinessImpactAnalysis.system_id == system_id).delete(synchronize_session=False)
 
+    # Also clean up linked proposal
+    db.query(Proposal).filter(Proposal.system_id == system_id).delete(synchronize_session=False)
+
     db.delete(db_system)
     db.commit()
     return {"status": "success", "message": "Information System removed from registry."}
@@ -2559,9 +2478,31 @@ def get_ict_projects(
         for proj in projects:
             pid_str = str(proj.id)
 
+            linked_sys_list = []
+            all_systems = list(proj.linked_systems or [])
+            if proj.information_system and proj.information_system not in all_systems:
+                all_systems.append(proj.information_system)
+
+            linked_sys_ids = set()
+            for s in all_systems:
+                linked_sys_ids.add(str(s.id).lower())
+                linked_sys_list.append({
+                    "id": str(s.id),
+                    "name": s.name,
+                    "status": str(getattr(s.status, "value", s.status) or "Operational"),
+                    "proposed_cost": float(s.proposed_cost or 0),
+                    "target_year": getattr(s, "target_year", None),
+                    "uacs_object_code": getattr(s, "uacs_object_code", None) or "50604070 01 - ICT Software (Perpetual CO)",
+                    "expenditure_class": getattr(s, "expenditure_class", None) or "Capital Outlay",
+                    "classification": str(getattr(s.classification, "value", s.classification) or "")
+                })
+
             linked_items = []
             for item in proj.resource_items:
                 if not getattr(item, "is_archived", False):
+                    # Omit proposal if it belongs to an already rendered system to prevent duplicate table rows
+                    if item.system_id and str(item.system_id).lower() in linked_sys_ids:
+                        continue
                     linked_items.append({
                         "id": str(item.id),
                         "item_name": item.item_name,
@@ -2575,20 +2516,6 @@ def get_ict_projects(
                         "status": str(getattr(item.status, "value", item.status) or "Draft"),
                         "office_location": item.target_office_automated or item.office_location or "Central Office"
                     })
-
-            linked_sys_list = []
-            all_systems = list(proj.linked_systems or [])
-            if proj.information_system and proj.information_system not in all_systems:
-                all_systems.append(proj.information_system)
-
-            for s in all_systems:
-                linked_sys_list.append({
-                    "id": str(s.id),
-                    "name": s.name,
-                    "status": str(getattr(s.status, "value", s.status) or "Operational"),
-                    "proposed_cost": float(s.proposed_cost or 0),
-                    "classification": str(getattr(s.classification, "value", s.classification) or "")
-                })
 
             total_project_cost = float(proj.computed_total_project_cost)
 
@@ -2877,6 +2804,8 @@ def update_project_links(
                 s.project_id = None
                 if project.system_id and str(project.system_id).lower() == str(s.id).lower():
                     project.system_id = None
+                # Unlink synchronized proposal
+                sync_system_proposal(db, s)
 
         for sid_str in s_uuids_str:
             sys_obj = db.query(InformationSystem).filter(
@@ -2884,6 +2813,8 @@ def update_project_links(
             ).first()
             if sys_obj:
                 sys_obj.project_id = project.id
+                # Ensure synchronized proposal is created/updated under this project!
+                sync_system_proposal(db, sys_obj)
 
         if s_uuids_str:
             first_sys = db.query(InformationSystem).filter(
@@ -4657,10 +4588,10 @@ def get_task_status(task_id: str, admin: dict = Depends(require_admin)):
                     "error": info.get("error", "Unknown compilation error.")
                 }
             return {
-                "state": state,
-                "progress_percent": progress,
-                "current_step_message": status_msg
-            }
+                        "state": state,
+                        "progress_percent": progress,
+                        "current_step_message": status_msg
+                    }
 
     # 2. Fallback to Celery AsyncResult if available
     try:
