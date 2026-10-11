@@ -481,7 +481,7 @@ class DynamicChecklistCriteria(Base):
     __tablename__ = "dynamic_checklist_criteria"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    checklist_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # EGOV_PROGRAM | CYBERSECURITY | HARMONIZATION_FRAMEWORK
+    checklist_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     domain_or_category: Mapped[str] = mapped_column(String(100), nullable=False)
     criteria_name: Mapped[str] = mapped_column(String(200), nullable=False)
     is_mandatory: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"), nullable=False)
@@ -697,7 +697,7 @@ class MasterNarrative(Base):
     dict_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     bagong_pilipinas_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Signatory Information (Uses generic defaults, preserving user-edited personal names)
+    # Signatory Information
     signatory_prepared_by: Mapped[str] = mapped_column(String(200), default="Chief Information Officer", nullable=False)
     preparer_position: Mapped[Optional[str]] = mapped_column(String(200), default="Chief Information Officer", nullable=True)
     cio_organizational_unit: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -738,9 +738,9 @@ class MasterNarrative(Base):
     authoring_cycle_duration: Mapped[Optional[int]] = mapped_column(Integer, default=3, nullable=True)
 
     # Official Primary Schematics
-    network_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # Part II.B.1 Existing LAN/WAN
-    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)    # Part III.A.1 Proposed LAN/WAN
-    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # Part III.B Enterprise Architecture
+    network_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     existing_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     proposed_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -924,7 +924,6 @@ class MasterNarrative(Base):
     def website_url(self, val: Optional[str]) -> None:
         self.agency_website_url = val
 
-    # Case-insensitive helper properties for cover page scope selection
     @property
     def is_department_wide_scope(self) -> bool:
         sc = str(self.scope_choice or "").strip().lower().replace("_", "-")
@@ -1151,7 +1150,6 @@ class InformationSystem(Base):
         nullable=True, 
         index=True
     )
-    # Direct bidirectional linkage to major ICT Project (Part III.E)
     project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID,
         ForeignKey("ict_projects.id", ondelete="SET NULL"),
@@ -1164,14 +1162,13 @@ class InformationSystem(Base):
         server_default=text("'Approved'"), 
         nullable=False, 
         index=True
-    )  # "Draft" | "Submitted" | "Approved" | "Returned"
+    )
     rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="Operational", nullable=False)  # Operational | For Development | For Enhancement
+    status: Mapped[str] = mapped_column(String(50), default="Operational", nullable=False)
     classification: Mapped[Optional[str]] = mapped_column(String(200), default="Operations - Frontline Service", nullable=True)
 
-    # Simplified Department-Facing Cost Proposal
     proposed_cost: Mapped[Decimal] = mapped_column(
         Numeric(15, 2), default=Decimal("0.00"), server_default=text("0.00"), nullable=False
     )
@@ -1179,21 +1176,20 @@ class InformationSystem(Base):
         Boolean, default=True, server_default=text("true"), nullable=False
     )
 
-    # Independent Multi-Classification Checkboxes (DICT Template Part II.C & Part III.D)
+    # Independent Multi-Classification Checkboxes
     is_support_to_operations: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     is_general_administrative: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     is_operations: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"), nullable=False)
 
     # Subordinated Frontline details under Operations
     is_frontline_service: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    frontline_hosting_type: Mapped[str] = mapped_column(String(50), default="Online", nullable=False)  # Online | On-premise | Hybrid
+    frontline_hosting_type: Mapped[str] = mapped_column(String(50), default="Online", nullable=False)
     online_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_non_frontline_service: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     description_and_purpose: Mapped[str] = mapped_column(Text, nullable=False)
-    enhancement_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Mandated for "For Enhancement"
+    enhancement_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    # Technical fields with sensible defaults (configured/assigned by Admin)
     development_strategy: Mapped[str] = mapped_column(String(100), default="Outsourced", server_default=text("'Outsourced'"), nullable=False)
     development_platform: Mapped[str] = mapped_column(String(200), default="Web-Based Architecture", server_default=text("'Web-Based Architecture'"), nullable=False)
     database_name: Mapped[str] = mapped_column(String(200), default="AppDatabase", server_default=text("'AppDatabase'"), nullable=False)
@@ -1203,7 +1199,6 @@ class InformationSystem(Base):
     external_users: Mapped[str] = mapped_column(Text, default="General Public", server_default=text("'General Public'"), nullable=False)
     system_owner_office: Mapped[str] = mapped_column(String(200), default="Department Office", server_default=text("'Department Office'"), nullable=False)
 
-    # Interoperability Capabilities
     is_integrated_with_others: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     internal_integrated_systems: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     external_integrated_systems: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -1211,7 +1206,6 @@ class InformationSystem(Base):
     processes_data_from_others: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_deployed_on_shared_platform: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # Data Privacy Act (PIA) Compliance
     processes_personal_information: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     has_undergone_pia: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     pia_target_date_text: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
@@ -1332,81 +1326,31 @@ class IctProject(Base):
     @property
     def computed_total_project_cost(self) -> Decimal:
         """
-        Dynamically computes the exact total project cost from active child line items
-        and linked systems. 
-        Guarantees that unlinked proposals without an assigned project_id are strictly excluded.
+        Dynamically computes the exact total project cost from active, approved 
+        child line items in Part IV.A for this project in the active planning cycle.
+        Guarantees exact mathematical parity with Tables B.1, B.2, B.3, and B.4.
         """
         try:
             sess = object_session(self)
-            
-            # If bound to an active database session, execute a direct database query
             if sess is not None:
-                # 1. Sum approved proposals explicitly bound to this project_id
                 proposal_sum = sess.query(func.sum(Proposal.total_cost)).filter(
                     Proposal.project_id == self.id,
-                    or_(Proposal.is_archived == False, Proposal.is_archived.is_(None)),
-                    func.lower(cast(Proposal.status, String)).in_(["approved", "submitted"])
-                ).scalar() or Decimal("0.00")
-
-                total = Decimal(str(proposal_sum))
-
-                # 2. Add proposed_cost of approved Information Systems linked to this project
-                # ONLY if their name is not already budgeted as an approved proposal item
-                approved_proposals = sess.query(Proposal.item_name).filter(
-                    Proposal.project_id == self.id,
+                    Proposal.issp_period == self.issp_period,
+                    func.lower(cast(Proposal.status, String)) == "approved",
                     or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-                ).all()
-                covered_names = {str(r[0] or "").lower().strip() for r in approved_proposals}
-
-                linked_systems = sess.query(InformationSystem).filter(
-                    or_(
-                        InformationSystem.project_id == self.id,
-                        InformationSystem.id == self.system_id
-                    ),
-                    InformationSystem.proposed_cost > Decimal("0.00"),
-                    func.lower(cast(InformationSystem.status, String)) != "operational"
-                ).all()
-
-                for s in linked_systems:
-                    s_name = str(s.name or "").lower().strip()
-                    if not any(s_name in c or c in s_name for c in covered_names):
-                        total += Decimal(str(s.proposed_cost or 0))
-
-                return total.quantize(Decimal("0.01"))
-
-            # Fallback in-memory evaluation (only count items with matching project_id)
-            total = Decimal("0.00")
-            items = getattr(self, "resource_items", None) or []
-            item_names_seen = set()
-            for item in items:
-                if getattr(item, "project_id", None) != self.id:
-                    continue
-                if getattr(item, "is_archived", False):
-                    continue
-                status_str = str(getattr(item, "status", "")).lower().strip()
-                if status_str in ["approved", "submitted"]:
-                    tc = getattr(item, "total_cost", None)
-                    if tc is not None and Decimal(str(tc)) > Decimal("0.00"):
+                ).scalar() or Decimal("0.00")
+                return Decimal(str(proposal_sum)).quantize(Decimal("0.01"))
+            else:
+                total = Decimal("0.00")
+                for itm in (getattr(self, "resource_items", []) or []):
+                    if (
+                        str(getattr(itm, "project_id", "")) == str(self.id)
+                        and not getattr(itm, "is_archived", False)
+                        and str(getattr(itm, "status", "")).lower() == "approved"
+                    ):
+                        tc = getattr(itm, "total_cost", Decimal("0.00")) or Decimal("0.00")
                         total += Decimal(str(tc))
-                    elif getattr(item, "unit_cost", None) and getattr(item, "total_qty", None):
-                        total += Decimal(str(item.unit_cost)) * Decimal(str(item.total_qty))
-                    item_names_seen.add(str(item.item_name or "").lower().strip())
-
-            all_systems = list(getattr(self, "linked_systems", []) or [])
-            if getattr(self, "information_system", None):
-                if self.information_system not in all_systems:
-                    all_systems.append(self.information_system)
-
-            for s in all_systems:
-                s_name = str(s.name or "").lower().strip()
-                s_status = str(getattr(s.status, "value", s.status) or "").lower()
-                if s_status != "operational":
-                    has_matching = any(s_name in iname or iname in s_name for iname in item_names_seen)
-                    if not has_matching:
-                        pc = getattr(s, "proposed_cost", Decimal("0.00")) or Decimal("0.00")
-                        total += Decimal(str(pc))
-
-            return total.quantize(Decimal("0.01"))
+                return total.quantize(Decimal("0.01"))
         except Exception:
             return Decimal("0.00")
 
@@ -1493,7 +1437,7 @@ class Proposal(Base):
         index=True
     )
     
-    # Provenance Linkages (outcome_id is nullable on initial submission by department)
+    # Provenance Linkages
     outcome_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey("organizational_outcomes.id", ondelete="SET NULL"), 
@@ -1534,7 +1478,6 @@ class Proposal(Base):
     item_key: Mapped[Optional[str]] = mapped_column(String(100), default="other", nullable=True)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    # Primary JSON Source of Truth for Physical Targets (Supports 1..N Years Dynamically)
     yearly_quantities: Mapped[Dict[str, int]] = mapped_column(
         ResilientMutableDict.as_mutable(JSON), 
         default=dict, 
@@ -1581,7 +1524,6 @@ class Proposal(Base):
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
-    # Archive tier status metadata for document vault
     s3_storage_class: Mapped[str] = mapped_column(String(50), default="STANDARD", nullable=False)
     is_restoring: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
@@ -1596,7 +1538,6 @@ class Proposal(Base):
 
     @property
     def archive_storage_tier(self) -> str:
-        """Sanitized property alias for official document vault storage tier."""
         return self.s3_storage_class
 
     @property
@@ -1967,7 +1908,6 @@ def enforce_master_narrative_integrity(mapper, connection, target: MasterNarrati
     if not target.agency_name:
         target.agency_name = settings.DEFAULT_AGENCY_NAME
 
-    # Respect user inputs without reverting to hardcoded personal names
     cio_clean = (target.signatory_prepared_by or "").strip()
     if not cio_clean:
         target.signatory_prepared_by = target.preparer_position or "Chief Information Officer"
@@ -1998,7 +1938,6 @@ def enforce_master_narrative_integrity(mapper, connection, target: MasterNarrati
     if target.is_amendment is None: target.is_amendment = False
     if target.is_archived is None: target.is_archived = False
 
-    # Normalize scope_choice to canonical format for exact cover page matching
     if target.scope_choice:
         sc_clean = str(target.scope_choice).strip().lower().replace("_", "-")
         if sc_clean in ("department-wide", "department", "dept-wide"):
@@ -2058,7 +1997,6 @@ def sync_information_system_classification(mapper, connection, target: Informati
     if not target.is_support_to_operations and not target.is_general_administrative and not target.is_operations:
         target.is_operations = True
 
-    # If Operations is selected without frontline/non-frontline flags, resolve appropriately
     if target.is_operations and not target.is_frontline_service and not target.is_non_frontline_service:
         if target.is_support_to_operations or target.is_general_administrative:
             target.is_operations = False
@@ -2104,7 +2042,6 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
     start_y = target.duration_start_year or 2028
     end_y = target.duration_end_year or (start_y + 2)
 
-    # 1. Deliverables Synchronization
     if not target.annual_deliverables:
         if target.year_1_deliverables:
             target.annual_deliverables["Year 1"] = target.year_1_deliverables
@@ -2123,7 +2060,6 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
     if "Year 3" in target.annual_deliverables or str(end_y) in target.annual_deliverables:
         target.year_3_deliverables = target.annual_deliverables.get("Year 3") or target.annual_deliverables.get(str(end_y)) or ""
 
-    # 2. Harmonization Framework Synchronization
     if target.harmonization_criteria is None or not isinstance(target.harmonization_criteria, dict):
         target.harmonization_criteria = {
             "National Prioritization (PDP 2023-2028)": bool(target.harmonizes_national_priority),
@@ -2133,7 +2069,6 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
             "Scalability and Sustainability (SPAR / PREXC)": bool(target.harmonizes_scalability)
         }
     else:
-        # Reflect legacy booleans from JSON map if updated
         hc = target.harmonization_criteria
         for k, v in hc.items():
             k_lower = k.lower()
@@ -2160,7 +2095,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     """
     from app.utils.helpers import get_adjusted_unit_cost_for_year
 
-    # 1. Derive Start Year of Horizon
     start_year = 2028
     if target.issp_period and "-" in target.issp_period:
         try:
@@ -2176,7 +2110,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     raw_quantities = target.yearly_quantities if isinstance(target.yearly_quantities, dict) else {}
     clean_quantities = {}
 
-    # First normalize entries and calculate compounding costs
     for yr_str, qty_val in raw_quantities.items():
         try:
             qty = int(qty_val) if qty_val is not None else 0
@@ -2209,7 +2142,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
             if idx > 0:
                 clean_quantities[f"Year {idx}"] = qty
 
-    # Fallback to year_1_qty, year_2_qty, year_3_qty if no quantities were parsed
     if calculated_total_qty == 0:
         y1 = getattr(target, 'year_1_qty', 0) or 0
         y2 = getattr(target, 'year_2_qty', 0) or 0
@@ -2230,7 +2162,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
             clean_quantities[str(start_year + 2)] = y3
             clean_quantities["Year 3"] = y3
 
-    # Safety Fallback: If total_cost is 0 but qty > 0 and base_unit > 0
     if total_accumulated == Decimal("0.00") and calculated_total_qty > 0 and base_unit > Decimal("0.00"):
         total_accumulated = Decimal(calculated_total_qty) * Decimal(str(base_unit))
 
@@ -2239,7 +2170,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     if clean_quantities:
         target.yearly_quantities = clean_quantities
 
-    # Standardize string fields and enforce capitalizations
     status_raw = str(target.status or "Draft").strip().lower()
     if status_raw == "submitted": target.status = "Submitted"
     elif status_raw == "approved": target.status = "Approved"
@@ -2252,7 +2182,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     elif "serv" in cat_raw: target.category = "Services"
     else: target.category = "Hardware"
 
-    # Synchronize category with parent project if bound, or respect existing category
     if target.project_rel and getattr(target.project_rel, "project_category", None):
         target.strategic_category = str(getattr(target.project_rel.project_category, "value", target.project_rel.project_category)).strip()
     elif not target.strategic_category or not target.strategic_category.strip():
@@ -2262,7 +2191,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     if not target.fund_source: target.fund_source = "General Appropriations Act (GAA)"
     if not target.system_development_status: target.system_development_status = "N/A"
 
-    # Strictly synchronize created_by_students and is_in_house_turnover
     if target.is_in_house_turnover is None and target.created_by_students is not None:
         target.is_in_house_turnover = bool(target.created_by_students)
     elif target.created_by_students is None and target.is_in_house_turnover is not None:
@@ -2274,7 +2202,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
         target.is_in_house_turnover = False
         target.created_by_students = False
 
-    # Standardize and classify UACS and expenditure_class
     if not target.uacs_object_code or target.uacs_object_code.strip() == "":
         try:
             from app.utils.helpers import classify_uacs_and_expenditure
@@ -2311,7 +2238,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
             except Exception:
                 target.expenditure_class = "Capital Outlay"
 
-    # Enforce standard expenditure class naming
     exp_lower = str(target.expenditure_class).lower()
     if "capital" in exp_lower:
         target.expenditure_class = "Capital Outlay"
@@ -2326,7 +2252,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     target.sync_payload()
 
 
-# Runtime alias for system patchers
 enforce_issp_singularity_and_accounting = enforce_proposal_accounting_and_totals
 
 

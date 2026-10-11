@@ -615,17 +615,13 @@ export default function AdminDashboard() {
                       </td>
                       <td className="p-3.5 whitespace-nowrap">
                         {isProjectBound ? (
-                          <span className="px-2 py-0.5 bg-purple-50 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded font-mono text-[9.5px] font-bold flex items-center gap-1 w-fit">
+                          <span className="px-2 py-0.5 bg-purple-50 text-purple-700 dark:bg-purple-955/50 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded font-mono text-[9.5px] font-bold flex items-center gap-1 w-fit">
                             <Layers className="w-3 h-3" />
                             <span>Project-Bound</span>
                           </span>
-                        ) : p.status === "Approved" ? (
-                          <span className="px-2 py-0.5 bg-amber-50 text-amber-700 dark:bg-amber-955/50 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded font-mono text-[9.5px] font-bold w-fit block" title="Quarantined in Intake Pool until linked to an ICT Project">
-                            Intake Pool (Needs Project Link)
-                          </span>
                         ) : (
-                          <span className="text-[10px] text-slate-400 font-mono italic">
-                            Unassigned
+                          <span className="px-2 py-0.5 bg-rose-50 text-rose-700 dark:bg-rose-955/50 dark:text-rose-300 border border-rose-200 dark:border-rose-800 rounded font-mono text-[9.5px] font-bold w-fit block" title="Unlinked: Assign an ICT Project">
+                            Unlinked (Assign Project)
                           </span>
                         )}
                       </td>

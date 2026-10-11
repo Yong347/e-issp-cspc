@@ -6293,6 +6293,7 @@ class ProposalResponse(BaseModel):
     issp_period: str
     outcome_id: Optional[int] = None
     project_id: Optional[Union[uuid.UUID, str]] = None
+    project_title: Optional[str] = None 
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = None
     strategic_category_id: Optional[int] = None
     
@@ -6362,6 +6363,8 @@ class ProposalResponse(BaseModel):
     def sync_aliases(self) -> 'ProposalResponse':
         self.is_in_house_turnover = bool(self.created_by_students or self.is_in_house_turnover)
         self.created_by_students = self.is_in_house_turnover
+        if hasattr(self, 'project_rel') and self.project_rel:
+            self.project_title = getattr(self.project_rel, 'project_title', None)
         return self
 
     model_config = ConfigDict(from_attributes=True)
@@ -7674,23 +7677,11 @@ def get_dashboard_metrics(
     global_ceiling_row = db.query(SystemSetting).filter(SystemSetting.key == "global_budget_ceiling").first()
     global_ceiling = float(global_ceiling_row.value) if global_ceiling_row else float(settings.GLOBAL_BUDGET_CEILING)
 
-    # Calculate spent strictly on project-bound or authorized standalone operational proposals
-    non_project_cats = db.query(StrategicCategory.name).filter(
-        StrategicCategory.is_project_linked == False,
-        StrategicCategory.is_active == True
-    ).all()
-    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-        if default_cat not in standalone_cat_names:
-            standalone_cat_names.append(default_cat)
-
+    # Calculate spent strictly on project-bound approved proposals
     total_spent = db.query(func.sum(Proposal.total_cost)).filter(
         Proposal.issp_period == active_period,
         func.lower(cast(Proposal.status, String)) == "approved",
-        or_(
-            Proposal.project_id.isnot(None),
-            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
-        ),
+        Proposal.project_id.isnot(None),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).scalar() or 0.0
 
@@ -9479,6 +9470,15 @@ def review_and_classify_system(
                 proj_uuid = pid_clean
             target_project = db.query(IctProject).filter(IctProject.id == proj_uuid).first()
 
+    # Auto-match a project if none was explicitly passed
+    if not target_project:
+        target_project = db.query(IctProject).filter(
+            IctProject.issp_period == system.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+        if target_project:
+            proj_uuid = target_project.id
+
     if target_project:
         target_project.system_id = system.id
         system.project_id = target_project.id
@@ -9551,7 +9551,15 @@ def review_and_classify_system(
             created_by_students=False,
             db=db
         )
-
+        if not proj_uuid:
+            matched_proj = db.query(IctProject).filter(
+                IctProject.issp_period == system.issp_period,
+                func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+            ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+            if matched_proj:
+                proj_uuid = matched_proj.id
+                strat_cat_name = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+                fund_source_val = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
         new_prop = Proposal(
             department_id=target_dept_id,
             issp_period=system.issp_period,
@@ -9929,6 +9937,8 @@ def delete_ict_project(
 # 9. REVISED PROJECT LINKING & REAL-TIME COST RECALCULATION
 # ==========================================================
 
+# app/admin/router.py (Replace update_project_links around line 1550)
+
 @router.post("/ict-projects/{project_id}/links")
 def update_project_links(
     project_id: uuid.UUID,
@@ -9936,15 +9946,9 @@ def update_project_links(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Binds or unbinds proposals and information systems directly to an ICT project.
-    Guarantees:
-    1. Unlinked/detached proposals have their project_id cleared (project_id = None).
-    2. Detached proposals immediately stop inflating the project's computed total cost.
-    3. Attached proposals automatically inherit the project's Strategic Category and Fund Source.
-    4. Session relationship caches are expired so next reads reflect the true database state.
-    """
-    project = db.query(IctProject).filter(IctProject.id == project_id).first()
+    project = db.query(IctProject).filter(
+        or_(IctProject.id == project_id, cast(IctProject.id, String) == str(project_id))
+    ).first()
     if not project:
         raise HTTPException(status_code=404, detail="ICT Project not found.")
 
@@ -9955,27 +9959,23 @@ def update_project_links(
     strat_cat_id = sc_obj.id if sc_obj else None
     proj_fund_source = str(getattr(project.funding_source, "value", project.funding_source) or "General Appropriations Act (GAA)")
 
-    # 1. Update proposal linkages
+    # 1. Update proposal linkages with string normalization to eliminate UUID vs str mismatch
     if payload.proposal_ids is not None:
-        p_uuids = set()
-        for pid in payload.proposal_ids:
-            if pid:
-                try:
-                    p_uuids.add(uuid.UUID(str(pid)))
-                except ValueError:
-                    p_uuids.add(pid)
+        p_uuids_str = {str(pid).strip().lower() for pid in payload.proposal_ids if pid}
 
         # Unlink proposals that were detached
         current_proposals = db.query(Proposal).filter(Proposal.project_id == project.id).all()
         for p in current_proposals:
-            if p.id not in p_uuids:
+            if str(p.id).lower() not in p_uuids_str:
                 p.project_id = None
                 p.strategic_category = "Office Productivity"
                 p.strategic_category_id = None
 
-        # Bind selected proposals and inherit project parameters
-        for pid in p_uuids:
-            prop = db.query(Proposal).filter(Proposal.id == pid).first()
+        # Bind selected proposals and inherit project category and fund source
+        for pid_str in p_uuids_str:
+            prop = db.query(Proposal).filter(
+                or_(cast(Proposal.id, String) == pid_str, Proposal.id == pid_str)
+            ).first()
             if prop:
                 prop.project_id = project.id
                 prop.strategic_category = strat_cat_val
@@ -9983,17 +9983,10 @@ def update_project_links(
                 if strat_cat_id:
                     prop.strategic_category_id = strat_cat_id
 
-    # 2. Update system linkages
+    # 2. Update system linkages with string normalization
     if payload.system_ids is not None:
-        s_uuids = set()
-        for sid in payload.system_ids:
-            if sid:
-                try:
-                    s_uuids.add(uuid.UUID(str(sid)))
-                except ValueError:
-                    s_uuids.add(sid)
+        s_uuids_str = {str(sid).strip().lower() for sid in payload.system_ids if sid}
 
-        # Unlink systems that were detached
         current_systems = db.query(InformationSystem).filter(
             or_(
                 InformationSystem.project_id == project.id,
@@ -10001,18 +9994,24 @@ def update_project_links(
             )
         ).all()
         for s in current_systems:
-            if s.id not in s_uuids:
+            if str(s.id).lower() not in s_uuids_str:
                 s.project_id = None
-                if project.system_id == s.id:
+                if project.system_id and str(project.system_id).lower() == str(s.id).lower():
                     project.system_id = None
 
-        for sid in s_uuids:
-            sys_obj = db.query(InformationSystem).filter(InformationSystem.id == sid).first()
+        for sid_str in s_uuids_str:
+            sys_obj = db.query(InformationSystem).filter(
+                or_(cast(InformationSystem.id, String) == sid_str, InformationSystem.id == sid_str)
+            ).first()
             if sys_obj:
                 sys_obj.project_id = project.id
 
-        if s_uuids:
-            project.system_id = list(s_uuids)[0]
+        if s_uuids_str:
+            first_sys = db.query(InformationSystem).filter(
+                or_(cast(InformationSystem.id, String) == list(s_uuids_str)[0], InformationSystem.id == list(s_uuids_str)[0])
+            ).first()
+            if first_sys:
+                project.system_id = first_sys.id
 
     db.commit()
     db.expire_all()
@@ -10644,23 +10643,11 @@ def export_budget_csv(
 ):
     period = issp_period or get_active_issp_period(db)
     
-    # Query approved proposals that are project-linked OR authorized standalone operational expenses
-    non_project_cats = db.query(StrategicCategory.name).filter(
-        StrategicCategory.is_project_linked == False,
-        StrategicCategory.is_active == True
-    ).all()
-    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-        if default_cat not in standalone_cat_names:
-            standalone_cat_names.append(default_cat)
-
+    # Query approved proposals strictly bound to an ICT Project
     items = db.query(Proposal).filter(
         Proposal.issp_period == period,
         func.lower(cast(Proposal.status, String)) == "approved",
-        or_(
-            Proposal.project_id.isnot(None),
-            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
-        ),
+        Proposal.project_id.isnot(None),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).all()
 
@@ -11125,7 +11112,7 @@ def batch_approve_proposals(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """1-Click batch approval of submitted proposals with transactional COA audit logging."""
+    """1-Click batch approval of submitted proposals into the active plan."""
     raw_ids = []
     if isinstance(payload, BatchApprovePayload):
         raw_ids = payload.proposal_ids
@@ -11160,15 +11147,20 @@ def batch_approve_proposals(
             if default_outcome:
                 p.outcome_id = default_outcome.id
 
-        # Guard: If item is categorized as a project item but unlinked, fallback to Office Productivity
-        is_project_cat = "project" in (p.strategic_category or "").lower()
-        if is_project_cat and not p.project_id:
-            p.strategic_category = "Office Productivity"
-            sc_obj = db.query(StrategicCategory).filter(
-                func.lower(StrategicCategory.name) == "office productivity"
+        # Auto-bind unlinked proposals to a project so batch approval never causes unlinked orphans
+        if not p.project_id:
+            matched_proj = db.query(IctProject).filter(
+                IctProject.issp_period == p.issp_period,
+                func.lower(cast(IctProject.project_category, String)) == func.lower(cast(p.strategic_category, String))
             ).first()
-            if sc_obj:
-                p.strategic_category_id = sc_obj.id
+            if not matched_proj:
+                matched_proj = db.query(IctProject).filter(
+                    IctProject.issp_period == p.issp_period
+                ).first()
+            if matched_proj:
+                p.project_id = matched_proj.id
+                p.strategic_category = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+                p.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
 
         old_status = p.status
         p.status = "Approved"
@@ -11182,7 +11174,7 @@ def batch_approve_proposals(
             proposal_id=p.id,
             ip_address=request.client.host if request.client else None,
             old_value={"status": old_status},
-            new_value={"status": "Approved", "outcome_id": p.outcome_id}
+            new_value={"status": "Approved", "outcome_id": p.outcome_id, "project_id": str(p.project_id) if p.project_id else None}
         )
 
     db.commit()
@@ -11213,6 +11205,19 @@ def admin_create_proposal(
 
     sc_name = payload.strategic_category or "Office Productivity"
     strat_cat_id = getattr(payload, "strategic_category_id", None)
+    resolved_project_id = payload.project_id
+
+    # Enforce project binding on approved proposal creation
+    if not resolved_project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == active_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(sc_name, String))
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == active_period).first()
+        if matched_proj:
+            resolved_project_id = matched_proj.id
+            sc_name = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            payload.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+
     if not strat_cat_id and sc_name:
         sc_row = db.query(StrategicCategory).filter(func.lower(StrategicCategory.name) == sc_name.lower().strip()).first()
         if sc_row:
@@ -11234,7 +11239,7 @@ def admin_create_proposal(
         department_id=target_dept_id,
         issp_period=active_period,
         outcome_id=outcome_id,
-        project_id=payload.project_id,
+        project_id=resolved_project_id,
         needs_assessment_id=getattr(payload, "needs_assessment_id", None),
         strategic_category_id=strat_cat_id,
         category=payload.category or "Hardware",
@@ -11279,6 +11284,8 @@ def admin_create_proposal(
     return db_proposal
 
 
+# app/admin/router.py (Replace approve_proposal around line 1974)
+
 @router.put("/proposals/{proposal_id}/approve")
 def approve_proposal(
     proposal_id: uuid.UUID,
@@ -11299,17 +11306,30 @@ def approve_proposal(
         else:
             raise HTTPException(
                 status_code=400,
-                detail="Approval Blocked: Please assign an Organizational Outcome (Part I.A.4) to this proposal via Override before approving."
+                detail="Approval Blocked: Please assign an Organizational Outcome (Part I.A.4) before approving."
             )
 
-    # PREVENT ORPHAN PROPOSAL LEAK:
-    # If categorized as an ICT project item, enforce project linkage before approval
-    is_project_cat = "project" in (proposal.strategic_category or "").lower()
-    if is_project_cat and not proposal.project_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Approval Blocked: Proposal '{proposal.item_name}' is categorized under '{proposal.strategic_category}'. Please link it to an ICT Project (Part III.E) or change its category to a standalone operational category (e.g. 'Office Productivity') before approving."
-        )
+    # All approved proposals must be bound to an ICT Project
+    if not proposal.project_id:
+        # Match project by strategic category, or assign default project for that category
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == proposal.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(proposal.strategic_category, String))
+        ).first()
+        if not matched_proj:
+            matched_proj = db.query(IctProject).filter(
+                IctProject.issp_period == proposal.issp_period
+            ).first()
+        
+        if matched_proj:
+            proposal.project_id = matched_proj.id
+            proposal.strategic_category = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            proposal.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Approval Blocked: Proposal must be bound to an ICT Project in Part III.E. No active ICT Projects found."
+            )
 
     old_status = proposal.status
     proposal.status = "Approved"
@@ -11324,11 +11344,19 @@ def approve_proposal(
         proposal_id=proposal.id,
         ip_address=request.client.host if request.client else None,
         old_value={"status": old_status},
-        new_value={"status": "Approved", "outcome_id": proposal.outcome_id}
+        new_value={
+            "status": "Approved", 
+            "outcome_id": proposal.outcome_id,
+            "project_id": str(proposal.project_id)
+        }
     )
     db.commit()
     db.refresh(proposal)
-    return {"status": "success", "message": "Proposal approved successfully.", "proposal_id": proposal.id}
+    return {
+        "status": "success", 
+        "message": f"Proposal approved and bound to ICT Project.", 
+        "proposal_id": str(proposal.id)
+    }
 
 
 @router.put("/proposals/{proposal_id}/return")
@@ -11411,7 +11439,6 @@ def admin_override_proposal(
                     ).first()
                     proposal.strategic_category_id = sc_row.id if sc_row else None
             else:
-                # Disconnected from project: assign standalone category if not specified
                 if payload.strategic_category is None:
                     proposal.strategic_category = "Office Productivity"
                     sc_row = db.query(StrategicCategory).filter(
@@ -11515,59 +11542,6 @@ def admin_override_proposal(
         db.rollback()
         logger.error(f"Override failure: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database failure during override.")
-
-
-@router.put("/proposals/{proposal_id}/uacs")
-def assign_proposal_uacs(
-    proposal_id: uuid.UUID,
-    payload: Dict[str, Any],
-    request: Request,
-    db: Session = Depends(get_db),
-    admin: dict = Depends(require_admin)
-):
-    """Explicitly assigns UACS Object Code and Expenditure Class to a proposal."""
-    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
-    if not proposal:
-        raise HTTPException(status_code=404, detail="Proposal not found.")
-
-    uacs_code = payload.get("uacs_object_code")
-    exp_class = payload.get("expenditure_class")
-
-    old_vals = {
-        "uacs_object_code": proposal.uacs_object_code,
-        "expenditure_class": proposal.expenditure_class
-    }
-
-    if uacs_code:
-        proposal.uacs_object_code = str(uacs_code).strip()
-    if exp_class:
-        proposal.expenditure_class = str(exp_class).strip()
-    elif uacs_code:
-        if "(CO)" in str(uacs_code):
-            proposal.expenditure_class = "Capital Outlay"
-        elif "(MOOE)" in str(uacs_code):
-            proposal.expenditure_class = "Maintenance and Other Operating Expenses"
-
-    proposal.version += 1
-
-    log_audit_event(
-        db=db,
-        action="PROPOSAL_UACS_ASSIGNED",
-        module="PROPOSALS",
-        user_id=admin["id"],
-        department_id=proposal.department_id,
-        proposal_id=proposal.id,
-        ip_address=request.client.host if request.client else None,
-        old_value=old_vals,
-        new_value={
-            "uacs_object_code": proposal.uacs_object_code,
-            "expenditure_class": proposal.expenditure_class
-        }
-    )
-
-    db.commit()
-    db.refresh(proposal)
-    return {"status": "success", "message": "UACS object code assigned to proposal.", "proposal_id": str(proposal.id)}
 
 
 @router.delete("/proposals/{proposal_id}")
@@ -11703,30 +11677,18 @@ def trigger_document_generation(
     if not narrative:
         raise HTTPException(status_code=400, detail=f"Planning cycle '{target_period}' not configured.")
 
-    # Strict compilation alignment: Only pull approved proposals that are project-linked OR standalone operational
-    non_project_cats = db.query(StrategicCategory.name).filter(
-        StrategicCategory.is_project_linked == False,
-        StrategicCategory.is_active == True
-    ).all()
-    standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-    for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-        if default_cat not in standalone_cat_names:
-            standalone_cat_names.append(default_cat)
-
+    # Strict compilation alignment: All proposals must be bound to an ICT Project
     approved_proposals = db.query(Proposal).filter(
         func.lower(cast(Proposal.status, String)) == "approved",
         Proposal.issp_period == target_period,
-        or_(
-            Proposal.project_id.isnot(None),
-            func.lower(cast(Proposal.strategic_category, String)).in_(standalone_cat_names)
-        ),
+        Proposal.project_id.isnot(None),
         or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
     ).all()
 
     if not approved_proposals:
         raise HTTPException(
             status_code=400, 
-            detail="Compilation blocked: No approved proposals connected to ICT projects or standalone operations exist for this cycle."
+            detail="Compilation blocked: No approved proposals bound to ICT projects exist for this cycle. All proposals must be assigned to an ICT Project in Part III.E."
         )
 
     # Derive accurate parity figures directly from canonical parity calculator
@@ -12704,7 +12666,7 @@ class DynamicChecklistCriteria(Base):
     __tablename__ = "dynamic_checklist_criteria"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    checklist_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # EGOV_PROGRAM | CYBERSECURITY | HARMONIZATION_FRAMEWORK
+    checklist_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     domain_or_category: Mapped[str] = mapped_column(String(100), nullable=False)
     criteria_name: Mapped[str] = mapped_column(String(200), nullable=False)
     is_mandatory: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"), nullable=False)
@@ -12920,7 +12882,7 @@ class MasterNarrative(Base):
     dict_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     bagong_pilipinas_logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Signatory Information (Uses generic defaults, preserving user-edited personal names)
+    # Signatory Information
     signatory_prepared_by: Mapped[str] = mapped_column(String(200), default="Chief Information Officer", nullable=False)
     preparer_position: Mapped[Optional[str]] = mapped_column(String(200), default="Chief Information Officer", nullable=True)
     cio_organizational_unit: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -12961,9 +12923,9 @@ class MasterNarrative(Base):
     authoring_cycle_duration: Mapped[Optional[int]] = mapped_column(Integer, default=3, nullable=True)
 
     # Official Primary Schematics
-    network_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # Part II.B.1 Existing LAN/WAN
-    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)    # Part III.A.1 Proposed LAN/WAN
-    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # Part III.B Enterprise Architecture
+    network_diagram_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    fiber_backbone_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    system_architecture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     org_chart_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     existing_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     proposed_ict_org_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -13147,7 +13109,6 @@ class MasterNarrative(Base):
     def website_url(self, val: Optional[str]) -> None:
         self.agency_website_url = val
 
-    # Case-insensitive helper properties for cover page scope selection
     @property
     def is_department_wide_scope(self) -> bool:
         sc = str(self.scope_choice or "").strip().lower().replace("_", "-")
@@ -13374,7 +13335,6 @@ class InformationSystem(Base):
         nullable=True, 
         index=True
     )
-    # Direct bidirectional linkage to major ICT Project (Part III.E)
     project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID,
         ForeignKey("ict_projects.id", ondelete="SET NULL"),
@@ -13387,14 +13347,13 @@ class InformationSystem(Base):
         server_default=text("'Approved'"), 
         nullable=False, 
         index=True
-    )  # "Draft" | "Submitted" | "Approved" | "Returned"
+    )
     rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="Operational", nullable=False)  # Operational | For Development | For Enhancement
+    status: Mapped[str] = mapped_column(String(50), default="Operational", nullable=False)
     classification: Mapped[Optional[str]] = mapped_column(String(200), default="Operations - Frontline Service", nullable=True)
 
-    # Simplified Department-Facing Cost Proposal
     proposed_cost: Mapped[Decimal] = mapped_column(
         Numeric(15, 2), default=Decimal("0.00"), server_default=text("0.00"), nullable=False
     )
@@ -13402,21 +13361,20 @@ class InformationSystem(Base):
         Boolean, default=True, server_default=text("true"), nullable=False
     )
 
-    # Independent Multi-Classification Checkboxes (DICT Template Part II.C & Part III.D)
+    # Independent Multi-Classification Checkboxes
     is_support_to_operations: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     is_general_administrative: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     is_operations: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"), nullable=False)
 
     # Subordinated Frontline details under Operations
     is_frontline_service: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    frontline_hosting_type: Mapped[str] = mapped_column(String(50), default="Online", nullable=False)  # Online | On-premise | Hybrid
+    frontline_hosting_type: Mapped[str] = mapped_column(String(50), default="Online", nullable=False)
     online_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_non_frontline_service: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     description_and_purpose: Mapped[str] = mapped_column(Text, nullable=False)
-    enhancement_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Mandated for "For Enhancement"
+    enhancement_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    # Technical fields with sensible defaults (configured/assigned by Admin)
     development_strategy: Mapped[str] = mapped_column(String(100), default="Outsourced", server_default=text("'Outsourced'"), nullable=False)
     development_platform: Mapped[str] = mapped_column(String(200), default="Web-Based Architecture", server_default=text("'Web-Based Architecture'"), nullable=False)
     database_name: Mapped[str] = mapped_column(String(200), default="AppDatabase", server_default=text("'AppDatabase'"), nullable=False)
@@ -13426,7 +13384,6 @@ class InformationSystem(Base):
     external_users: Mapped[str] = mapped_column(Text, default="General Public", server_default=text("'General Public'"), nullable=False)
     system_owner_office: Mapped[str] = mapped_column(String(200), default="Department Office", server_default=text("'Department Office'"), nullable=False)
 
-    # Interoperability Capabilities
     is_integrated_with_others: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     internal_integrated_systems: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     external_integrated_systems: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -13434,7 +13391,6 @@ class InformationSystem(Base):
     processes_data_from_others: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_deployed_on_shared_platform: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # Data Privacy Act (PIA) Compliance
     processes_personal_information: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     has_undergone_pia: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     pia_target_date_text: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
@@ -13555,81 +13511,31 @@ class IctProject(Base):
     @property
     def computed_total_project_cost(self) -> Decimal:
         """
-        Dynamically computes the exact total project cost from active child line items
-        and linked systems. 
-        Guarantees that unlinked proposals without an assigned project_id are strictly excluded.
+        Dynamically computes the exact total project cost from active, approved 
+        child line items in Part IV.A for this project in the active planning cycle.
+        Guarantees exact mathematical parity with Tables B.1, B.2, B.3, and B.4.
         """
         try:
             sess = object_session(self)
-            
-            # If bound to an active database session, execute a direct database query
             if sess is not None:
-                # 1. Sum approved proposals explicitly bound to this project_id
                 proposal_sum = sess.query(func.sum(Proposal.total_cost)).filter(
                     Proposal.project_id == self.id,
-                    or_(Proposal.is_archived == False, Proposal.is_archived.is_(None)),
-                    func.lower(cast(Proposal.status, String)).in_(["approved", "submitted"])
-                ).scalar() or Decimal("0.00")
-
-                total = Decimal(str(proposal_sum))
-
-                # 2. Add proposed_cost of approved Information Systems linked to this project
-                # ONLY if their name is not already budgeted as an approved proposal item
-                approved_proposals = sess.query(Proposal.item_name).filter(
-                    Proposal.project_id == self.id,
+                    Proposal.issp_period == self.issp_period,
+                    func.lower(cast(Proposal.status, String)) == "approved",
                     or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
-                ).all()
-                covered_names = {str(r[0] or "").lower().strip() for r in approved_proposals}
-
-                linked_systems = sess.query(InformationSystem).filter(
-                    or_(
-                        InformationSystem.project_id == self.id,
-                        InformationSystem.id == self.system_id
-                    ),
-                    InformationSystem.proposed_cost > Decimal("0.00"),
-                    func.lower(cast(InformationSystem.status, String)) != "operational"
-                ).all()
-
-                for s in linked_systems:
-                    s_name = str(s.name or "").lower().strip()
-                    if not any(s_name in c or c in s_name for c in covered_names):
-                        total += Decimal(str(s.proposed_cost or 0))
-
-                return total.quantize(Decimal("0.01"))
-
-            # Fallback in-memory evaluation (only count items with matching project_id)
-            total = Decimal("0.00")
-            items = getattr(self, "resource_items", None) or []
-            item_names_seen = set()
-            for item in items:
-                if getattr(item, "project_id", None) != self.id:
-                    continue
-                if getattr(item, "is_archived", False):
-                    continue
-                status_str = str(getattr(item, "status", "")).lower().strip()
-                if status_str in ["approved", "submitted"]:
-                    tc = getattr(item, "total_cost", None)
-                    if tc is not None and Decimal(str(tc)) > Decimal("0.00"):
+                ).scalar() or Decimal("0.00")
+                return Decimal(str(proposal_sum)).quantize(Decimal("0.01"))
+            else:
+                total = Decimal("0.00")
+                for itm in (getattr(self, "resource_items", []) or []):
+                    if (
+                        str(getattr(itm, "project_id", "")) == str(self.id)
+                        and not getattr(itm, "is_archived", False)
+                        and str(getattr(itm, "status", "")).lower() == "approved"
+                    ):
+                        tc = getattr(itm, "total_cost", Decimal("0.00")) or Decimal("0.00")
                         total += Decimal(str(tc))
-                    elif getattr(item, "unit_cost", None) and getattr(item, "total_qty", None):
-                        total += Decimal(str(item.unit_cost)) * Decimal(str(item.total_qty))
-                    item_names_seen.add(str(item.item_name or "").lower().strip())
-
-            all_systems = list(getattr(self, "linked_systems", []) or [])
-            if getattr(self, "information_system", None):
-                if self.information_system not in all_systems:
-                    all_systems.append(self.information_system)
-
-            for s in all_systems:
-                s_name = str(s.name or "").lower().strip()
-                s_status = str(getattr(s.status, "value", s.status) or "").lower()
-                if s_status != "operational":
-                    has_matching = any(s_name in iname or iname in s_name for iname in item_names_seen)
-                    if not has_matching:
-                        pc = getattr(s, "proposed_cost", Decimal("0.00")) or Decimal("0.00")
-                        total += Decimal(str(pc))
-
-            return total.quantize(Decimal("0.01"))
+                return total.quantize(Decimal("0.01"))
         except Exception:
             return Decimal("0.00")
 
@@ -13716,7 +13622,7 @@ class Proposal(Base):
         index=True
     )
     
-    # Provenance Linkages (outcome_id is nullable on initial submission by department)
+    # Provenance Linkages
     outcome_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey("organizational_outcomes.id", ondelete="SET NULL"), 
@@ -13757,7 +13663,6 @@ class Proposal(Base):
     item_key: Mapped[Optional[str]] = mapped_column(String(100), default="other", nullable=True)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0.00"), nullable=False)
     
-    # Primary JSON Source of Truth for Physical Targets (Supports 1..N Years Dynamically)
     yearly_quantities: Mapped[Dict[str, int]] = mapped_column(
         ResilientMutableDict.as_mutable(JSON), 
         default=dict, 
@@ -13804,7 +13709,6 @@ class Proposal(Base):
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
-    # Archive tier status metadata for document vault
     s3_storage_class: Mapped[str] = mapped_column(String(50), default="STANDARD", nullable=False)
     is_restoring: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
@@ -13819,7 +13723,6 @@ class Proposal(Base):
 
     @property
     def archive_storage_tier(self) -> str:
-        """Sanitized property alias for official document vault storage tier."""
         return self.s3_storage_class
 
     @property
@@ -14190,7 +14093,6 @@ def enforce_master_narrative_integrity(mapper, connection, target: MasterNarrati
     if not target.agency_name:
         target.agency_name = settings.DEFAULT_AGENCY_NAME
 
-    # Respect user inputs without reverting to hardcoded personal names
     cio_clean = (target.signatory_prepared_by or "").strip()
     if not cio_clean:
         target.signatory_prepared_by = target.preparer_position or "Chief Information Officer"
@@ -14221,7 +14123,6 @@ def enforce_master_narrative_integrity(mapper, connection, target: MasterNarrati
     if target.is_amendment is None: target.is_amendment = False
     if target.is_archived is None: target.is_archived = False
 
-    # Normalize scope_choice to canonical format for exact cover page matching
     if target.scope_choice:
         sc_clean = str(target.scope_choice).strip().lower().replace("_", "-")
         if sc_clean in ("department-wide", "department", "dept-wide"):
@@ -14281,7 +14182,6 @@ def sync_information_system_classification(mapper, connection, target: Informati
     if not target.is_support_to_operations and not target.is_general_administrative and not target.is_operations:
         target.is_operations = True
 
-    # If Operations is selected without frontline/non-frontline flags, resolve appropriately
     if target.is_operations and not target.is_frontline_service and not target.is_non_frontline_service:
         if target.is_support_to_operations or target.is_general_administrative:
             target.is_operations = False
@@ -14327,7 +14227,6 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
     start_y = target.duration_start_year or 2028
     end_y = target.duration_end_year or (start_y + 2)
 
-    # 1. Deliverables Synchronization
     if not target.annual_deliverables:
         if target.year_1_deliverables:
             target.annual_deliverables["Year 1"] = target.year_1_deliverables
@@ -14346,7 +14245,6 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
     if "Year 3" in target.annual_deliverables or str(end_y) in target.annual_deliverables:
         target.year_3_deliverables = target.annual_deliverables.get("Year 3") or target.annual_deliverables.get(str(end_y)) or ""
 
-    # 2. Harmonization Framework Synchronization
     if target.harmonization_criteria is None or not isinstance(target.harmonization_criteria, dict):
         target.harmonization_criteria = {
             "National Prioritization (PDP 2023-2028)": bool(target.harmonizes_national_priority),
@@ -14356,7 +14254,6 @@ def sync_ict_project_annual_deliverables(mapper, connection, target: IctProject)
             "Scalability and Sustainability (SPAR / PREXC)": bool(target.harmonizes_scalability)
         }
     else:
-        # Reflect legacy booleans from JSON map if updated
         hc = target.harmonization_criteria
         for k, v in hc.items():
             k_lower = k.lower()
@@ -14383,7 +14280,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     """
     from app.utils.helpers import get_adjusted_unit_cost_for_year
 
-    # 1. Derive Start Year of Horizon
     start_year = 2028
     if target.issp_period and "-" in target.issp_period:
         try:
@@ -14399,7 +14295,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     raw_quantities = target.yearly_quantities if isinstance(target.yearly_quantities, dict) else {}
     clean_quantities = {}
 
-    # First normalize entries and calculate compounding costs
     for yr_str, qty_val in raw_quantities.items():
         try:
             qty = int(qty_val) if qty_val is not None else 0
@@ -14432,7 +14327,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
             if idx > 0:
                 clean_quantities[f"Year {idx}"] = qty
 
-    # Fallback to year_1_qty, year_2_qty, year_3_qty if no quantities were parsed
     if calculated_total_qty == 0:
         y1 = getattr(target, 'year_1_qty', 0) or 0
         y2 = getattr(target, 'year_2_qty', 0) or 0
@@ -14453,7 +14347,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
             clean_quantities[str(start_year + 2)] = y3
             clean_quantities["Year 3"] = y3
 
-    # Safety Fallback: If total_cost is 0 but qty > 0 and base_unit > 0
     if total_accumulated == Decimal("0.00") and calculated_total_qty > 0 and base_unit > Decimal("0.00"):
         total_accumulated = Decimal(calculated_total_qty) * Decimal(str(base_unit))
 
@@ -14462,7 +14355,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     if clean_quantities:
         target.yearly_quantities = clean_quantities
 
-    # Standardize string fields and enforce capitalizations
     status_raw = str(target.status or "Draft").strip().lower()
     if status_raw == "submitted": target.status = "Submitted"
     elif status_raw == "approved": target.status = "Approved"
@@ -14475,7 +14367,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     elif "serv" in cat_raw: target.category = "Services"
     else: target.category = "Hardware"
 
-    # Synchronize category with parent project if bound, or respect existing category
     if target.project_rel and getattr(target.project_rel, "project_category", None):
         target.strategic_category = str(getattr(target.project_rel.project_category, "value", target.project_rel.project_category)).strip()
     elif not target.strategic_category or not target.strategic_category.strip():
@@ -14485,7 +14376,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     if not target.fund_source: target.fund_source = "General Appropriations Act (GAA)"
     if not target.system_development_status: target.system_development_status = "N/A"
 
-    # Strictly synchronize created_by_students and is_in_house_turnover
     if target.is_in_house_turnover is None and target.created_by_students is not None:
         target.is_in_house_turnover = bool(target.created_by_students)
     elif target.created_by_students is None and target.is_in_house_turnover is not None:
@@ -14497,7 +14387,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
         target.is_in_house_turnover = False
         target.created_by_students = False
 
-    # Standardize and classify UACS and expenditure_class
     if not target.uacs_object_code or target.uacs_object_code.strip() == "":
         try:
             from app.utils.helpers import classify_uacs_and_expenditure
@@ -14534,7 +14423,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
             except Exception:
                 target.expenditure_class = "Capital Outlay"
 
-    # Enforce standard expenditure class naming
     exp_lower = str(target.expenditure_class).lower()
     if "capital" in exp_lower:
         target.expenditure_class = "Capital Outlay"
@@ -14549,7 +14437,6 @@ def enforce_proposal_accounting_and_totals(mapper, connection, target: Proposal)
     target.sync_payload()
 
 
-# Runtime alias for system patchers
 enforce_issp_singularity_and_accounting = enforce_proposal_accounting_and_totals
 
 
@@ -17114,7 +17001,8 @@ Strictly adheres to official DICT ISSP v.2026 Guidelines and statutory order:
 - Single Central Institutional Emblem (No Secondary Side Logos)
 - First-Page Section Isolation (Strict 1-Page Cover Page, No Spillover)
 - Running 3-Column Header Table starting at Table of Contents through to Document End
-- Running Footer with Dynamic Page Numbering (Page X of Y)
+- Running Footer with Dynamic Page Numbering (Page X of Y) using valid w:fldSimple
+- Dynamic Table of Contents with Accurate Sequential Page Numbers
 - Completely Dynamic Planning Horizon (Derived from Active Cycle, Zero Hardcoding)
 - Dynamic Inflation Rates & UACS Accounting (Synced with System Policies)
 - Full Statutory Structure:
@@ -17330,20 +17218,12 @@ def get_agency_logo_bytes(narrative: Any) -> Optional[bytes]:
 # =========================================================================
 
 def add_xml_field(paragraph, field_name: str):
-    """Inserts a native dynamic Word field (PAGE, NUMPAGES) into a paragraph."""
-    run = paragraph.add_run()
-    run.font.name = "Palatino Linotype"
-    run.font.size = Pt(7.5)
-    run.font.color.rgb = RGBColor(148, 163, 184)
-    fldChar1 = parse_xml(r'<w:fldChar %s w:fldCharType="begin"/>' % nsdecls('w'))
-    instrText = parse_xml(r'<w:instrText %s xml:space="preserve"> %s </w:instrText>' % (nsdecls('w'), field_name))
-    fldChar2 = parse_xml(r'<w:fldChar %s w:fldCharType="separate"/>' % nsdecls('w'))
-    fldChar3 = parse_xml(r'<w:fldChar %s w:fldCharType="end"/>' % nsdecls('w'))
-    run._r.append(fldChar1)
-    run._r.append(instrText)
-    run._r.append(fldChar2)
-    run._r.append(fldChar3)
-    return run
+    """Inserts a valid native Word field (PAGE, NUMPAGES) using w:fldSimple."""
+    fldSimple = parse_xml(
+        r'<w:fldSimple %s w:instr="%s"><w:r><w:rPr><w:rFonts w:ascii="Palatino Linotype" w:hAnsi="Palatino Linotype"/><w:sz w:val="15"/><w:color w:val="94A3B8"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>'
+        % (nsdecls('w'), field_name)
+    )
+    paragraph._p.append(fldSimple)
 
 
 def set_cell_shading(cell, color_hex: str = "F1F5F9"):
@@ -17463,12 +17343,15 @@ def normalize_category_name(cat_str: str) -> str:
     return cat_str.strip() if cat_str else "Office Productivity"
 
 
-def resolve_proposal_category(itm: Any) -> str:
+def resolve_proposal_category(itm: Any, proj_lookup: Optional[Dict[str, Any]] = None) -> str:
     """
-    In DICT ISSP methodology, categorization is governed by the 
-    parent ICT Project or designated standalone operational bucket.
+    In DICT ISSP methodology, categorization is governed strictly by the 
+    parent ICT Project charter in Part III.E.
     """
     proj = getattr(itm, "project_rel", None)
+    if not proj and getattr(itm, "project_id", None) and proj_lookup:
+        proj = proj_lookup.get(str(itm.project_id))
+
     if proj and getattr(proj, "project_category", None):
         return normalize_category_name(clean_str(getattr(proj.project_category, "value", proj.project_category)))
     
@@ -17742,7 +17625,7 @@ def render_information_system_card_docx(doc, sys_obj: Any, is_proposed: bool = F
     integ_text = (
         f"[{'X' if is_integ else ' '}] Integrated with another system\n"
         f"    Internal: {clean_str(sys_obj.internal_integrated_systems, 'None')} | External: {clean_str(sys_obj.external_integrated_systems, 'None')}\n"
-        f"[{'X' if getattr(sys_obj, 'generates_data_for_others', False) else ' '}] Generates data utilized by other systems\n"
+        f"[{'X' if getattr(sys_obj, 'generates_data_for_others', False) else ' '}] Generates data that is utilized by other systems\n"
         f"[{'X' if getattr(sys_obj, 'processes_data_from_others', False) else ' '}] Processes data generated by other systems\n"
         f"[{'X' if getattr(sys_obj, 'is_deployed_on_shared_platform', False) else ' '}] Deployed on a shared platform"
     )
@@ -17929,6 +17812,9 @@ def create_issp_docx(
     
     start_year = planning_years[0]
     end_year = planning_years[-1]
+
+    # Quick lookup for projects to ensure robust category and fund source resolution
+    proj_lookup = {str(p.id): p for p in projects if getattr(p, "id", None)}
 
     # Resolve Project groupings for PMF and TOC chapters
     internal_projects = [p for p in projects if "cross" not in clean_str(getattr(p, "project_category", "")).lower()]
@@ -18180,7 +18066,9 @@ def create_issp_docx(
 
     is_dept_wide = "department-wide" in scope_choice_clean or not scope_choice_clean
     is_dept_co = "central" in scope_choice_clean and not is_dept_wide
+    is_dept_co_only = is_dept_co and not has_reg and not has_bur
     is_agency_wide = "agency-wide" in scope_choice_clean
+    is_agency_co_only = is_agency_wide and not has_reg
     is_other_gov = "other" in scope_choice_clean
     is_lgu = "lgu" in scope_choice_clean
 
@@ -18356,67 +18244,88 @@ def create_issp_docx(
     r_toc.font.bold = True
     r_toc.font.color.rgb = RGBColor(30, 58, 138)
 
+    # Dynamic Page Numbers Computed According to Section Layout
+    plan_span = len(planning_years)
+    page_toc = 2
+    page_defs = 3
+    page_part1 = 4
+    page_part2 = 5
+    page_part2_cyber = 6
+    page_part2_sys = 7
+    page_part2_egov = 8
+    page_part3 = 9
+    page_part3_cyber = 10
+    page_part3_ea = 11
+    page_part3_hc = 12
+    page_part3_sys = 13
+    page_part3_projs = 14
+    page_part3_pmf = 15
+    page_part4_a = 16
+    page_part4_b = 16 + plan_span
+    page_annex1 = 17 + plan_span
+    page_annex2 = 19 + plan_span
+
     toc_items = [
-        ("DEFINITION OF TERMS", 0, True, "Preliminary"),
-        ("PART I. AGENCY PROFILE & STRATEGIC CONTEXT", 0, True, "Section I"),
-        ("A. Mandate, Vision, Mission, and Organizational Outcome", 1, False, ""),
-        ("A.1. Mandate", 2, False, ""),
-        ("A.2. Vision Statement", 2, False, ""),
-        ("A.3. Mission Statement", 2, False, ""),
-        ("A.4. Organizational Outcomes", 2, False, ""),
-        ("B. Organizational Structure", 1, False, ""),
-        ("B.1. Chief Information Officer (CIO) & ISSP Focal Person", 2, False, ""),
-        ("B.2. Human Capital", 2, False, ""),
-        ("C. Stakeholder Analysis", 1, False, ""),
-        ("PART II. CURRENT ICT ASSESSMENT", 0, True, "Section II"),
-        ("A. Strategic Concerns for ICT Use", 1, False, ""),
-        ("B. Existing Network Infrastructure", 1, False, ""),
-        ("B1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, ""),
-        ("B2. Cybersecurity Control Checklist", 2, False, ""),
-        ("C. Existing / Operational Information Systems (IS) Inventory", 1, False, ""),
-        ("D. E-Government Programs (EGP) Checklist", 1, False, ""),
-        ("PART III. PROPOSED ICT STRATEGY", 0, True, "Section III"),
-        ("A. Proposed Network Infrastructure", 1, False, ""),
-        ("A.1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, ""),
-        ("A.2. Cybersecurity Control Checklist", 2, False, ""),
-        ("B. Enterprise Architecture", 1, False, ""),
-        ("C. Proposed ICT Human Capital", 1, False, ""),
-        ("D. Proposed Information Systems", 1, False, ""),
-        ("E. ICT Projects Portfolio", 1, True, ""),
-        ("E.1. Internal ICT Projects", 2, False, ""),
-        ("E.2. Cross-Agency ICT Projects", 2, False, ""),
-        ("F. Performance Measurement Framework", 1, True, ""),
-        ("F.1. Internal ICT Projects Scorecard", 2, False, ""),
-        ("F.2. Cross-Agency ICT Projects Scorecard", 2, False, ""),
+        ("DEFINITION OF TERMS", 0, True, str(page_defs)),
+        ("PART I. AGENCY PROFILE & STRATEGIC CONTEXT", 0, True, str(page_part1)),
+        ("A. Mandate, Vision, Mission, and Organizational Outcome", 1, False, str(page_part1)),
+        ("A.1. Mandate", 2, False, str(page_part1)),
+        ("A.2. Vision Statement", 2, False, str(page_part1)),
+        ("A.3. Mission Statement", 2, False, str(page_part1)),
+        ("A.4. Organizational Outcomes", 2, False, str(page_part1)),
+        ("B. Organizational Structure", 1, False, str(page_part1)),
+        ("B.1. Chief Information Officer (CIO) & ISSP Focal Person", 2, False, str(page_part1)),
+        ("B.2. Human Capital", 2, False, str(page_part1)),
+        ("C. Stakeholder Analysis", 1, False, str(page_part1)),
+        ("PART II. CURRENT ICT ASSESSMENT", 0, True, str(page_part2)),
+        ("A. Strategic Concerns for ICT Use", 1, False, str(page_part2)),
+        ("B. Existing Network Infrastructure", 1, False, str(page_part2)),
+        ("B1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, str(page_part2)),
+        ("B2. Cybersecurity Control Checklist", 2, False, str(page_part2_cyber)),
+        ("C. Existing / Operational Information Systems (IS) Inventory", 1, False, str(page_part2_sys)),
+        ("D. E-Government Programs (EGP) Checklist", 1, False, str(page_part2_egov)),
+        ("PART III. PROPOSED ICT STRATEGY", 0, True, str(page_part3)),
+        ("A. Proposed Network Infrastructure", 1, False, str(page_part3)),
+        ("A.1. LAN/WAN Set-Up and Connectivity Specifications", 2, False, str(page_part3)),
+        ("A.2. Cybersecurity Control Checklist", 2, False, str(page_part3_cyber)),
+        ("B. Enterprise Architecture", 1, False, str(page_part3_ea)),
+        ("C. Proposed ICT Human Capital", 1, False, str(page_part3_hc)),
+        ("D. Proposed Information Systems", 1, False, str(page_part3_sys)),
+        ("E. ICT Projects Portfolio", 1, True, str(page_part3_projs)),
+        ("E.1. Internal ICT Projects", 2, False, str(page_part3_projs)),
+        ("E.2. Cross-Agency ICT Projects", 2, False, str(page_part3_projs)),
+        ("F. Performance Measurement Framework", 1, True, str(page_part3_pmf)),
+        ("F.1. Internal ICT Projects Scorecard", 2, False, str(page_part3_pmf)),
+        ("F.2. Cross-Agency ICT Projects Scorecard", 2, False, str(page_part3_pmf)),
     ]
 
     if pmf_f3:
-        toc_items.append(("F.3. Institutional ICT Governance KPIs", 2, False, ""))
+        toc_items.append(("F.3. Institutional ICT Governance KPIs", 2, False, str(page_part3_pmf)))
 
     toc_items.extend([
-        ("PART IV. RESOURCE REQUIREMENTS", 0, True, "Section IV"),
-        ("A. Detailed Resource Deployment and Cost Breakdown", 1, False, ""),
+        ("PART IV. RESOURCE REQUIREMENTS", 0, True, str(page_part4_a)),
+        ("A. Detailed Resource Deployment and Cost Breakdown", 1, False, str(page_part4_a)),
     ])
 
     for y_idx, y_val in enumerate(planning_years):
-        toc_items.append((f"A.{y_idx + 1}. Year {y_idx + 1} Resource Deployment (FY {y_val})", 2, False, f"FY {y_val}"))
+        toc_items.append((f"A.{y_idx + 1}. Year {y_idx + 1} Resource Deployment (FY {y_val})", 2, False, str(page_part4_a + y_idx)))
 
     toc_items.extend([
-        ("B. Summary of Investments", 1, True, "Part IV.B"),
-        ("B.1. General Summary", 2, False, ""),
-        ("B.2. Fund Source", 2, False, ""),
-        ("B.3. Statement of Expenditure", 2, False, ""),
-        ("B.4. Object of Expenditure", 2, False, ""),
-        ("ANNEX 1: EXISTING INFORMATION & COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY", 0, True, "Annex 1"),
-        ("1. ICT Equipment Inventory", 1, False, ""),
-        ("2. ICT Software Inventory", 1, False, ""),
-        ("ANNEX 2: DISASTER RECOVERY & BUSINESS CONTINUITY PLAN (DRBCP) FOR ICT RESOURCES", 0, True, "Annex 2"),
-        ("1. Plan Overview & Disaster Recovery Team", 1, False, ""),
-        ("2. Business Impact Analysis (BIA) Summary", 1, False, ""),
-        ("3. ICT Component Inventory & Affected Assets", 1, False, ""),
-        ("4. Technical Recovery Strategy", 1, False, ""),
-        ("5. Standard Operating Procedures (SOP)", 1, False, ""),
-        ("6. Compliance, Scalability and Sustainability (MITHI Res. 2025-01)", 1, False, "")
+        ("B. Summary of Investments", 1, True, str(page_part4_b)),
+        ("B.1. General Summary", 2, False, str(page_part4_b)),
+        ("B.2. Fund Source", 2, False, str(page_part4_b)),
+        ("B.3. Statement of Expenditure", 2, False, str(page_part4_b)),
+        ("B.4. Object of Expenditure", 2, False, str(page_part4_b)),
+        ("ANNEX 1: EXISTING INFORMATION & COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY", 0, True, str(page_annex1)),
+        ("1. ICT Equipment Inventory", 1, False, str(page_annex1)),
+        ("2. ICT Software Inventory", 1, False, str(page_annex1 + 1)),
+        ("ANNEX 2: DISASTER RECOVERY & BUSINESS CONTINUITY PLAN (DRBCP) FOR ICT RESOURCES", 0, True, str(page_annex2)),
+        ("1. Plan Overview & Disaster Recovery Team", 1, False, str(page_annex2)),
+        ("2. Business Impact Analysis (BIA) Summary", 1, False, str(page_annex2)),
+        ("3. ICT Component Inventory & Affected Assets", 1, False, str(page_annex2)),
+        ("4. Technical Recovery Strategy", 1, False, str(page_annex2)),
+        ("5. Standard Operating Procedures (SOP)", 1, False, str(page_annex2)),
+        ("6. Compliance, Scalability and Sustainability (MITHI Res. 2025-01)", 1, False, str(page_annex2))
     ])
 
     toc_table = doc.add_table(rows=len(toc_items), cols=2)
@@ -19119,6 +19028,9 @@ def create_issp_docx(
         status_str = clean_str(getattr(itm, "status", "")).lower()
         if status_str and status_str not in ["approved", "submitted"]:
             continue
+        # Strict rule: All proposals must be bound to an ICT Project
+        if getattr(itm, "project_id", None) is None:
+            continue
         prop_items.append(itm)
 
     # Dynamically determine categories list from strategic categories or defaults
@@ -19147,7 +19059,7 @@ def create_issp_docx(
     # Preserve all categories present on active line items without dropping custom ones
     seen_cats = {normalize_category_name(c[0]).lower() for c in active_categories_list}
     for itm in prop_items:
-        resolved_c = resolve_proposal_category(itm)
+        resolved_c = resolve_proposal_category(itm, proj_lookup)
         if resolved_c and normalize_category_name(resolved_c).lower() not in seen_cats:
             seen_cats.add(normalize_category_name(resolved_c).lower())
             active_categories_list.append((resolved_c, True))
@@ -19185,7 +19097,7 @@ def create_issp_docx(
         for cat_name, is_proj_linked in active_categories_list:
             matched_items = []
             for itm in prop_items:
-                strat_name = normalize_category_name(resolve_proposal_category(itm)).lower()
+                strat_name = normalize_category_name(resolve_proposal_category(itm, proj_lookup)).lower()
                 is_match = (normalize_category_name(cat_name).lower() == strat_name)
 
                 if is_match:
@@ -19266,6 +19178,8 @@ def create_issp_docx(
                     total_yr_cost += line_cost
 
                     proj = getattr(itm, "project_rel", None)
+                    if not proj and getattr(itm, "project_id", None):
+                        proj = proj_lookup.get(str(itm.project_id))
                     resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
                     deploy_loc = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location
 
@@ -19564,6 +19478,9 @@ def create_issp_docx(
     r_eq_tot.cells[2].paragraphs[0].add_run(str(tot_c_ops + tot_f_ops)).font.bold = True
     r_eq_tot.cells[3].paragraphs[0].add_run(str(tot_c_eol + tot_f_eol)).font.bold = True
     r_eq_tot.cells[4].paragraphs[0].add_run(str(tot_c_bak + tot_f_bak)).font.bold = True
+
+    # Dedicated Section Break: Ensures 2. ICT Software Inventory starts on page_annex1 + 1
+    doc.add_page_break()
 
     p_a2 = doc.add_paragraph()
     p_a2.paragraph_format.space_before = Pt(6)
@@ -23399,16 +23316,7 @@ def compile_issp_document(self, metadata: dict):
 
         performance_metrics = db.query(PerformanceMetric).filter(PerformanceMetric.issp_period == issp_period).all()
 
-        # Dynamically determine standalone categories from database
-        non_project_cats = db.query(StrategicCategory.name).filter(
-            StrategicCategory.is_project_linked == False,
-            StrategicCategory.is_active == True
-        ).all()
-        standalone_cat_names = [c[0].lower().strip() for c in non_project_cats] if non_project_cats else []
-        for default_cat in ["office productivity", "continuing costs/expenses", "continuing costs"]:
-            if default_cat not in standalone_cat_names:
-                standalone_cat_names.append(default_cat)
-
+        # Strict compilation: Only pull approved proposals that are bound to an ICT Project
         raw_approved_items = db.query(Proposal).options(
             joinedload(Proposal.project_rel),
             joinedload(Proposal.outcome),
@@ -23417,15 +23325,11 @@ def compile_issp_document(self, metadata: dict):
         ).filter(
             Proposal.issp_period == issp_period,
             func.lower(cast(Proposal.status, String)) == "approved",
+            Proposal.project_id.isnot(None),
             or_(Proposal.is_archived == False, Proposal.is_archived.is_(None))
         ).all()
 
-        # Include all approved proposals that are project-linked OR standalone operational outlays
-        items = []
-        for itm in raw_approved_items:
-            resolved_cat = resolve_proposal_category(itm).lower().strip()
-            if itm.project_id is not None or resolved_cat in standalone_cat_names:
-                items.append(itm)
+        items = raw_approved_items
 
         inventory = db.query(ExistingInventory).filter(
             or_(
@@ -23884,56 +23788,75 @@ def generate_complete_issp_html(
 
     head_title = clean_text(getattr(narrative, 'agency_head_position', None), getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency"))
 
-    # Robust running header logo css to prevent gap or missing layout
-    if running_header_logo:
-        logo_css = f'background-image: url("{running_header_logo}"); background-size: 26px 26px; background-repeat: no-repeat; background-position: left center; padding-left: 32px;'
-    else:
-        logo_css = 'padding-left: 0;'
-
-    # Shared running header block starting from Table of Contents through to end of document
-    shared_running_header = f"""
-        @top-left {{
-            content: "{agency_header_name}";
-            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-            font-size: 8.5pt;
-            font-weight: bold;
-            color: #0f172a;
-            white-space: nowrap;
-            text-align: left;
-            vertical-align: middle;
-            {logo_css}
-            padding-bottom: 4px;
-            border-bottom: 1.5px solid #cbd5e1;
-            height: 32px;
-        }}
-        @top-center {{
-            content: "";
-            vertical-align: middle;
-            padding-bottom: 4px;
-            border-bottom: 1.5px solid #cbd5e1;
-            height: 32px;
-        }}
-        @top-right {{
-            content: "INFORMATION SYSTEMS STRATEGIC PLAN {plan_years_label}";
-            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-            font-size: 8.5pt;
-            font-weight: bold;
-            color: #0f172a;
-            text-align: right;
-            vertical-align: middle;
-            white-space: nowrap;
-            padding-bottom: 4px;
-            border-bottom: 1.5px solid #cbd5e1;
-            height: 32px;
-        }}
+    # Defined in HTML body and displayed via CSS running element to prevent logo squishing
+    running_header_html = f"""
+    <header class="page-running-header">
+        <table class="running-header-table">
+            <tr>
+                <td class="rhead-logo">
+                    {f'<img src="{running_header_logo}" alt="Logo" class="rhead-logo-img" />' if running_header_logo else ''}
+                </td>
+                <td class="rhead-agency">
+                    {agency_header_name}
+                </td>
+                <td class="rhead-plan">
+                    INFORMATION SYSTEMS STRATEGIC PLAN {plan_years_label}
+                </td>
+            </tr>
+        </table>
+    </header>
     """
-
     css = f"""
     <style>
+        /* RUNNING HEADER STYLES (PREVENTS SQUISHED / CLIPPED LOGO) */
+        .page-running-header {{
+            position: running(docRunningHeader);
+            width: 100%;
+        }}
+        .running-header-table {{
+            width: 100%;
+            border-collapse: collapse;
+            border-bottom: 1.5px solid #cbd5e1;
+            margin: 0;
+            padding: 0;
+        }}
+        .running-header-table td {{
+            border: none;
+            padding: 0 4px 6px 4px;
+            vertical-align: middle;
+            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+            font-size: 8.5pt;
+            font-weight: bold;
+            color: #0f172a;
+        }}
+        .rhead-logo {{
+            width: 28px;
+            padding-right: 6px !important;
+        }}
+        .rhead-logo-img {{
+            height: 24px;
+            width: 24px;
+            object-fit: contain;
+            display: block;
+        }}
+        .rhead-agency {{
+            text-align: left;
+            white-space: nowrap;
+        }}
+        .rhead-plan {{
+            text-align: right;
+            white-space: nowrap;
+        }}
+
+        /* BASE PAGE GEOMETRY & GLOBAL RUNNING HEADER/FOOTER */
         @page {{
             size: A4 landscape;
-            margin: 1.2in 1.0in 1.0in 1.0in;
-            {shared_running_header}
+            margin: 1.1in 1.0in 0.9in 1.0in;
+            @top-center {{
+                content: element(docRunningHeader);
+                vertical-align: bottom;
+                width: 100%;
+            }}
             @bottom-left {{
                 content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
@@ -23976,8 +23899,12 @@ def generate_complete_issp_html(
         /* HEADERS START CONTINUOUSLY ON TABLE OF CONTENTS */
         @page toc_layout {{
             size: A4 landscape;
-            margin: 1.2in 1.0in 1.0in 1.0in;
-            {shared_running_header}
+            margin: 1.1in 1.0in 0.9in 1.0in;
+            @top-center {{
+                content: element(docRunningHeader);
+                vertical-align: bottom;
+                width: 100%;
+            }}
             @bottom-left {{
                 content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
@@ -24013,9 +23940,13 @@ def generate_complete_issp_html(
 
         @page part1_start {{
             size: A4 landscape;
-            margin: 1.2in 1.0in 1.0in 1.0in;
+            margin: 1.1in 1.0in 0.9in 1.0in;
             counter-reset: page 1;
-            {shared_running_header}
+            @top-center {{
+                content: element(docRunningHeader);
+                vertical-align: bottom;
+                width: 100%;
+            }}
             @bottom-left {{
                 content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
@@ -24231,7 +24162,6 @@ def generate_complete_issp_html(
         }}
     </style>
     """
-
     # --- COVER PAGE ---
     raw_scope = str(getattr(narrative.scope_choice, "value", narrative.scope_choice or "")).strip().lower()
     scope_json = narrative.scope_json or {}
@@ -25228,7 +25158,9 @@ def generate_complete_issp_html(
                             line_cost = Decimal(qty) * adj_unit
                             year_total += line_cost
                             deploy_office = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location or "Central Office"
-                            fund_val = str(getattr(getattr(p_obj, "funding_source", None) or itm.fund_source, 'value', itm.fund_source or 'GAA'))
+                            proj = getattr(itm, "project_rel", None)
+                            resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
+                            fund_val = str(getattr(resolved_fund, 'value', resolved_fund or itm.fund_source or 'GAA'))
 
                             rows += f"""
                             <tr>
@@ -25267,7 +25199,9 @@ def generate_complete_issp_html(
                         line_cost = Decimal(qty) * adj_unit
                         year_total += line_cost
                         deploy_office = itm.target_office_automated or getattr(itm.department, 'name', '') or itm.office_location or "Central Office"
-                        fund_val = str(getattr(itm.fund_source, 'value', itm.fund_source or 'GAA'))
+                        proj = getattr(itm, "project_rel", None)
+                        resolved_fund = getattr(proj, "funding_source", None) or itm.fund_source
+                        fund_val = str(getattr(resolved_fund, 'value', resolved_fund or itm.fund_source or 'GAA'))
 
                         rows += f"""
                         <tr>
@@ -25714,8 +25648,7 @@ def generate_complete_issp_html(
     </div>
     """
 
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}</body></html>"
-
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{running_header_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}</body></html>"
 
 =========================================
 CORE SYSTEM FILE: ./app/utils/helpers.py
@@ -25734,6 +25667,7 @@ Core Capabilities:
 - DBM Capitalization Thresholding & Dynamic UACS Accounting Engine
 - Annex 1 Hardware Obsolescence Quota & Anti-Loop Replacement Enforcement
 - Section 8.0 Needs Assessment, Multi-Pathway Resolution & PIA Audit Checks
+- Strict Project-Governed Rollup & Multi-Pathway Strategic Concern Validation
 =============================================================================
 """
 
@@ -26035,7 +25969,7 @@ def get_active_issp_period(db: Optional[Session] = None) -> str:
                 except Exception:
                     pass
 
-    return getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+    return getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
 
 
 def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = None) -> List[int]:
@@ -26054,7 +25988,7 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
             issp_period = getattr(narrative, "issp_period", None)
 
     if not start_year or not end_year:
-        period_str = str(issp_period or getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")).strip()
+        period_str = str(issp_period or getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")).strip()
         parts = period_str.split("-")
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             start_year = int(parts[0])
@@ -26063,7 +25997,7 @@ def get_cycle_year_range(narrative: Optional[Any], issp_period: Optional[str] = 
             start_year = int(parts[0])
             end_year = int(parts[0])
         else:
-            start_year, end_year = 2028, 2030
+            start_year, end_year = 2026, 2028
 
     if start_year > end_year:
         start_year, end_year = end_year, start_year
@@ -26103,7 +26037,7 @@ def validate_active_years_alignment(db: Optional[Session], submitted_years: List
                 except Exception:
                     pass
 
-    target_period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+    target_period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
     year_range = get_cycle_year_range(active_narrative, issp_period=target_period)
     expected_years = [str(y) for y in year_range]
     submitted_years_str = [str(y).strip() for y in submitted_years]
@@ -26150,7 +26084,7 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 except Exception:
                     pass
 
-    period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2028-2030")
+    period = active_narrative.issp_period if active_narrative else getattr(settings, "DEFAULT_ISSP_CYCLE", "2026-2028")
     year_range = get_cycle_year_range(active_narrative, issp_period=period)
     expected_years = [str(y) for y in year_range]
     aligned_data = {year: 0 for year in expected_years}
@@ -26166,7 +26100,7 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
                 qty_val = 0
             sanitized_input[k_str] = max(0, qty_val)
 
-    # 1. Direct calendar year match (e.g. "2028", "2029", "2030")
+    # 1. Direct calendar year match (e.g. "2026", "2027", "2028")
     for yr in expected_years:
         if yr in sanitized_input:
             aligned_data[yr] = sanitized_input[yr]
@@ -26213,9 +26147,9 @@ def align_and_validate_years(db: Optional[Session], yearly_data: Dict[str, Any],
     return period, aligned_data
 
 
-# =========================================================================
+# ==========================================================
 # 3. DYNAMIC POLICY & INFLATION BUFFER RESOLVERS
-# =========================================================================
+# ==========================================================
 
 def get_governance_policy(db_or_conn: Optional[Any] = None) -> Dict[str, Any]:
     """
@@ -26325,20 +26259,6 @@ def get_adjusted_unit_cost_for_year(connection_or_db: Any, base_cost: Decimal, c
 # =========================================================================
 # 4. DYNAMIC CAPITALIZATION & UACS RESOLUTION
 # =========================================================================
-
-def clean_uacs_title(uacs_str: Optional[str]) -> str:
-    """
-    Strips numeric UACS accounting prefixes, displaying solely the clean account title.
-    Example: '50604050 03 - ICT Equipment (CO)' -> 'ICT Equipment (CO)'
-    """
-    if not uacs_str:
-        return ""
-    val = str(uacs_str).strip()
-    if " - " in val:
-        return val.split(" - ", 1)[1].strip()
-    cleaned = re.sub(r'^\d{8}(?:\s+\d{2})?\s*[-–]?\s*', '', val).strip()
-    return cleaned or val
-
 
 def classify_uacs_and_expenditure(
     item_name: str,
@@ -26636,7 +26556,8 @@ def verify_annex1_obsolescence_link(
     category: Optional[Any] = None,
     strategic_category: Optional[Any] = None,
     is_expansion: bool = False,
-    is_in_house_turnover: bool = False
+    is_in_house_turnover: bool = False,
+    project_category: Optional[Any] = None
 ) -> Tuple[bool, str]:
     """
     Asserts that replacement hardware requested is justified by an equivalent 
@@ -26655,12 +26576,14 @@ def verify_annex1_obsolescence_link(
 
     cat_str = str(getattr(category, "value", category or "")).strip().lower()
     strat_str = str(getattr(strategic_category, "value", strategic_category or "")).strip().lower()
+    if project_category:
+        strat_str = str(getattr(project_category, "value", project_category or "")).strip().lower()
 
     # Non-hardware procurement is exempt from physical hardware retirement quotas
     if cat_str and not any(k in cat_str for k in ["hardware", "equipment"]):
         return True, "Non-hardware procurement; exempt from physical obsolescence quota."
 
-    # Strategic project outlays and continuing expenses are exempt from Office Productivity EOL quotas
+    # Strategic project outlays (Internal, Cross-Agency) and continuing expenses are exempt from Office Productivity EOL quotas
     if strat_str and "office productivity" not in strat_str:
         return True, "Project or operational expenditure; exempt from office equipment obsolescence quota."
 
@@ -26764,8 +26687,13 @@ def verify_strategic_concern_resolution(db: Session, issp_period: str, concern: 
     if linked_systems > 0:
         return True, "Resolved via Information System."
 
-    # 2. Check Strategic ICT Projects (Direct alignment or keyword matching)
+    # 2. Check Strategic ICT Projects (Direct alignment, outcome linkage, or keyword matching)
     project_filters = []
+    if hasattr(IctProject, "strategic_concern_id") and c_id:
+        project_filters.append(getattr(IctProject, "strategic_concern_id") == c_id)
+    if hasattr(IctProject, "outcome_id") and getattr(concern, "outcome_id", None):
+        project_filters.append(getattr(IctProject, "outcome_id") == concern.outcome_id)
+
     if c_text:
         project_filters.extend([
             func.lower(func.trim(IctProject.project_title)).contains(c_text),
@@ -26785,6 +26713,11 @@ def verify_strategic_concern_resolution(db: Session, issp_period: str, concern: 
 
     # 3. Check Resource Proposals (Hardware, Peripherals, Infrastructure)
     prop_filters = []
+    if hasattr(Proposal, "strategic_concern_id") and c_id:
+        prop_filters.append(getattr(Proposal, "strategic_concern_id") == c_id)
+    if hasattr(Proposal, "outcome_id") and getattr(concern, "outcome_id", None):
+        prop_filters.append(Proposal.outcome_id == concern.outcome_id)
+
     if c_text:
         prop_filters.extend([
             func.lower(func.trim(Proposal.item_name)).contains(c_text),
@@ -26921,17 +26854,13 @@ def verify_drbcp_funding(db: Session, issp_period: str) -> Tuple[bool, str]:
     ).all()
 
     if critical_bias:
-        strat_cat_col = cast(Proposal.strategic_category, String)
         uacs_col = cast(Proposal.uacs_object_code, String)
 
+        # In DICT v.2026 methodology, all proposals must be bound to an ICT Project
         cloud_items = db.query(Proposal).filter(
             Proposal.issp_period == issp_period,
             func.lower(cast(Proposal.status, String)) == "approved",
-            or_(
-                func.lower(strat_cat_col).like("%continuing%"),
-                func.lower(strat_cat_col).like("%project%"),
-                Proposal.project_id.isnot(None)
-            ),
+            Proposal.project_id.isnot(None),
             or_(
                 func.lower(uacs_col).like("%subscription%"),
                 func.lower(Proposal.item_name).like("%cloud%"),
@@ -26948,7 +26877,7 @@ def verify_drbcp_funding(db: Session, issp_period: str) -> Tuple[bool, str]:
         if total_cloud_funding <= Decimal("0.00"):
             return False, (
                 "Disaster Recovery & Continuity Funding Required: Frontline mission-critical systems require an RTO <= 4 hours "
-                "(mandating GovCloud real-time failover), but no funding is allocated under Continuing Costs or ICT Projects for Cloud/DR Subscriptions."
+                "(mandating GovCloud real-time failover), but no funding is allocated under an approved ICT Project for Cloud/DR Subscriptions in Part IV.A."
             )
 
     return True, "DRBCP continuity funding verified."
@@ -32016,7 +31945,7 @@ export default function DashboardLayout() {
             )}
           </div>
           <div className="flex items-center gap-3 shrink-0">
-            <span className="px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 font-mono font-bold text-[10px] border border-blue-200 dark:border-blue-900">
+            <span className="px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 font-mono font-bold text-[10px] border border-blue-200 dark:border-blue-900 whitespace-nowrap shrink-0"> 
               Active Cycle: FY {activeCycle || "2026-2028"}
             </span>
           </div>
@@ -34427,6 +34356,34 @@ export default function CeilingControl() {
     return { capex: num, mooe: 0 };
   }, []);
 
+  // Auto-dismiss alerts
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Modal escape key handler
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (activeDept) setActiveDept(null);
+        if (isEditingGlobal) setIsEditingGlobal(false);
+        if (editingUacsItem) setEditingUacsItem(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeDept, isEditingGlobal, editingUacsItem]);
+
   // -------------------------------------------------------------
   // DATA FETCHING PIPELINE
   // -------------------------------------------------------------
@@ -35027,6 +34984,31 @@ export default function CeilingControl() {
           </button>
         </div>
       </div>
+
+      {/* Real-time Status Notifications */}
+      {error && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
+            <span>{typeof error === "object" ? (error.message || JSON.stringify(error)) : error}</span>
+          </div>
+          <button onClick={() => setError(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {success && (
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>{success}</span>
+          </div>
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Real-time Dry Run Validation Banner */}
       {validationResult && (
@@ -36281,8 +36263,8 @@ export default function InvestmentSummaryViewer() {
   const [success, setSuccess] = useState(null);
 
   // Proposal-to-Project Governance Filter:
-  // true = Only approved proposals bound to ICT Projects (or standalone operational buckets) -> matches final ISSP PDF compilation.
-  // false = Entire planning pipeline ledger (including pending drafts and pool items).
+  // true = Only approved proposals bound to an authorized ICT Project charter (Part III.E) -> matches official ISSP compilation.
+  // false = Entire planning pipeline ledger (including pending drafts and intake pool items).
   const [onlyApproved, setOnlyApproved] = useState(true);
 
   // Active View Tab: "overview" | "b1" | "b2" | "b3" | "b4" | "print"
@@ -36789,7 +36771,7 @@ export default function InvestmentSummaryViewer() {
                   ? "bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs" 
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
               }`}
-              title="Official DICT compiled scope: Approved proposals bound to ICT Projects or Continuing Costs"
+              title="Official DICT compiled scope: Approved proposals bound to an ICT Project charter in Part III.E"
             >
               <CheckSquare className="w-3.5 h-3.5" />
               <span>Project-Bound Scope</span>
@@ -36861,7 +36843,7 @@ export default function InvestmentSummaryViewer() {
           </strong>
           {onlyApproved ? (
             <span>
-              Under standard DICT ISSP regulations, only approved proposals bound to an authorized <strong>ICT Project (Part III.E)</strong> or statutory continuing operations (Office Productivity / Continuing Costs) contribute to the compiled Part IV.B summary and PDF document. Detached pool items remain excluded until assigned.
+              Under standard DICT ISSP regulations, all outlays (including Office Productivity and Continuing Costs) must belong to an authorized <strong>ICT Project charter (Part III.E)</strong> to contribute to the compiled Part IV.B summary and PDF document. Detached pool items remain quarantined in the Intake Pool until assigned to an ICT Project in the Projects Portfolio.
             </span>
           ) : (
             <span>
@@ -36889,7 +36871,7 @@ export default function InvestmentSummaryViewer() {
             <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{success}</span>
           </div>
-          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer">
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -38787,7 +38769,7 @@ export default function AdminDashboard() {
             <div 
               className={`h-full rounded-full transition-all duration-500 ${
                 utilizationPercent > 100 ? "bg-rose-500" : utilizationPercent > 80 ? "bg-amber-500" : "bg-blue-600"
-              }`}
+              }`} 
               style={{ width: `${Math.min(utilizationPercent, 100)}%` }} 
             />
           </div>
@@ -38920,13 +38902,6 @@ export default function AdminDashboard() {
               ) : (
                 filteredProposals.slice(0, 10).map(p => {
                   const isProjectBound = Boolean(p.project_id);
-                  const totalCostNum = Number(p.total_cost || (p.unit_cost * p.total_qty) || 0);
-                  const isCapitalOutlay = totalCostNum >= 50000 || (p.uacs_object_code || "").toLowerCase().includes("(co)");
-                  const isStandaloneOperational = [
-                    "office productivity", 
-                    "continuing costs/expenses", 
-                    "continuing costs"
-                  ].includes((p.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
 
                   return (
                     <tr key={p.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-955/30 transition-colors">
@@ -38943,21 +38918,13 @@ export default function AdminDashboard() {
                       </td>
                       <td className="p-3.5 whitespace-nowrap">
                         {isProjectBound ? (
-                          <span className="px-2 py-0.5 bg-purple-50 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded font-mono text-[9.5px] font-bold flex items-center gap-1 w-fit">
+                          <span className="px-2 py-0.5 bg-purple-50 text-purple-700 dark:bg-purple-955/50 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded font-mono text-[9.5px] font-bold flex items-center gap-1 w-fit">
                             <Layers className="w-3 h-3" />
                             <span>Project-Bound</span>
                           </span>
-                        ) : isStandaloneOperational ? (
-                          <span className="px-2 py-0.5 bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded font-mono text-[9.5px] font-medium w-fit block">
-                            Standalone OpEx
-                          </span>
-                        ) : p.status === "Approved" ? (
-                          <span className="px-2 py-0.5 bg-amber-50 text-amber-700 dark:bg-amber-955/50 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded font-mono text-[9.5px] font-bold w-fit block" title="Quarantined in Intake Pool until linked to an ICT Project">
-                            Intake Pool (Needs Project Link)
-                          </span>
                         ) : (
-                          <span className="text-[10px] text-slate-400 font-mono italic">
-                            Unassigned
+                          <span className="px-2 py-0.5 bg-rose-50 text-rose-700 dark:bg-rose-955/50 dark:text-rose-300 border border-rose-200 dark:border-rose-800 rounded font-mono text-[9.5px] font-bold w-fit block" title="Unlinked: Assign an ICT Project">
+                            Unlinked (Assign Project)
                           </span>
                         )}
                       </td>
@@ -38997,7 +38964,7 @@ export default function AdminDashboard() {
                               Return
                             </button>
                           </div>
-                        ) : p.status === "Approved" && !isProjectBound && !isStandaloneOperational ? (
+                        ) : p.status === "Approved" && !isProjectBound ? (
                           <button
                             type="button"
                             onClick={() => navigate("/admin/projects/internal")}
@@ -39920,7 +39887,8 @@ CORE SYSTEM FILE: ./frontend/src/views/admin/Governance/CategorizationManager.js
 =========================================
 
 // frontend/src/views/admin/Governance/CategorizationManager.jsx
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../../context/AuthContext";
 import { useCycle } from "../../../context/CycleContext";
 import { 
@@ -39967,12 +39935,24 @@ import {
   Sparkles,
   SlidersHorizontal,
   Filter,
-  Info
+  Info,
+  ArrowRight,
+  FolderKanban,
+  Check
 } from "lucide-react";
 
 export default function CategorizationManager() {
   const { user } = useAuth();
   const { activeCycle, planningYears } = useCycle();
+  const navigate = useNavigate();
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Active Navigation Tab: "uacs" | "strategic" | "funds" | "strategies" | "harmonization" | "thresholds"
   const [activeTab, setActiveTab] = useState("uacs");
@@ -40003,12 +39983,12 @@ export default function CategorizationManager() {
   const [editUacsDesc, setEditUacsDesc] = useState("");
 
   // -------------------------------------------------------------------------
-  // 2. STRATEGIC CATEGORIES STATE
+  // 2. STRATEGIC CATEGORIES STATE (PROJECT-GOVERNED BY DEFAULT)
   // -------------------------------------------------------------------------
   const [strategicCategories, setStrategicCategories] = useState([]);
   const [newCatName, setNewCatName] = useState("");
   const [newCatCode, setNewCatCode] = useState("");
-  const [newCatIsProject, setNewCatIsProject] = useState(false);
+  const [newCatIsProject, setNewCatIsProject] = useState(true); // Default to Project-Governed in DICT v.2026
   const [newCatIsRecurring, setNewCatIsRecurring] = useState(false);
   const [newCatDesc, setNewCatDesc] = useState("");
 
@@ -40016,7 +39996,7 @@ export default function CategorizationManager() {
   const [editingCat, setEditingCat] = useState(null);
   const [editCatName, setEditCatName] = useState("");
   const [editCatCode, setEditCatCode] = useState("");
-  const [editCatIsProject, setEditCatIsProject] = useState(false);
+  const [editCatIsProject, setEditCatIsProject] = useState(true);
   const [editCatIsRecurring, setEditCatIsRecurring] = useState(false);
   const [editCatDesc, setEditCatDesc] = useState("");
 
@@ -40064,6 +40044,38 @@ export default function CategorizationManager() {
 
   const token = user?.token || user?.accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : "") || "";
 
+  // Auto-dismiss transient notifications
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) setError(null);
+      }, 7000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Keyboard navigation for closing edit modals on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (editingUacs) setEditingUacs(null);
+        if (editingCat) setEditingCat(null);
+        if (editingHarm) setEditingHarm(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editingUacs, editingCat, editingHarm]);
+
   // Dynamic derivation of active cycle years (handles arbitrary 1 to N-year spans)
   const cycleYears = useMemo(() => {
     if (planningYears && planningYears.length > 0) return planningYears;
@@ -40098,6 +40110,8 @@ export default function CategorizationManager() {
         getInflationSettings(token).catch(() => null)
       ]);
 
+      if (!isMountedRef.current) return;
+
       setUacsList(Array.isArray(uacsData) ? uacsData : []);
       setStrategicCategories(Array.isArray(catData) ? catData : []);
       setFundSources(Array.isArray(fundData) ? fundData : []);
@@ -40129,9 +40143,13 @@ export default function CategorizationManager() {
         setInflationRates(defaultRates);
       }
     } catch (err) {
-      setError(err.message || "Failed to load system categorizations.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to load system categorizations.");
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [token, cycleYears]);
 
@@ -40157,16 +40175,22 @@ export default function CategorizationManager() {
         is_subscription_default: newUacsIsSub,
         description: newUacsDesc.trim() || null
       });
-      setSuccess(`UACS Code '${newUacsCode.trim()}' registered successfully.`);
-      setNewUacsCode("");
-      setNewUacsTitle("");
-      setNewUacsDesc("");
-      setNewUacsIsSub(false);
+      if (isMountedRef.current) {
+        setSuccess(`UACS Code '${newUacsCode.trim()}' registered successfully.`);
+        setNewUacsCode("");
+        setNewUacsTitle("");
+        setNewUacsDesc("");
+        setNewUacsIsSub(false);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to register UACS code.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to register UACS code.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40193,13 +40217,19 @@ export default function CategorizationManager() {
         is_subscription_default: editUacsIsSub,
         description: editUacsDesc.trim() || null
       });
-      setSuccess(`UACS Code '${editingUacs.uacs_code}' updated successfully.`);
-      setEditingUacs(null);
+      if (isMountedRef.current) {
+        setSuccess(`UACS Code '${editingUacs.uacs_code}' updated successfully.`);
+        setEditingUacs(null);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update UACS entry.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update UACS entry.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40209,15 +40239,19 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteUacsEntry(token, id);
-      setSuccess(`UACS code '${code}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`UACS code '${code}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete UACS code.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete UACS code.");
+      }
     }
   };
 
   // =========================================================================
-  // 2. STRATEGIC CATEGORIES HANDLERS
+  // 2. STRATEGIC CATEGORIES HANDLERS (PROJECT-GOVERNED INTEGRATION)
   // =========================================================================
   const handleCreateCategory = async (e) => {
     e.preventDefault();
@@ -40231,21 +40265,27 @@ export default function CategorizationManager() {
       await createStrategicCategory(token, {
         name: newCatName.trim(),
         code: code,
-        is_project_linked: newCatIsProject,
+        is_project_linked: newCatIsProject !== undefined ? newCatIsProject : true,
         is_recurring_expense: newCatIsRecurring,
         description: newCatDesc.trim() || null
       });
-      setSuccess(`Strategic Category '${newCatName}' registered.`);
-      setNewCatName("");
-      setNewCatCode("");
-      setNewCatDesc("");
-      setNewCatIsProject(false);
-      setNewCatIsRecurring(false);
+      if (isMountedRef.current) {
+        setSuccess(`Strategic Category '${newCatName}' registered. Bind proposals to ICT Project charters to compile.`);
+        setNewCatName("");
+        setNewCatCode("");
+        setNewCatDesc("");
+        setNewCatIsProject(true);
+        setNewCatIsRecurring(false);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add category.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add category.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40253,7 +40293,7 @@ export default function CategorizationManager() {
     setEditingCat(cat);
     setEditCatName(cat.name || "");
     setEditCatCode(cat.code || "");
-    setEditCatIsProject(Boolean(cat.is_project_linked));
+    setEditCatIsProject(cat.is_project_linked !== undefined ? Boolean(cat.is_project_linked) : true);
     setEditCatIsRecurring(Boolean(cat.is_recurring_expense));
     setEditCatDesc(cat.description || "");
   };
@@ -40273,13 +40313,19 @@ export default function CategorizationManager() {
         is_recurring_expense: editCatIsRecurring,
         description: editCatDesc.trim() || null
       });
-      setSuccess(`Strategic Category '${editCatName}' updated successfully.`);
-      setEditingCat(null);
+      if (isMountedRef.current) {
+        setSuccess(`Strategic Category '${editCatName}' updated successfully.`);
+        setEditingCat(null);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update category.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update category.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40289,10 +40335,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteStrategicCategory(token, id);
-      setSuccess(`Category '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Category '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete category.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete category.");
+      }
     }
   };
 
@@ -40313,15 +40363,21 @@ export default function CategorizationManager() {
         code: code,
         description: newFundDesc.trim() || null
       });
-      setSuccess(`Fund Source '${newFundName}' added.`);
-      setNewFundName("");
-      setNewFundCode("");
-      setNewFundDesc("");
+      if (isMountedRef.current) {
+        setSuccess(`Fund Source '${newFundName}' added. Assign to ICT Projects in Part III.E.`);
+        setNewFundName("");
+        setNewFundCode("");
+        setNewFundDesc("");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add fund source.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add fund source.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40331,10 +40387,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteFundSource(token, code);
-      setSuccess(`Fund Source '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Fund Source '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete fund source.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete fund source.");
+      }
     }
   };
 
@@ -40355,15 +40415,21 @@ export default function CategorizationManager() {
         code: code,
         description: newStratDesc.trim() || null
       });
-      setSuccess(`Development Strategy '${newStratName}' added.`);
-      setNewStratName("");
-      setNewStratCode("");
-      setNewStratDesc("");
+      if (isMountedRef.current) {
+        setSuccess(`Development Strategy '${newStratName}' registered.`);
+        setNewStratName("");
+        setNewStratCode("");
+        setNewStratDesc("");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add development strategy.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add development strategy.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40373,10 +40439,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteDevelopmentStrategy(token, code);
-      setSuccess(`Development strategy '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Development strategy '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete development strategy.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete development strategy.");
+      }
     }
   };
 
@@ -40396,15 +40466,21 @@ export default function CategorizationManager() {
         is_mandatory: newHarmMandatory,
         description: newHarmDesc.trim() || null
       });
-      setSuccess(`Harmonization Criterion '${newHarmName}' added.`);
-      setNewHarmName("");
-      setNewHarmMandatory(false);
-      setNewHarmDesc("");
+      if (isMountedRef.current) {
+        setSuccess(`Harmonization Criterion '${newHarmName}' added.`);
+        setNewHarmName("");
+        setNewHarmMandatory(false);
+        setNewHarmDesc("");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to add harmonization criterion.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to add harmonization criterion.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40428,13 +40504,19 @@ export default function CategorizationManager() {
         is_mandatory: editHarmMandatory,
         description: editHarmDesc.trim() || null
       });
-      setSuccess(`Harmonization Criterion '${editHarmName}' updated successfully.`);
-      setEditingHarm(null);
+      if (isMountedRef.current) {
+        setSuccess(`Harmonization Criterion '${editHarmName}' updated successfully.`);
+        setEditingHarm(null);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update criterion.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update criterion.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40444,10 +40526,14 @@ export default function CategorizationManager() {
     setSuccess(null);
     try {
       await deleteHarmonizationCriterion(token, id);
-      setSuccess(`Harmonization criterion '${name}' deleted.`);
+      if (isMountedRef.current) {
+        setSuccess(`Harmonization criterion '${name}' deleted.`);
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to delete criterion.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to delete criterion.");
+      }
     }
   };
 
@@ -40488,12 +40574,18 @@ export default function CategorizationManager() {
         updatePolicySettings(token, policySettings),
         updateInflationSettings(token, { rates: cleanRates })
       ]);
-      setSuccess("Capitalization thresholds and multi-year inflation buffer settings saved successfully.");
+      if (isMountedRef.current) {
+        setSuccess("Capitalization thresholds and multi-year inflation buffer settings saved successfully.");
+      }
       loadAllCategorizations();
     } catch (err) {
-      setError(err.message || "Failed to update policy settings.");
+      if (isMountedRef.current) {
+        setError(err.message || "Failed to update policy settings.");
+      }
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -40583,11 +40675,20 @@ export default function CategorizationManager() {
             </span>
           </div>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
-            Centralized governance console for all procurement parameters. Configure <strong>UACS Object Codes</strong>, <strong>Strategic Spending Categories</strong>, <strong>Fund Sources</strong>, <strong>Development Strategies</strong>, <strong>Harmonization Criteria</strong>, and <strong>Multi-Year Inflation Buffers</strong>.
+            Centralized governance console for all procurement parameters. All proposals are strictly project-governed; strategic spending categories in Table B.1 and fund sources in Table B.2 are linked to ICT Project charters in Part III.E [2]. Unlinked proposals remain in the Intake Pool until assigned.
           </p>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          <Link
+            to="/admin/projects/internal"
+            className="px-3 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl border border-slate-300 dark:border-slate-700 font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs text-xs"
+            title="Inspect project charters in Part III.E"
+          >
+            <FolderKanban className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+            <span>Projects Portfolio (III.E)</span>
+          </Link>
+
           <CompilerSyncButton 
             moduleName="budget" 
             activeCycle={activeCycle} 
@@ -40846,7 +40947,7 @@ export default function CategorizationManager() {
       )}
 
       {/* ============================================================= */}
-      {/* TAB 2: STRATEGIC SPENDING CATEGORIES                          */}
+      {/* TAB 2: STRATEGIC SPENDING CATEGORIES (PROJECT-GOVERNED)      */}
       {/* ============================================================= */}
       {activeTab === "strategic" && (
         <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200/90 dark:border-slate-800 space-y-5 shadow-xs animate-fadeIn">
@@ -40854,10 +40955,10 @@ export default function CategorizationManager() {
             <div>
               <h3 className="font-bold text-xs uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2 font-serif">
                 <Tag className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>Strategic Procurement Spending Categories (Table B.1)</span>
+                <span>Strategic Procurement Spending Categories (Table B.1 &amp; Project Charters)</span>
               </h3>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                Manage the master categories used in Part IV.A budget tables and Table B.1. The four canonical categories are pre-configured. You can add dynamic custom categories.
+                Under DICT v.2026 rules, all proposals belong to an ICT Project [2]. Categories correspond to project charters in the <Link to="/admin/projects/internal" className="text-blue-600 dark:text-blue-400 font-bold underline">Projects Portfolio (Part III.E)</Link>.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -40916,7 +41017,7 @@ export default function CategorizationManager() {
                     onChange={e => setNewCatIsProject(e.target.checked)}
                     className="w-4 h-4 accent-blue-600 rounded"
                   />
-                  <span>Project-Linked</span>
+                  <span>Project-Governed (Part III.E)</span>
                 </label>
 
                 <button
@@ -40977,7 +41078,9 @@ export default function CategorizationManager() {
                   </div>
 
                   <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                    <span>{cat.is_project_linked ? "Tied to ICT Projects" : "Standalone Line Items"}</span>
+                    <span className="text-blue-600 dark:text-blue-400 font-bold">
+                      {cat.is_project_linked ? "Project-Governed (Part III.E)" : "Intake Pool Category"}
+                    </span>
                     <span>{cat.is_recurring_expense ? "Recurring (MOOE)" : "Capital / MOOE"}</span>
                   </div>
                 </div>
@@ -40999,7 +41102,7 @@ export default function CategorizationManager() {
                 <span>Financing Fund Sources (Table B.2 &amp; Project Inheritance)</span>
               </h3>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                Fund Sources are set on each <strong>ICT Project</strong> in Part III.E, and all child proposals inherit that Fund Source automatically upon project linkage.
+                Fund Sources are set on each <strong>ICT Project</strong> in Part III.E, and all child proposals inherit that Fund Source automatically upon project linkage [2].
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -41061,7 +41164,8 @@ export default function CategorizationManager() {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {filteredFunds.map(fs => {
-              const isCanonical = ["GAA", "FAP", "LOCALLY_FUNDED", "OTHER_INCOME"].includes(fs.code);
+              const isCanonical = ["GAA", "FAP", "LOCALLY_FUNDED", "OTHER_INCOME"].includes(fs.code) ||
+                                  ["General Appropriations Act (GAA)", "Foreign-Assisted Projects (FAP)", "Locally Funded", "Other Income Generating Sources"].includes(fs.display_name);
 
               return (
                 <div key={fs.code} className="p-4 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5 flex justify-between items-start">
@@ -41672,7 +41776,7 @@ export default function CategorizationManager() {
                     className="w-4 h-4 accent-blue-600 rounded"
                   />
                   <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                    Project-Linked (Tied to Part III.E Initiatives)
+                    Project-Governed (Tied to ICT Project Charters in Part III.E)
                   </span>
                 </label>
 
@@ -46186,7 +46290,8 @@ import {
   Zap,
   Cloud,
   Coins,
-  Target
+  Target,
+  Database 
 } from "lucide-react";
 
 // Presets for Standard Public-Sector Stakeholder Groups
@@ -53662,31 +53767,11 @@ export default function InternalProjectsManager() {
   // Projected Cost in Link Modal
   const projectedModalCost = useMemo(() => {
     if (!linkingProject) return 0;
-    
-    // Sum selected proposals
-    const propSum = allAvailableProposals
+    return allAvailableProposals
       .filter(p => selectedProposalIds.includes(String(p.id)))
       .reduce((acc, p) => acc + (parseFloat(p.total_cost) || 0), 0);
-
-    // Sum selected systems not covered by proposal names
-    const coveredNames = new Set(
-      allAvailableProposals
-        .filter(p => selectedProposalIds.includes(String(p.id)))
-        .map(p => (p.item_name || "").toLowerCase().trim())
-    );
-
-    const sysSum = systems
-      .filter(s => selectedSystemIds.includes(String(s.id)))
-      .filter(s => (s.status?.value || s.status || "").toLowerCase() !== "operational")
-      .reduce((acc, s) => {
-        const sName = (s.name || "").toLowerCase().trim();
-        const covered = Array.from(coveredNames).some(c => c.includes(sName) || sName.includes(c));
-        return covered ? acc : acc + (parseFloat(s.proposed_cost) || 0);
-      }, 0);
-
-    return propSum + sysSum;
-  }, [linkingProject, selectedProposalIds, selectedSystemIds, allAvailableProposals, systems]);
-
+  }, [linkingProject, selectedProposalIds, allAvailableProposals]);
+    
   // Filter Pipeline for Main List (Integrated with Dynamic Categories)
   const filteredProjects = useMemo(() => {
     return projects.filter(p => {
@@ -54307,7 +54392,11 @@ export default function InternalProjectsManager() {
                                 <td className="p-2.5 text-slate-500 dark:text-slate-400">Central Office</td>
                                 <td className="p-2.5 text-center font-mono font-bold">1</td>
                                 <td className="p-2.5 text-right font-mono text-slate-600 dark:text-slate-400">{formatPHP(sys.proposed_cost)}</td>
-                                <td className="p-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400">{formatPHP(sys.proposed_cost)}</td>
+                                <td className="p-2.5 text-right font-mono text-xs text-blue-600 dark:text-blue-400">
+                                  <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-955 dark:text-blue-300 text-[8.5px] font-bold" title="Budgeted in Part IV.A detailed proposals">
+                                    Part IV.A Mapped
+                                  </span>
+                                </td>
                                 <td className="p-2.5 text-center font-mono font-bold text-[9px] uppercase">
                                   <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-955 dark:text-blue-300">
                                     {sys.status}
@@ -54354,7 +54443,7 @@ export default function InternalProjectsManager() {
                                     type="button"
                                     onClick={() => handleUnlinkItem(proj, itm.id, "proposal", cardLinkedSystems)}
                                     className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
-                                    title="Unlink Line Item from Project (Returns to Intake Pool)"
+                                    title="Unlink Line Item from Project"
                                   >
                                     <Unlink className="w-3.5 h-3.5" />
                                   </button>
@@ -54645,7 +54734,7 @@ export default function InternalProjectsManager() {
                                 ) : isSelected ? (
                                   <span className="text-[9px] text-emerald-600 font-bold block">✓ Assigned (Included)</span>
                                 ) : (
-                                  <span className="text-[9px] text-slate-400 block">Intake Pool (Quarantined)</span>
+                                  <span className="text-[9px] text-slate-400 block">Unassigned</span>
                                 )}
                               </div>
                             </div>
@@ -55349,10 +55438,7 @@ export default function ConsolidatedQueue() {
   const [overrideItemName, setOverrideItemName] = useState("");
   const [overrideCategory, setOverrideCategory] = useState("Hardware");
   const [overrideUnitCost, setOverrideUnitCost] = useState("");
-  
-  // Governance Allocation Gate: "project_bound" | "intake_pool" | "standalone"
-  const [governanceMode, setGovernanceMode] = useState("standalone");
-  const [overrideStrategicCat, setOverrideStrategicCat] = useState("Office Productivity");
+  const [overrideStrategicCat, setOverrideStrategicCat] = useState("Internal ICT Projects");
   const [overrideProjectId, setOverrideProjectId] = useState("");
   
   const [overrideOutcomeId, setOverrideOutcomeId] = useState("");
@@ -55571,7 +55657,7 @@ export default function ConsolidatedQueue() {
 
       if (activeTab === "pending_review") {
         params.status_filter = "submitted";
-      } else if (!["all", "intake_pool", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
+      } else if (!["all", "needs_linked", "Capital Outlay", "MOOE"].includes(activeTab)) {
         params.strategic_category = activeTab;
       }
 
@@ -55626,8 +55712,7 @@ export default function ConsolidatedQueue() {
   /**
    * Action: Approve Single Proposal
    * Checks for mandatory Program Outcome & UACS Code assignment,
-   * quarantines unlinked capital outlays in Intake Pool,
-   * and prevents unlinked items from distorting Table B.1 and Part IV.A.
+   * enforces ₱2M major outlay review gates, and guarantees project linkage.
    */
   const handleApprove = async (id, itemName) => {
     setError(null);
@@ -55651,16 +55736,8 @@ export default function ConsolidatedQueue() {
     }
 
     const totalCost = Number(target.total_cost || (target.unit_cost * target.total_qty) || 0);
-    const capThreshold = policySettings.capitalization_threshold || 50000.00;
     const majorThreshold = policySettings.major_outlay_review_threshold || 2000000.00;
     const isMajor = totalCost >= majorThreshold;
-    const isCapitalOutlay = totalCost >= capThreshold || (target.uacs_object_code || "").toLowerCase().includes("(co)") || (target.expenditure_class || "").toLowerCase().includes("capital");
-    const isProjectCat = (target.strategic_category || "").toLowerCase().includes("project");
-    const isOfficeProd = (target.strategic_category || "").toLowerCase().includes("office productivity");
-    const isServiceOrContractor = ["services", "contractor", "consulting"].some(k => 
-      (target.category || "").toLowerCase().includes(k) || 
-      (target.item_name || "").toLowerCase().includes(k)
-    );
 
     // Gate 3: Major Outlay Review Gate (>= ₱2M Rule)
     if (isMajor && (!target.project_id || target.system_development_status === "N/A")) {
@@ -55669,24 +55746,15 @@ export default function ConsolidatedQueue() {
       return;
     }
 
-    // Gate 4: Unlinked Capital Outlay / Contractor / Service Sitting in Office Productivity
-    if (!target.project_id && (isCapitalOutlay || isServiceOrContractor) && isOfficeProd) {
-      setError(`Classification Required: '${itemName}' (${formatPHP(totalCost)}) is an unlinked Capital Outlay or Service. Classify its spending bucket or link it to an ICT Project.`);
-      openOverrideModal(target);
+    // Gate 4: Project Linkage Notice (auto-bound by backend or assigned via modal)
+    if (!target.project_id && projects.length === 0) {
+      setError("Approval Blocked: At least one ICT Project must be registered in Part III.E before approving proposal expenditures.");
       return;
-    }
-
-    // Gate 5: Unlinked Items Quarantine Warning
-    if (!target.project_id && (isCapitalOutlay || isProjectCat)) {
-      if (!window.confirm(`'${itemName}' (${formatPHP(totalCost)}) is not linked to an ICT Project. Approving it will place it in the Intake Pool, excluding it from the compiled ISSP (Part IV.A and Table B.1) until assigned to a Project Charter in Part III.E. Proceed with intake approval?`)) {
-        openOverrideModal(target);
-        return;
-      }
     }
 
     try {
       await approveProposal(token, id);
-      setSuccess(`Proposal line item '${itemName}' approved successfully.`);
+      setSuccess(`Proposal line item '${itemName}' approved and bound to ICT Project.`);
       fetchQueue();
     } catch (err) {
       setError(err.message || "Approval failed.");
@@ -55769,29 +55837,22 @@ export default function ConsolidatedQueue() {
   const handleBatchApprove = async () => {
     if (selectedIds.size === 0) return;
 
-    const unassigned = Array.from(selectedIds).filter(id => {
-      const p = proposals.find(item => item.id === id);
-      return p && (!p.outcome_id && (!p.outcome || !p.outcome.id));
-    });
-
-    if (unassigned.length > 0 && outcomes.length === 0) {
-      setError(`Batch approval blocked: ${unassigned.length} selected proposal(s) require a Program Outcome, but none are registered for cycle ${activeCycle}.`);
+    if (projects.length === 0) {
+      setError("Batch approval blocked: No active ICT Projects found in Part III.E to associate approved expenditures with.");
       return;
     }
 
-    // Check if any selected item is an unlinked capital outlay
-    const unlinkedCapOutlays = Array.from(selectedIds).filter(id => {
+    const unassignedOutcomeCount = Array.from(selectedIds).filter(id => {
       const p = proposals.find(item => item.id === id);
-      if (!p || p.project_id) return false;
-      const total = Number(p.total_cost || (p.unit_cost * p.total_qty) || 0);
-      const isCapital = total >= (policySettings.capitalization_threshold || 50000.00) || (p.uacs_object_code || "").toLowerCase().includes("(co)") || (p.expenditure_class || "").toLowerCase().includes("capital");
-      return isCapital;
-    });
+      return p && (!p.outcome_id && (!p.outcome || !p.outcome.id));
+    }).length;
 
-    let promptMsg = `Batch approve ${selectedIds.size} submitted proposal(s)? Proposals without explicitly assigned outcomes will inherit the cycle's statutory default outcome.`;
-    if (unlinkedCapOutlays.length > 0) {
-      promptMsg = `${unlinkedCapOutlays.length} selected proposal(s) are capital outlays (>= ₱50k) without a linked ICT Project. Approving them will place them into the Intake Pool to prevent Table B.1 distortion until bound to a project. Continue?`;
+    if (unassignedOutcomeCount > 0 && outcomes.length === 0) {
+      setError(`Batch approval blocked: ${unassignedOutcomeCount} selected proposal(s) require a Program Outcome, but none are registered for cycle ${activeCycle}.`);
+      return;
     }
+
+    const promptMsg = `Batch approve ${selectedIds.size} submitted proposal(s)? Proposals will automatically inherit the cycle's statutory default outcome and matching ICT Project portfolio.`;
 
     if (!window.confirm(promptMsg)) return;
 
@@ -55829,43 +55890,22 @@ export default function ConsolidatedQueue() {
     setOverrideCategory(item.category || "Hardware");
     setOverrideUnitCost(String(item.unit_cost || "0"));
 
-    // Check project linkage and determine initial governance allocation mode
+    // Check project linkage: prioritize explicit project_id or default to matching/first project
     const pId = item.project_id ? String(item.project_id) : "";
-    setOverrideProjectId(pId);
-    const pObj = pId ? projects.find(p => String(p.id) === String(pId)) : null;
+    const pObj = pId 
+      ? projects.find(p => String(p.id) === String(pId))
+      : (projects.length > 0 ? projects[0] : null);
 
-    const stratCatLower = (item.strategic_category || "").toLowerCase();
-    const itemCatLower = (item.category || "").toLowerCase();
-    const itemNameLower = (item.item_name || "").toLowerCase();
-
-    if (pId) {
-      setGovernanceMode("project_bound");
-      setOverrideStrategicCat(pObj?.project_category || "Internal ICT Projects");
-      setOverrideFundSource(pObj?.funding_source || item.fund_source || "General Appropriations Act (GAA)");
-    } else if (stratCatLower.includes("project")) {
-      setGovernanceMode("intake_pool");
-      setOverrideStrategicCat(item.strategic_category || "Internal ICT Projects");
-      setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
-    } else if (item.category === "Subscription" || stratCatLower.includes("continuing") || itemNameLower.includes("subscription") || itemNameLower.includes("cloud")) {
-      setGovernanceMode("standalone");
-      setOverrideStrategicCat("Continuing Costs/Expenses");
-      setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
+    if (pObj) {
+      setOverrideProjectId(String(pObj.id));
+      setOverrideStrategicCat(pObj.project_category || "Internal ICT Projects");
+      setOverrideFundSource(pObj.funding_source || item.fund_source || "General Appropriations Act (GAA)");
     } else {
-      // Intelligently identify if it's a Capital Outlay or Contractor/Consulting Service
-      const isCapital = parseFloat(item.unit_cost || 0) >= (policySettings.capitalization_threshold || 50000.00);
-      const isService = itemCatLower === "services" || itemNameLower.includes("contractor") || itemNameLower.includes("consulting") || itemNameLower.includes("migration");
-
-      if (isCapital || isService) {
-        setGovernanceMode("intake_pool");
-        setOverrideStrategicCat("Internal ICT Projects");
-      } else {
-        setGovernanceMode("standalone");
-        setOverrideStrategicCat("Office Productivity");
-      }
+      setOverrideProjectId("");
+      setOverrideStrategicCat(item.strategic_category || "Internal ICT Projects");
       setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
     }
 
-    // Auto-suggest Program Outcome if unassigned
     setOverrideOutcomeId(item.outcome_id ? String(item.outcome_id) : (outcomes[0]?.id ? String(outcomes[0].id) : ""));
     setOverrideNeedsAssessmentId(item.needs_assessment_id ? String(item.needs_assessment_id) : "");
     
@@ -55956,8 +55996,8 @@ export default function ConsolidatedQueue() {
       return;
     }
 
-    if (governanceMode === "project_bound" && !overrideProjectId) {
-      setError("Project Linkage Requirement: Choose an ICT Project from Part III.E, or switch to 'Intake Pool' / 'Standalone OpEx'.");
+    if (!overrideProjectId) {
+      setError("Project Linkage Requirement: Select a target ICT Project from Part III.E to associate this expenditure with.");
       return;
     }
 
@@ -55968,24 +56008,10 @@ export default function ConsolidatedQueue() {
 
     setSubmittingOverride(true);
     try {
-      const selectedProj = (governanceMode === "project_bound" && overrideProjectId) 
-        ? projects.find(p => String(p.id) === String(overrideProjectId))
-        : null;
+      const selectedProj = projects.find(p => String(p.id) === String(overrideProjectId));
 
-      let finalStrategicCat = overrideStrategicCat;
-      let finalProjectId = null;
-
-      if (governanceMode === "project_bound" && selectedProj) {
-        finalProjectId = selectedProj.id;
-        finalStrategicCat = selectedProj.project_category || "Internal ICT Projects";
-      } else if (governanceMode === "intake_pool") {
-        finalProjectId = null;
-        finalStrategicCat = "Internal ICT Projects";
-      } else {
-        finalProjectId = null;
-        finalStrategicCat = overrideCategory === "Subscription" ? "Continuing Costs/Expenses" : (overrideStrategicCat || "Office Productivity");
-      }
-
+      const finalProjectId = selectedProj ? selectedProj.id : null;
+      const finalStrategicCat = selectedProj ? (selectedProj.project_category || "Internal ICT Projects") : overrideStrategicCat;
       const finalFundSource = selectedProj?.funding_source || overrideFundSource;
       const selectedStratObj = strategicCategories.find(s => s.name === finalStrategicCat);
       const effectiveUacs = resolvedEffectiveUacs;
@@ -56013,11 +56039,7 @@ export default function ConsolidatedQueue() {
 
       if (approveImmediately) {
         await approveProposal(token, activeOverrideItem.id);
-        if (governanceMode === "intake_pool") {
-          setSuccess(`'${overrideItemName}' approved into the Intake Pool. Remember to link it to an ICT Project in the Projects Portfolio before compiling.`);
-        } else {
-          setSuccess(`Classification committed and proposal '${overrideItemName}' approved successfully!`);
-        }
+        setSuccess(`Classification committed and proposal '${overrideItemName}' approved under project '${selectedProj?.project_title || "ICT Portfolio"}'.`);
       } else {
         setSuccess(`Governance classification saved for '${overrideItemName}'.`);
       }
@@ -56070,22 +56092,13 @@ export default function ConsolidatedQueue() {
     }
   };
 
-  // Dynamic Tabs Array with Accurate Real-time Intake Pool Counter
+  // Dynamic Tabs Array with Clarified Labels
   const dynamicTabs = useMemo(() => {
-    const unlinkedApprovedCount = proposals.filter(p => {
-      const totalCostNum = Number(p.total_cost || (p.unit_cost * p.total_qty) || 0);
-      const capThreshold = policySettings.capitalization_threshold || 50000.00;
-      const isCapitalOutlay = totalCostNum >= capThreshold || (p.uacs_object_code || "").toLowerCase().includes("(co)") || (p.expenditure_class || "").toLowerCase().includes("capital");
-      const isStandalone = ["office productivity", "continuing costs/expenses", "continuing costs"].includes((p.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
-      return p.status === "Approved" && !p.project_id && !isStandalone;
-    }).length;
-
     const pendingCount = proposals.filter(p => p.status === "Submitted").length;
 
     return [
       { id: "all", label: "All Line Items" },
       { id: "pending_review", label: `Pending Review (${pendingCount})`, isAlert: pendingCount > 0 },
-      { id: "intake_pool", label: `Intake Pool (${unlinkedApprovedCount})`, isWarning: unlinkedApprovedCount > 0 },
       ...(strategicCategories.length > 0
         ? strategicCategories.map(c => ({ id: c.name, label: c.name }))
         : [
@@ -56097,26 +56110,18 @@ export default function ConsolidatedQueue() {
       ),
       { id: "Capital Outlay", label: "Capital Outlay (CO)" },
       { id: "MOOE", label: "MOOE Services" },
-      { id: "needs_linked", label: "Needs Linked" }
+      { id: "needs_linked", label: "Sec 8.0 Needs Linked" }
     ];
-  }, [proposals, strategicCategories, policySettings.capitalization_threshold]);
+  }, [proposals, strategicCategories]);
 
   const filteredProposals = proposals.filter(item => {
-    const totalCostNum = Number(item.total_cost || (item.unit_cost * item.total_qty) || 0);
-    const capThreshold = policySettings.capitalization_threshold || 50000.00;
-    const isCapitalOutlay = totalCostNum >= capThreshold || (item.uacs_object_code || "").toLowerCase().includes("(co)") || (item.expenditure_class || "").toLowerCase().includes("capital");
-    const isStandalone = ["office productivity", "continuing costs/expenses", "continuing costs"].includes((item.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
-
     if (activeTab === "pending_review") {
       return item.status === "Submitted";
-    }
-    if (activeTab === "intake_pool") {
-      return item.status === "Approved" && !item.project_id && !isStandalone;
     }
     if (activeTab === "Capital Outlay") return item.expenditure_class === "Capital Outlay";
     if (activeTab === "MOOE") return item.expenditure_class !== "Capital Outlay";
     if (activeTab === "needs_linked") return Boolean(item.needs_assessment_id);
-    if (!["all", "pending_review", "intake_pool", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
+    if (!["all", "pending_review", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
       if ((item.strategic_category || "").toLowerCase() !== activeTab.toLowerCase()) return false;
     }
     if (fundFilter && item.fund_source !== fundFilter && !item.fund_source?.startsWith(fundFilter)) return false;
@@ -56134,7 +56139,7 @@ export default function ConsolidatedQueue() {
             <span>Master Review Queue &amp; Governance Intake</span>
           </h2>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
-            Audit department submissions, assign UACS Object Codes ({formatPHP(policySettings.capitalization_threshold)} capitalization threshold), and govern pipeline compilation. Approved proposals enter the <strong>Intake Pool</strong> until formally linked to an ICT Project or designated as Standalone Operational expenses.
+            Audit department submissions, assign UACS Object Codes ({formatPHP(policySettings.capitalization_threshold)} capitalization threshold), and govern pipeline compilation. Approved proposals belong strictly to an authorized ICT Project in Part III.E.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -56174,9 +56179,14 @@ export default function ConsolidatedQueue() {
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
-          <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-          <span>{success}</span>
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between gap-2.5 shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>{success}</span>
+          </div>
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
@@ -56195,7 +56205,6 @@ export default function ConsolidatedQueue() {
             >
               <span>{tab.label}</span>
               {tab.isAlert && <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />}
-              {tab.isWarning && <span className="w-2 h-2 rounded-full bg-rose-400" />}
             </button>
           ))}
         </div>
@@ -56286,7 +56295,7 @@ export default function ConsolidatedQueue() {
                     />
                   </th>
                   <th className="py-3 px-3.5 w-40">Department / Office</th>
-                  <th className="py-3 px-3.5">Requested Resource &amp; Pipeline Status</th>
+                  <th className="py-3 px-3.5">Requested Resource &amp; Governance Provenance</th>
                   <th className="py-3 px-3.5">UACS Code &amp; Class</th>
                   <th className="py-3 px-3.5">Financing Source</th>
                   <th className="py-3 px-3.5">Target Schedule</th>
@@ -56306,11 +56315,7 @@ export default function ConsolidatedQueue() {
                   const isSubmitted = item.status === "Submitted";
                   const isApproved = item.status === "Approved";
                   const hasAssignedOutcome = Boolean(item.outcome_id || item.outcome?.id);
-                  const linkedProjTitle = item.project_rel?.project_title || projects.find(p => String(p.id) === String(item.project_id))?.project_title;
-                  
-                  const capThreshold = policySettings.capitalization_threshold || 50000.00;
-                  const isCapitalOutlay = totalCost >= capThreshold || (item.uacs_object_code || "").toLowerCase().includes("(co)") || (item.expenditure_class || "").toLowerCase().includes("capital");
-                  const isStandaloneOperational = ["office productivity", "continuing costs/expenses", "continuing costs"].includes((item.strategic_category || "").toLowerCase().trim()) && !isCapitalOutlay;
+                  const linkedProjTitle = item.project_rel?.project_title || item.project_title || projects.find(p => String(p.id) === String(item.project_id))?.project_title;
 
                   return (
                     <tr 
@@ -56348,7 +56353,7 @@ export default function ConsolidatedQueue() {
                         </span>
                       </td>
 
-                      {/* Resource Description & Pipeline Linkage Badges */}
+                      {/* Resource Description & Explicit Project / Needs Provenance */}
                       <td className="py-3.5 px-3.5 align-top max-w-xs space-y-1.5">
                         <div className="font-bold text-slate-900 dark:text-white text-xs">{item.item_name}</div>
                         
@@ -56364,23 +56369,18 @@ export default function ConsolidatedQueue() {
                             </span>
                           )}
 
-                          {/* Pipeline Compilation Status Badges */}
-                          {linkedProjTitle ? (
-                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20 flex items-center gap-1 truncate max-w-[170px]" title={`Compiled in ISSP via project: ${linkedProjTitle}`}>
+                          {/* Explicit Project Linkage Badge (No confusing intake pool states) */}
+                          {item.project_id ? (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20 flex items-center gap-1 truncate max-w-[170px]" title={`Project: ${linkedProjTitle || item.project_title}`}>
                               <Layers className="w-2.5 h-2.5 shrink-0" />
-                              <span>Project: {linkedProjTitle}</span>
+                              <span>Project: {linkedProjTitle || item.project_title || "Linked"}</span>
                             </span>
-                          ) : isApproved && isStandaloneOperational ? (
-                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20 flex items-center gap-1" title="Compiled in ISSP as standalone operating outlay">
-                              <Check className="w-2.5 h-2.5" />
-                              <span>Compiled (Standalone)</span>
-                            </span>
-                          ) : isApproved ? (
-                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20 flex items-center gap-1" title="Approved in queue but unlinked to an ICT Project. Quarantined from PDF until assigned to a project portfolio in Part III.E.">
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/10 dark:text-rose-400 dark:border-rose-500/20 flex items-center gap-1" title="Unlinked: Must be bound to an ICT Project">
                               <FolderKanban className="w-2.5 h-2.5" />
-                              <span>Intake Pool (Awaiting Project)</span>
+                              <span>Unlinked (Assign Project)</span>
                             </span>
-                          ) : null}
+                          )}
 
                           {isStudentSystem && (
                             <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20">
@@ -56400,13 +56400,13 @@ export default function ConsolidatedQueue() {
                             </span>
                           )}
 
-                          {/* Section 8.0 Needs Assessment Provenance Badge */}
+                          {/* Clarified Section 8.0 Needs Assessment Badge */}
                           {item.needs_assessment_id && (
                             <span 
                               className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-500/10 dark:text-teal-300 dark:border-teal-500/20 cursor-help"
-                              title={linkedNa ? `Linked Needs Assessment: ${linkedNa.title}\nProblem: ${linkedNa.current_problem}` : `Needs Assessment ID: ${item.needs_assessment_id}`}
+                              title={linkedNa ? `Needs Assessment: ${linkedNa.title}\nProblem: ${linkedNa.current_problem}` : `Needs Assessment ID: ${item.needs_assessment_id}`}
                             >
-                              Needs Linked: {linkedNa?.title ? linkedNa.title.slice(0, 22) + "..." : "Attached"}
+                              Needs Assessment: {linkedNa?.title ? linkedNa.title.slice(0, 22) + "..." : "Attached"}
                             </span>
                           )}
                         </div>
@@ -56520,6 +56520,31 @@ export default function ConsolidatedQueue() {
                                 <RotateCcw className="w-3.5 h-3.5" />
                               </button>
                             </>
+                          ) : item.status === "Approved" && !item.project_id ? (
+                            <div className="flex items-center gap-1">
+                              <Link
+                                to="/admin/projects/internal"
+                                className="px-2 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 dark:bg-purple-955/50 dark:text-purple-300 dark:border-purple-800 text-[10px] font-bold font-mono inline-flex items-center gap-1"
+                                title="Bind this proposal to an ICT Project in Part III.E to include it in the compiled plan"
+                              >
+                                <FolderKanban className="w-3 h-3" />
+                                <span>Assign Project</span>
+                              </Link>
+                              <button
+                                onClick={() => openOverrideModal(item)}
+                                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+                                title="Classify & Review Parameters"
+                              >
+                                <Edit className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteProposal(item.id, item.item_name)}
+                                className="p-1.5 rounded-lg bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-955/40 dark:hover:text-rose-400 text-slate-500 transition-colors cursor-pointer"
+                                title="Delete Item"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           ) : (
                             <div className="flex items-center gap-1">
                               <button
@@ -56531,7 +56556,7 @@ export default function ConsolidatedQueue() {
                               </button>
                               <button
                                 onClick={() => handleDeleteProposal(item.id, item.item_name)}
-                                className="p-1.5 rounded-lg bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 text-slate-500 transition-colors cursor-pointer"
+                                className="p-1.5 rounded-lg bg-slate-100 hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:hover:bg-rose-955/40 dark:hover:text-rose-400 text-slate-500 transition-colors cursor-pointer"
                                 title="Delete Item"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -56578,7 +56603,7 @@ export default function ConsolidatedQueue() {
         </div>
       </div>
 
-      {/* OVERRIDE & GOVERNANCE ASSIGNMENT MODAL (Guided 4-Step Pipeline) */}
+      {/* OVERRIDE & GOVERNANCE ASSIGNMENT MODAL (Explicit Project-Bound Portfolio Mapping) */}
       {activeOverrideItem && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-2xl p-6 space-y-4 shadow-2xl overflow-y-auto max-h-[90vh]">
@@ -56820,146 +56845,48 @@ export default function ConsolidatedQueue() {
                 </div>
               </div>
 
-              {/* STEP 3: Strategic Allocation Gate & ICT Project Portfolio (Part III.E) */}
+              {/* STEP 3: Project Charter Binding (Part III.E) */}
               <div className="space-y-3 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
                 <span className="text-[10px] uppercase font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                   <span className="w-4 h-4 rounded-full bg-slate-700 text-white flex items-center justify-center font-mono text-[9px] font-bold">3</span>
                   <FolderKanban className="w-3.5 h-3.5 text-purple-500" />
-                  <span>Governance Allocation Gate &amp; Strategic Portfolio (Part III.E)</span>
+                  <span>Target ICT Project Charter &amp; Portfolio (Part III.E)</span>
                 </span>
 
-                {/* 3-Mode Allocation Gate Selector */}
-                <div className="space-y-2">
-                  <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 block">
-                    Pipeline Allocation Intent (Prevents Unlinked Cost Leak into Table B.1)
+                <div className="space-y-1.5 animate-fadeIn">
+                  <label className="text-[9.5px] uppercase font-bold text-purple-700 dark:text-purple-300 flex items-center justify-between">
+                    <span>Target ICT Project Charter (Part III.E)</span>
+                    <span className="text-rose-500 font-bold">*Required</span>
                   </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
-                      governanceMode === "project_bound"
-                        ? "bg-purple-50/90 dark:bg-slate-955 border-purple-400 dark:border-purple-800 text-purple-900 dark:text-purple-200 ring-1 ring-purple-400"
-                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
-                    }`}>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name="govMode"
-                          checked={governanceMode === "project_bound"}
-                          onChange={() => {
-                            setGovernanceMode("project_bound");
-                            if (projects.length > 0 && !overrideProjectId) {
-                              setOverrideProjectId(String(projects[0].id));
-                              setOverrideStrategicCat(projects[0].project_category || "Internal ICT Projects");
-                            }
-                          }}
-                          className="accent-purple-600"
-                        />
-                        <span className="font-bold text-xs">Bind to ICT Project</span>
-                      </div>
-                      <span className="text-[9.5px] opacity-75 mt-1 block">Compiles under target Part III.E charter</span>
-                    </label>
-
-                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
-                      governanceMode === "intake_pool"
-                        ? "bg-amber-50/90 dark:bg-slate-955 border-amber-400 dark:border-amber-800 text-amber-900 dark:text-amber-200 ring-1 ring-amber-400"
-                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
-                    }`}>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name="govMode"
-                          checked={governanceMode === "intake_pool"}
-                          onChange={() => {
-                            setGovernanceMode("intake_pool");
-                            setOverrideProjectId("");
-                            setOverrideStrategicCat("Internal ICT Projects");
-                          }}
-                          className="accent-amber-600"
-                        />
-                        <span className="font-bold text-xs">Place in Intake Pool</span>
-                      </div>
-                      <span className="text-[9.5px] opacity-75 mt-1 block">Approved but quarantined from PDF</span>
-                    </label>
-
-                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
-                      governanceMode === "standalone"
-                        ? "bg-blue-50/90 dark:bg-slate-955 border-blue-400 dark:border-blue-800 text-blue-900 dark:text-blue-200 ring-1 ring-blue-400"
-                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
-                    }`}>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name="govMode"
-                          checked={governanceMode === "standalone"}
-                          onChange={() => {
-                            setGovernanceMode("standalone");
-                            setOverrideProjectId("");
-                            setOverrideStrategicCat(overrideCategory === "Subscription" ? "Continuing Costs/Expenses" : "Office Productivity");
-                          }}
-                          className="accent-blue-600"
-                        />
-                        <span className="font-bold text-xs">Standalone OpEx</span>
-                      </div>
-                      <span className="text-[9.5px] opacity-75 mt-1 block">Compiles under routine office outlays</span>
-                    </label>
-                  </div>
-                </div>
-
-                {/* Dynamic Explanatory Callout Banner based on Governance Mode */}
-                {governanceMode === "intake_pool" && (
-                  <div className="p-2.5 bg-amber-50/90 dark:bg-slate-955 border border-amber-300 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 rounded-xl text-[10.5px] flex items-start gap-1.5 animate-fadeIn">
-                    <Info className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-                    <span>
-                      <strong>Intake Pool Quarantining Active:</strong> This proposal will be approved into the departmental intake pool. It will <strong>NOT</strong> leak into Table B.1 or Table IV.A until an administrator assigns it to a Part III.E Project Charter in the Projects Portfolio.
-                    </span>
-                  </div>
-                )}
-
-                {governanceMode === "project_bound" && (
-                  <div className="space-y-1.5 animate-fadeIn">
-                    <label className="text-[9.5px] uppercase font-bold text-purple-700 dark:text-purple-300 flex items-center justify-between">
-                      <span>Select Target ICT Project Portfolio Charter (Part III.E)</span>
-                      <span className="text-rose-500 font-bold">*Required</span>
-                    </label>
-                    <select
-                      value={overrideProjectId}
-                      required={governanceMode === "project_bound"}
-                      onChange={(e) => {
-                        const pId = e.target.value;
-                        setOverrideProjectId(pId);
-                        if (pId) {
-                          const pObj = projects.find(p => String(p.id) === String(pId));
-                          if (pObj) {
-                            setOverrideStrategicCat(pObj.project_category || "Internal ICT Projects");
-                            if (pObj.funding_source) {
-                              setOverrideFundSource(pObj.funding_source);
-                            }
+                  <select
+                    value={overrideProjectId}
+                    required
+                    onChange={(e) => {
+                      const pId = e.target.value;
+                      setOverrideProjectId(pId);
+                      if (pId) {
+                        const pObj = projects.find(p => String(p.id) === String(pId));
+                        if (pObj) {
+                          setOverrideStrategicCat(pObj.project_category || "Internal ICT Projects");
+                          if (pObj.funding_source) {
+                            setOverrideFundSource(pObj.funding_source);
                           }
                         }
-                      }}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs font-semibold"
-                    >
-                      <option value="">-- Choose Target ICT Project --</option>
-                      {projects.filter(p => !((p.project_category || "").toLowerCase().includes("cross"))).length > 0 && (
-                        <optgroup label="Part III.E.1 Internal ICT Projects">
-                          {projects
-                            .filter(p => !((p.project_category || "").toLowerCase().includes("cross")))
-                            .map(p => (
-                              <option key={p.id} value={p.id}>[Internal] {p.project_title}</option>
-                            ))}
-                        </optgroup>
-                      )}
-                      {projects.filter(p => (p.project_category || "").toLowerCase().includes("cross")).length > 0 && (
-                        <optgroup label="Part III.E.2 Cross-Agency ICT Projects">
-                          {projects
-                            .filter(p => (p.project_category || "").toLowerCase().includes("cross"))
-                            .map(p => (
-                              <option key={p.id} value={p.id}>[Cross-Agency] {p.project_title}</option>
-                            ))}
-                        </optgroup>
-                      )}
-                    </select>
-                  </div>
-                )}
+                      }
+                    }}
+                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs font-semibold"
+                  >
+                    <option value="">-- Choose Target ICT Project --</option>
+                    {projects.map(p => (
+                      <option key={p.id} value={p.id}>
+                        [{p.project_category}] {p.project_title}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[9px] text-slate-400 font-sans block pt-0.5">
+                    *Every approved proposal must belong to an authorized ICT Project. This governs Table B.1 Category and Table B.2 Fund Source inheritance.
+                  </span>
+                </div>
 
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <div className="space-y-1">
@@ -56969,9 +56896,6 @@ export default function ConsolidatedQueue() {
                       onChange={(e) => {
                         const val = e.target.value;
                         setOverrideCategory(val);
-                        if (val === "Subscription" && governanceMode === "standalone") {
-                          setOverrideStrategicCat("Continuing Costs/Expenses");
-                        }
                       }}
                       className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none text-xs"
                     >
@@ -56985,12 +56909,12 @@ export default function ConsolidatedQueue() {
                   <div className="space-y-1">
                     <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between">
                       <span>Spending Bucket (Table B.1)</span>
-                      {governanceMode === "project_bound" && <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>}
+                      <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>
                     </label>
                     <select
                       value={overrideStrategicCat}
                       onChange={(e) => setOverrideStrategicCat(e.target.value)}
-                      disabled={governanceMode === "project_bound" || governanceMode === "intake_pool"}
+                      disabled={true}
                       className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer font-semibold text-xs disabled:opacity-60"
                     >
                       {strategicCategories.length > 0 ? (
@@ -57055,12 +56979,12 @@ export default function ConsolidatedQueue() {
                 <div className="space-y-1">
                   <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between">
                     <span>Financing Fund Source</span>
-                    {governanceMode === "project_bound" && <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>}
+                    <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>
                   </label>
                   <select
                     value={overrideFundSource}
                     onChange={(e) => setOverrideFundSource(e.target.value)}
-                    disabled={governanceMode === "project_bound"}
+                    disabled={true}
                     className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs disabled:opacity-60"
                   >
                     <option value="General Appropriations Act (GAA)">General Appropriations Act (GAA)</option>
@@ -57339,7 +57263,6 @@ export default function ConsolidatedQueue() {
     </div>
   );
 }
-
 
 =========================================
 CORE SYSTEM FILE: ./frontend/src/views/admin/Systems/InformationSystemsManager.jsx
@@ -60568,7 +60491,7 @@ export default function Login() {
         <div className="pt-4 border-t border-[#cbd8e6] dark:border-slate-800 space-y-2 text-center text-[10px] text-slate-500 dark:text-slate-400 font-mono">
           <div className="flex items-center justify-center gap-1.5 text-slate-700 dark:text-slate-300 font-bold">
             <Lock className="w-3.5 h-3.5 text-blue-500" />
-            <span>DICT ISSP v.2026 CSPC © All rights reserved</span>
+            <span>DICT ISSP v.2026 &bull; {agencyName} &copy; All rights reserved</span>
           </div>
           <p className="text-[9.5px] text-slate-400 dark:text-slate-500 leading-tight">
             Official Government System &bull; Unauthorized access prohibited
@@ -65485,8 +65408,8 @@ export default function UnifiedProposals() {
                             ) : (
                               <>
                                 <span>&bull;</span>
-                                <span className="text-amber-600 dark:text-amber-400 italic">
-                                  Intake Pool (Unlinked)
+                                <span className="text-slate-400 dark:text-slate-500 italic">
+                                  Project Assignment Pending
                                 </span>
                               </>
                             )}
@@ -68427,12 +68350,12 @@ export default function DocumentVault() {
     const endYr = narrative?.issp_period_to || (planningYears && planningYears[planningYears.length - 1]) || 2030;
 
     const rawCio = String(narrative?.cio_name || narrative?.signatory_prepared_by || "").trim();
-    const isGenericCio = !rawCio || ["chief information officer", "cio", "none", "null", "undefined"].includes(rawCio.toLowerCase());
-    const cioSignatory = isGenericCio ? "REY T. CORTEZ, MIT" : rawCio.toUpperCase();
+    const cioSignatory = rawCio ? rawCio.toUpperCase() : "CHIEF INFORMATION OFFICER";
 
     const rawHead = String(narrative?.head_of_agency_name || narrative?.signatory_approved_by || "").trim();
-    const isGenericHead = !rawHead || ["head of agency", "agency head", "college president", "president", "none", "null", "undefined"].includes(rawHead.toLowerCase());
-    const headSignatory = isGenericHead ? "AMADO A. OLIVA JR, PhD." : rawHead.toUpperCase();
+    const headSignatory = rawHead 
+      ? rawHead.toUpperCase() 
+      : String(narrative?.agency_head_position || "HEAD OF AGENCY").toUpperCase();
 
     const agencyHeadTitle = narrative?.agency_head_position || "Agency Head";
     const websiteUrl = narrative?.agency_website_url || "www.agency.gov.ph";
@@ -69104,8 +69027,7 @@ export default function DocumentVault() {
                   <p style={{ fontSize: "8.5pt", textTransform: "uppercase", letterSpacing: "1.2px", margin: 0, color: "#475569", lineHeight: 1.35, fontFamily: "sans-serif" }}>
                     Republic of the Philippines<br />
                     <strong style={{ fontSize: "12pt", color: "#0f172a", fontFamily: "Palatino Linotype, Book Antiqua, Palatino, serif" }}>{agencyName.toUpperCase()}</strong><br />
-                    <span style={{ fontSize: "8.5pt", color: "#64748b" }}>{narrative?.agency_address || "Nabua, Camarines Sur"}</span>
-                  </p>
+                    <span style={{ fontSize: "8.5pt", color: "#64748b" }}>{narrative?.agency_address || ""}</span></p>
                 </div>
 
                 <div style={{ textAlign: "center", margin: "18px 0 16px 0" }}>

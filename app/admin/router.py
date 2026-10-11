@@ -2065,6 +2065,15 @@ def review_and_classify_system(
                 proj_uuid = pid_clean
             target_project = db.query(IctProject).filter(IctProject.id == proj_uuid).first()
 
+    # Auto-match a project if none was explicitly passed
+    if not target_project:
+        target_project = db.query(IctProject).filter(
+            IctProject.issp_period == system.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+        if target_project:
+            proj_uuid = target_project.id
+
     if target_project:
         target_project.system_id = system.id
         system.project_id = target_project.id
@@ -2137,7 +2146,15 @@ def review_and_classify_system(
             created_by_students=False,
             db=db
         )
-
+        if not proj_uuid:
+            matched_proj = db.query(IctProject).filter(
+                IctProject.issp_period == system.issp_period,
+                func.lower(cast(IctProject.project_category, String)) == "internal ict projects"
+            ).first() or db.query(IctProject).filter(IctProject.issp_period == system.issp_period).first()
+            if matched_proj:
+                proj_uuid = matched_proj.id
+                strat_cat_name = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+                fund_source_val = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
         new_prop = Proposal(
             department_id=target_dept_id,
             issp_period=system.issp_period,
@@ -2515,6 +2532,8 @@ def delete_ict_project(
 # 9. REVISED PROJECT LINKING & REAL-TIME COST RECALCULATION
 # ==========================================================
 
+# app/admin/router.py (Replace update_project_links around line 1550)
+
 @router.post("/ict-projects/{project_id}/links")
 def update_project_links(
     project_id: uuid.UUID,
@@ -2522,15 +2541,9 @@ def update_project_links(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """
-    Binds or unbinds proposals and information systems directly to an ICT project.
-    Guarantees:
-    1. Unlinked/detached proposals have their project_id cleared (project_id = None).
-    2. Detached proposals immediately stop inflating the project's computed total cost.
-    3. Attached proposals automatically inherit the project's Strategic Category and Fund Source.
-    4. Session relationship caches are expired so next reads reflect the true database state.
-    """
-    project = db.query(IctProject).filter(IctProject.id == project_id).first()
+    project = db.query(IctProject).filter(
+        or_(IctProject.id == project_id, cast(IctProject.id, String) == str(project_id))
+    ).first()
     if not project:
         raise HTTPException(status_code=404, detail="ICT Project not found.")
 
@@ -2541,27 +2554,23 @@ def update_project_links(
     strat_cat_id = sc_obj.id if sc_obj else None
     proj_fund_source = str(getattr(project.funding_source, "value", project.funding_source) or "General Appropriations Act (GAA)")
 
-    # 1. Update proposal linkages
+    # 1. Update proposal linkages with string normalization to eliminate UUID vs str mismatch
     if payload.proposal_ids is not None:
-        p_uuids = set()
-        for pid in payload.proposal_ids:
-            if pid:
-                try:
-                    p_uuids.add(uuid.UUID(str(pid)))
-                except ValueError:
-                    p_uuids.add(pid)
+        p_uuids_str = {str(pid).strip().lower() for pid in payload.proposal_ids if pid}
 
         # Unlink proposals that were detached
         current_proposals = db.query(Proposal).filter(Proposal.project_id == project.id).all()
         for p in current_proposals:
-            if p.id not in p_uuids:
+            if str(p.id).lower() not in p_uuids_str:
                 p.project_id = None
                 p.strategic_category = "Office Productivity"
                 p.strategic_category_id = None
 
-        # Bind selected proposals and inherit project parameters
-        for pid in p_uuids:
-            prop = db.query(Proposal).filter(Proposal.id == pid).first()
+        # Bind selected proposals and inherit project category and fund source
+        for pid_str in p_uuids_str:
+            prop = db.query(Proposal).filter(
+                or_(cast(Proposal.id, String) == pid_str, Proposal.id == pid_str)
+            ).first()
             if prop:
                 prop.project_id = project.id
                 prop.strategic_category = strat_cat_val
@@ -2569,17 +2578,10 @@ def update_project_links(
                 if strat_cat_id:
                     prop.strategic_category_id = strat_cat_id
 
-    # 2. Update system linkages
+    # 2. Update system linkages with string normalization
     if payload.system_ids is not None:
-        s_uuids = set()
-        for sid in payload.system_ids:
-            if sid:
-                try:
-                    s_uuids.add(uuid.UUID(str(sid)))
-                except ValueError:
-                    s_uuids.add(sid)
+        s_uuids_str = {str(sid).strip().lower() for sid in payload.system_ids if sid}
 
-        # Unlink systems that were detached
         current_systems = db.query(InformationSystem).filter(
             or_(
                 InformationSystem.project_id == project.id,
@@ -2587,18 +2589,24 @@ def update_project_links(
             )
         ).all()
         for s in current_systems:
-            if s.id not in s_uuids:
+            if str(s.id).lower() not in s_uuids_str:
                 s.project_id = None
-                if project.system_id == s.id:
+                if project.system_id and str(project.system_id).lower() == str(s.id).lower():
                     project.system_id = None
 
-        for sid in s_uuids:
-            sys_obj = db.query(InformationSystem).filter(InformationSystem.id == sid).first()
+        for sid_str in s_uuids_str:
+            sys_obj = db.query(InformationSystem).filter(
+                or_(cast(InformationSystem.id, String) == sid_str, InformationSystem.id == sid_str)
+            ).first()
             if sys_obj:
                 sys_obj.project_id = project.id
 
-        if s_uuids:
-            project.system_id = list(s_uuids)[0]
+        if s_uuids_str:
+            first_sys = db.query(InformationSystem).filter(
+                or_(cast(InformationSystem.id, String) == list(s_uuids_str)[0], InformationSystem.id == list(s_uuids_str)[0])
+            ).first()
+            if first_sys:
+                project.system_id = first_sys.id
 
     db.commit()
     db.expire_all()
@@ -3699,7 +3707,7 @@ def batch_approve_proposals(
     db: Session = Depends(get_db),
     admin: dict = Depends(require_admin)
 ):
-    """1-Click batch approval of submitted proposals into the Intake Pool."""
+    """1-Click batch approval of submitted proposals into the active plan."""
     raw_ids = []
     if isinstance(payload, BatchApprovePayload):
         raw_ids = payload.proposal_ids
@@ -3733,6 +3741,21 @@ def batch_approve_proposals(
                 ).first()
             if default_outcome:
                 p.outcome_id = default_outcome.id
+
+        # Auto-bind unlinked proposals to a project so batch approval never causes unlinked orphans
+        if not p.project_id:
+            matched_proj = db.query(IctProject).filter(
+                IctProject.issp_period == p.issp_period,
+                func.lower(cast(IctProject.project_category, String)) == func.lower(cast(p.strategic_category, String))
+            ).first()
+            if not matched_proj:
+                matched_proj = db.query(IctProject).filter(
+                    IctProject.issp_period == p.issp_period
+                ).first()
+            if matched_proj:
+                p.project_id = matched_proj.id
+                p.strategic_category = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+                p.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
 
         old_status = p.status
         p.status = "Approved"
@@ -3777,6 +3800,19 @@ def admin_create_proposal(
 
     sc_name = payload.strategic_category or "Office Productivity"
     strat_cat_id = getattr(payload, "strategic_category_id", None)
+    resolved_project_id = payload.project_id
+
+    # Enforce project binding on approved proposal creation
+    if not resolved_project_id:
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == active_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(sc_name, String))
+        ).first() or db.query(IctProject).filter(IctProject.issp_period == active_period).first()
+        if matched_proj:
+            resolved_project_id = matched_proj.id
+            sc_name = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            payload.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+
     if not strat_cat_id and sc_name:
         sc_row = db.query(StrategicCategory).filter(func.lower(StrategicCategory.name) == sc_name.lower().strip()).first()
         if sc_row:
@@ -3798,7 +3834,7 @@ def admin_create_proposal(
         department_id=target_dept_id,
         issp_period=active_period,
         outcome_id=outcome_id,
-        project_id=payload.project_id,
+        project_id=resolved_project_id,
         needs_assessment_id=getattr(payload, "needs_assessment_id", None),
         strategic_category_id=strat_cat_id,
         category=payload.category or "Hardware",
@@ -3843,6 +3879,8 @@ def admin_create_proposal(
     return db_proposal
 
 
+# app/admin/router.py (Replace approve_proposal around line 1974)
+
 @router.put("/proposals/{proposal_id}/approve")
 def approve_proposal(
     proposal_id: uuid.UUID,
@@ -3863,7 +3901,29 @@ def approve_proposal(
         else:
             raise HTTPException(
                 status_code=400,
-                detail="Approval Blocked: Please assign an Organizational Outcome (Part I.A.4) to this proposal via Override before approving."
+                detail="Approval Blocked: Please assign an Organizational Outcome (Part I.A.4) before approving."
+            )
+
+    # All approved proposals must be bound to an ICT Project
+    if not proposal.project_id:
+        # Match project by strategic category, or assign default project for that category
+        matched_proj = db.query(IctProject).filter(
+            IctProject.issp_period == proposal.issp_period,
+            func.lower(cast(IctProject.project_category, String)) == func.lower(cast(proposal.strategic_category, String))
+        ).first()
+        if not matched_proj:
+            matched_proj = db.query(IctProject).filter(
+                IctProject.issp_period == proposal.issp_period
+            ).first()
+        
+        if matched_proj:
+            proposal.project_id = matched_proj.id
+            proposal.strategic_category = str(getattr(matched_proj.project_category, "value", matched_proj.project_category))
+            proposal.fund_source = str(getattr(matched_proj.funding_source, "value", matched_proj.funding_source))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Approval Blocked: Proposal must be bound to an ICT Project in Part III.E. No active ICT Projects found."
             )
 
     old_status = proposal.status
@@ -3882,15 +3942,15 @@ def approve_proposal(
         new_value={
             "status": "Approved", 
             "outcome_id": proposal.outcome_id,
-            "project_id": str(proposal.project_id) if proposal.project_id else None
+            "project_id": str(proposal.project_id)
         }
     )
     db.commit()
     db.refresh(proposal)
     return {
         "status": "success", 
-        "message": "Proposal approved successfully into Intake Pool. Please bind it to an ICT Project to define its categorization in the plan.", 
-        "proposal_id": proposal.id
+        "message": f"Proposal approved and bound to ICT Project.", 
+        "proposal_id": str(proposal.id)
     }
 
 
@@ -3963,8 +4023,8 @@ def admin_override_proposal(
             proposal.outcome_id = payload.outcome_id
             
         if payload.project_id is not None:
-            proposal.project_id = payload.project_id
             if payload.project_id:
+                proposal.project_id = payload.project_id
                 proj = db.query(IctProject).filter(IctProject.id == payload.project_id).first()
                 if proj:
                     proposal.fund_source = str(getattr(proj.funding_source, "value", proj.funding_source) or "General Appropriations Act (GAA)")
@@ -3974,6 +4034,10 @@ def admin_override_proposal(
                     ).first()
                     proposal.strategic_category_id = sc_row.id if sc_row else None
             else:
+                # If unlinked, an approved proposal must revert status to prevent orphan failure
+                proposal.project_id = None
+                if str(proposal.status).lower() == "approved":
+                    proposal.status = "Draft"
                 if payload.strategic_category is None:
                     proposal.strategic_category = "Office Productivity"
                     sc_row = db.query(StrategicCategory).filter(

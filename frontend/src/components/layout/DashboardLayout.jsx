@@ -714,7 +714,7 @@ export default function DashboardLayout() {
             )}
           </div>
           <div className="flex items-center gap-3 shrink-0">
-            <span className="px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 font-mono font-bold text-[10px] border border-blue-200 dark:border-blue-900">
+            <span className="px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 font-mono font-bold text-[10px] border border-blue-200 dark:border-blue-900 whitespace-nowrap shrink-0"> 
               Active Cycle: FY {activeCycle || "2026-2028"}
             </span>
           </div>

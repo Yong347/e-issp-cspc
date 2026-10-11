@@ -911,56 +911,75 @@ def generate_complete_issp_html(
 
     head_title = clean_text(getattr(narrative, 'agency_head_position', None), getattr(settings, "DEFAULT_AGENCY_HEAD_TITLE", "Head of Agency"))
 
-    # Robust running header logo css to prevent gap or missing layout
-    if running_header_logo:
-        logo_css = f'background-image: url("{running_header_logo}"); background-size: 26px 26px; background-repeat: no-repeat; background-position: left center; padding-left: 32px;'
-    else:
-        logo_css = 'padding-left: 0;'
-
-    # Shared running header block starting from Table of Contents through to end of document
-    shared_running_header = f"""
-        @top-left {{
-            content: "{agency_header_name}";
-            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-            font-size: 8.5pt;
-            font-weight: bold;
-            color: #0f172a;
-            white-space: nowrap;
-            text-align: left;
-            vertical-align: middle;
-            {logo_css}
-            padding-bottom: 4px;
-            border-bottom: 1.5px solid #cbd5e1;
-            height: 32px;
-        }}
-        @top-center {{
-            content: "";
-            vertical-align: middle;
-            padding-bottom: 4px;
-            border-bottom: 1.5px solid #cbd5e1;
-            height: 32px;
-        }}
-        @top-right {{
-            content: "INFORMATION SYSTEMS STRATEGIC PLAN {plan_years_label}";
-            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-            font-size: 8.5pt;
-            font-weight: bold;
-            color: #0f172a;
-            text-align: right;
-            vertical-align: middle;
-            white-space: nowrap;
-            padding-bottom: 4px;
-            border-bottom: 1.5px solid #cbd5e1;
-            height: 32px;
-        }}
+    # Defined in HTML body and displayed via CSS running element to prevent logo squishing
+    running_header_html = f"""
+    <header class="page-running-header">
+        <table class="running-header-table">
+            <tr>
+                <td class="rhead-logo">
+                    {f'<img src="{running_header_logo}" alt="Logo" class="rhead-logo-img" />' if running_header_logo else ''}
+                </td>
+                <td class="rhead-agency">
+                    {agency_header_name}
+                </td>
+                <td class="rhead-plan">
+                    INFORMATION SYSTEMS STRATEGIC PLAN {plan_years_label}
+                </td>
+            </tr>
+        </table>
+    </header>
     """
-
     css = f"""
     <style>
+        /* RUNNING HEADER STYLES (PREVENTS SQUISHED / CLIPPED LOGO) */
+        .page-running-header {{
+            position: running(docRunningHeader);
+            width: 100%;
+        }}
+        .running-header-table {{
+            width: 100%;
+            border-collapse: collapse;
+            border-bottom: 1.5px solid #cbd5e1;
+            margin: 0;
+            padding: 0;
+        }}
+        .running-header-table td {{
+            border: none;
+            padding: 0 4px 6px 4px;
+            vertical-align: middle;
+            font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+            font-size: 8.5pt;
+            font-weight: bold;
+            color: #0f172a;
+        }}
+        .rhead-logo {{
+            width: 28px;
+            padding-right: 6px !important;
+        }}
+        .rhead-logo-img {{
+            height: 24px;
+            width: 24px;
+            object-fit: contain;
+            display: block;
+        }}
+        .rhead-agency {{
+            text-align: left;
+            white-space: nowrap;
+        }}
+        .rhead-plan {{
+            text-align: right;
+            white-space: nowrap;
+        }}
+
+        /* BASE PAGE GEOMETRY & GLOBAL RUNNING HEADER/FOOTER */
         @page {{
             size: A4 landscape;
-            margin: 1.2in 1.0in 1.0in 1.0in;
-            {shared_running_header}
+            margin: 1.1in 1.0in 0.9in 1.0in;
+            @top-center {{
+                content: element(docRunningHeader);
+                vertical-align: bottom;
+                width: 100%;
+            }}
             @bottom-left {{
                 content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
@@ -1003,8 +1022,12 @@ def generate_complete_issp_html(
         /* HEADERS START CONTINUOUSLY ON TABLE OF CONTENTS */
         @page toc_layout {{
             size: A4 landscape;
-            margin: 1.2in 1.0in 1.0in 1.0in;
-            {shared_running_header}
+            margin: 1.1in 1.0in 0.9in 1.0in;
+            @top-center {{
+                content: element(docRunningHeader);
+                vertical-align: bottom;
+                width: 100%;
+            }}
             @bottom-left {{
                 content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
@@ -1040,9 +1063,13 @@ def generate_complete_issp_html(
 
         @page part1_start {{
             size: A4 landscape;
-            margin: 1.2in 1.0in 1.0in 1.0in;
+            margin: 1.1in 1.0in 0.9in 1.0in;
             counter-reset: page 1;
-            {shared_running_header}
+            @top-center {{
+                content: element(docRunningHeader);
+                vertical-align: bottom;
+                width: 100%;
+            }}
             @bottom-left {{
                 content: "OFFICIAL GOVERNMENT DOCUMENT — DICT ISSP v.2026 STANDARD";
                 font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
@@ -1258,7 +1285,6 @@ def generate_complete_issp_html(
         }}
     </style>
     """
-
     # --- COVER PAGE ---
     raw_scope = str(getattr(narrative.scope_choice, "value", narrative.scope_choice or "")).strip().lower()
     scope_json = narrative.scope_json or {}
@@ -2745,4 +2771,4 @@ def generate_complete_issp_html(
     </div>
     """
 
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}</body></html>"
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{running_header_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}</body></html>"

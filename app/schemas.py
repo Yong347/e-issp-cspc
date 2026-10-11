@@ -1133,6 +1133,7 @@ class ProposalResponse(BaseModel):
     issp_period: str
     outcome_id: Optional[int] = None
     project_id: Optional[Union[uuid.UUID, str]] = None
+    project_title: Optional[str] = None 
     needs_assessment_id: Optional[Union[uuid.UUID, str]] = None
     strategic_category_id: Optional[int] = None
     
@@ -1202,6 +1203,8 @@ class ProposalResponse(BaseModel):
     def sync_aliases(self) -> 'ProposalResponse':
         self.is_in_house_turnover = bool(self.created_by_students or self.is_in_house_turnover)
         self.created_by_students = self.is_in_house_turnover
+        if hasattr(self, 'project_rel') and self.project_rel:
+            self.project_title = getattr(self.project_rel, 'project_title', None)
         return self
 
     model_config = ConfigDict(from_attributes=True)

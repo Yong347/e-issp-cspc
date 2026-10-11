@@ -799,31 +799,11 @@ export default function InternalProjectsManager() {
   // Projected Cost in Link Modal
   const projectedModalCost = useMemo(() => {
     if (!linkingProject) return 0;
-    
-    // Sum selected proposals
-    const propSum = allAvailableProposals
+    return allAvailableProposals
       .filter(p => selectedProposalIds.includes(String(p.id)))
       .reduce((acc, p) => acc + (parseFloat(p.total_cost) || 0), 0);
-
-    // Sum selected systems not covered by proposal names
-    const coveredNames = new Set(
-      allAvailableProposals
-        .filter(p => selectedProposalIds.includes(String(p.id)))
-        .map(p => (p.item_name || "").toLowerCase().trim())
-    );
-
-    const sysSum = systems
-      .filter(s => selectedSystemIds.includes(String(s.id)))
-      .filter(s => (s.status?.value || s.status || "").toLowerCase() !== "operational")
-      .reduce((acc, s) => {
-        const sName = (s.name || "").toLowerCase().trim();
-        const covered = Array.from(coveredNames).some(c => c.includes(sName) || sName.includes(c));
-        return covered ? acc : acc + (parseFloat(s.proposed_cost) || 0);
-      }, 0);
-
-    return propSum + sysSum;
-  }, [linkingProject, selectedProposalIds, selectedSystemIds, allAvailableProposals, systems]);
-
+  }, [linkingProject, selectedProposalIds, allAvailableProposals]);
+    
   // Filter Pipeline for Main List (Integrated with Dynamic Categories)
   const filteredProjects = useMemo(() => {
     return projects.filter(p => {
@@ -1444,7 +1424,11 @@ export default function InternalProjectsManager() {
                                 <td className="p-2.5 text-slate-500 dark:text-slate-400">Central Office</td>
                                 <td className="p-2.5 text-center font-mono font-bold">1</td>
                                 <td className="p-2.5 text-right font-mono text-slate-600 dark:text-slate-400">{formatPHP(sys.proposed_cost)}</td>
-                                <td className="p-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400">{formatPHP(sys.proposed_cost)}</td>
+                                <td className="p-2.5 text-right font-mono text-xs text-blue-600 dark:text-blue-400">
+                                  <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-955 dark:text-blue-300 text-[8.5px] font-bold" title="Budgeted in Part IV.A detailed proposals">
+                                    Part IV.A Mapped
+                                  </span>
+                                </td>
                                 <td className="p-2.5 text-center font-mono font-bold text-[9px] uppercase">
                                   <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-955 dark:text-blue-300">
                                     {sys.status}
@@ -1491,7 +1475,7 @@ export default function InternalProjectsManager() {
                                     type="button"
                                     onClick={() => handleUnlinkItem(proj, itm.id, "proposal", cardLinkedSystems)}
                                     className="p-1 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-955/40 text-slate-400 rounded cursor-pointer"
-                                    title="Unlink Line Item from Project (Returns to Intake Pool)"
+                                    title="Unlink Line Item from Project"
                                   >
                                     <Unlink className="w-3.5 h-3.5" />
                                   </button>
@@ -1782,7 +1766,7 @@ export default function InternalProjectsManager() {
                                 ) : isSelected ? (
                                   <span className="text-[9px] text-emerald-600 font-bold block">✓ Assigned (Included)</span>
                                 ) : (
-                                  <span className="text-[9px] text-slate-400 block">Intake Pool (Quarantined)</span>
+                                  <span className="text-[9px] text-slate-400 block">Unassigned</span>
                                 )}
                               </div>
                             </div>

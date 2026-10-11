@@ -1293,8 +1293,8 @@ export default function UnifiedProposals() {
                             ) : (
                               <>
                                 <span>&bull;</span>
-                                <span className="text-amber-600 dark:text-amber-400 italic">
-                                  Intake Pool (Unlinked)
+                                <span className="text-slate-400 dark:text-slate-500 italic">
+                                  Project Assignment Pending
                                 </span>
                               </>
                             )}

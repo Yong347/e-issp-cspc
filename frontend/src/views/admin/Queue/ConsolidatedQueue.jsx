@@ -122,9 +122,6 @@ export default function ConsolidatedQueue() {
   const [overrideItemName, setOverrideItemName] = useState("");
   const [overrideCategory, setOverrideCategory] = useState("Hardware");
   const [overrideUnitCost, setOverrideUnitCost] = useState("");
-  
-  // Governance Allocation Gate: "project_bound" | "intake_pool"
-  const [governanceMode, setGovernanceMode] = useState("project_bound");
   const [overrideStrategicCat, setOverrideStrategicCat] = useState("Internal ICT Projects");
   const [overrideProjectId, setOverrideProjectId] = useState("");
   
@@ -344,7 +341,7 @@ export default function ConsolidatedQueue() {
 
       if (activeTab === "pending_review") {
         params.status_filter = "submitted";
-      } else if (!["all", "intake_pool", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
+      } else if (!["all", "needs_linked", "Capital Outlay", "MOOE"].includes(activeTab)) {
         params.strategic_category = activeTab;
       }
 
@@ -399,8 +396,7 @@ export default function ConsolidatedQueue() {
   /**
    * Action: Approve Single Proposal
    * Checks for mandatory Program Outcome & UACS Code assignment,
-   * warns on unlinked proposals entering the Intake Pool, and
-   * enforces ₱2M major outlay review gates.
+   * enforces ₱2M major outlay review gates, and guarantees project linkage.
    */
   const handleApprove = async (id, itemName) => {
     setError(null);
@@ -434,20 +430,15 @@ export default function ConsolidatedQueue() {
       return;
     }
 
-    // Gate 4: Unlinked Project Quarantine Notice
-    if (!target.project_id) {
-      if (!window.confirm(`'${itemName}' (${formatPHP(totalCost)}) is not yet linked to an ICT Project. Approving it will place it in the Intake Pool, excluding it from the compiled ISSP (Part IV.A and Table B.1) until assigned to an ICT Project in the Projects Portfolio (Part III.E). Proceed with intake approval?`)) {
-        openOverrideModal(target);
-        return;
-      }
+    // Gate 4: Project Linkage Notice (auto-bound by backend or assigned via modal)
+    if (!target.project_id && projects.length === 0) {
+      setError("Approval Blocked: At least one ICT Project must be registered in Part III.E before approving proposal expenditures.");
+      return;
     }
 
     try {
       await approveProposal(token, id);
-      setSuccess(target.project_id 
-        ? `Proposal line item '${itemName}' approved successfully.`
-        : `Proposal '${itemName}' approved into the Intake Pool. Remember to link it to an ICT Project before compilation.`
-      );
+      setSuccess(`Proposal line item '${itemName}' approved and bound to ICT Project.`);
       fetchQueue();
     } catch (err) {
       setError(err.message || "Approval failed.");
@@ -530,26 +521,22 @@ export default function ConsolidatedQueue() {
   const handleBatchApprove = async () => {
     if (selectedIds.size === 0) return;
 
-    const unassigned = Array.from(selectedIds).filter(id => {
-      const p = proposals.find(item => item.id === id);
-      return p && (!p.outcome_id && (!p.outcome || !p.outcome.id));
-    });
-
-    if (unassigned.length > 0 && outcomes.length === 0) {
-      setError(`Batch approval blocked: ${unassigned.length} selected proposal(s) require a Program Outcome, but none are registered for cycle ${activeCycle}.`);
+    if (projects.length === 0) {
+      setError("Batch approval blocked: No active ICT Projects found in Part III.E to associate approved expenditures with.");
       return;
     }
 
-    // Check if any selected item is an unlinked proposal
-    const unlinkedProposals = Array.from(selectedIds).filter(id => {
+    const unassignedOutcomeCount = Array.from(selectedIds).filter(id => {
       const p = proposals.find(item => item.id === id);
-      return p && !p.project_id;
-    });
+      return p && (!p.outcome_id && (!p.outcome || !p.outcome.id));
+    }).length;
 
-    let promptMsg = `Batch approve ${selectedIds.size} submitted proposal(s)? Proposals without explicitly assigned outcomes will inherit the cycle's statutory default outcome.`;
-    if (unlinkedProposals.length > 0) {
-      promptMsg = `${unlinkedProposals.length} selected proposal(s) are not yet linked to an ICT Project. Approving them will place them into the Intake Pool to prevent Table B.1 distortion until bound to an ICT Project in the Projects Portfolio. Continue?`;
+    if (unassignedOutcomeCount > 0 && outcomes.length === 0) {
+      setError(`Batch approval blocked: ${unassignedOutcomeCount} selected proposal(s) require a Program Outcome, but none are registered for cycle ${activeCycle}.`);
+      return;
     }
+
+    const promptMsg = `Batch approve ${selectedIds.size} submitted proposal(s)? Proposals will automatically inherit the cycle's statutory default outcome and matching ICT Project portfolio.`;
 
     if (!window.confirm(promptMsg)) return;
 
@@ -587,26 +574,20 @@ export default function ConsolidatedQueue() {
     setOverrideCategory(item.category || "Hardware");
     setOverrideUnitCost(String(item.unit_cost || "0"));
 
-    // Check project linkage: either Project-Bound or in the Intake Pool
+    // Check project linkage: prioritize explicit project_id or default to matching/first project
     const pId = item.project_id ? String(item.project_id) : "";
-    setOverrideProjectId(pId);
-    const pObj = pId ? projects.find(p => String(p.id) === String(pId)) : null;
+    const pObj = pId 
+      ? projects.find(p => String(p.id) === String(pId))
+      : (projects.length > 0 ? projects[0] : null);
 
-    if (pId && pObj) {
-      setGovernanceMode("project_bound");
+    if (pObj) {
+      setOverrideProjectId(String(pObj.id));
       setOverrideStrategicCat(pObj.project_category || "Internal ICT Projects");
       setOverrideFundSource(pObj.funding_source || item.fund_source || "General Appropriations Act (GAA)");
     } else {
-      // Unlinked items reside in the Intake Pool awaiting project binding
-      setGovernanceMode(projects.length > 0 ? "project_bound" : "intake_pool");
-      if (projects.length > 0) {
-        setOverrideProjectId(String(projects[0].id));
-        setOverrideStrategicCat(projects[0].project_category || "Internal ICT Projects");
-        setOverrideFundSource(projects[0].funding_source || item.fund_source || "General Appropriations Act (GAA)");
-      } else {
-        setOverrideStrategicCat(item.strategic_category || "Internal ICT Projects");
-        setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
-      }
+      setOverrideProjectId("");
+      setOverrideStrategicCat(item.strategic_category || "Internal ICT Projects");
+      setOverrideFundSource(item.fund_source || "General Appropriations Act (GAA)");
     }
 
     setOverrideOutcomeId(item.outcome_id ? String(item.outcome_id) : (outcomes[0]?.id ? String(outcomes[0].id) : ""));
@@ -699,8 +680,8 @@ export default function ConsolidatedQueue() {
       return;
     }
 
-    if (governanceMode === "project_bound" && !overrideProjectId) {
-      setError("Project Linkage Requirement: Select a target ICT Project from Part III.E to define the proposal's categorization.");
+    if (!overrideProjectId) {
+      setError("Project Linkage Requirement: Select a target ICT Project from Part III.E to associate this expenditure with.");
       return;
     }
 
@@ -711,22 +692,10 @@ export default function ConsolidatedQueue() {
 
     setSubmittingOverride(true);
     try {
-      const selectedProj = (governanceMode === "project_bound" && overrideProjectId) 
-        ? projects.find(p => String(p.id) === String(overrideProjectId))
-        : null;
+      const selectedProj = projects.find(p => String(p.id) === String(overrideProjectId));
 
-      let finalStrategicCat = overrideStrategicCat;
-      let finalProjectId = null;
-
-      if (governanceMode === "project_bound" && selectedProj) {
-        finalProjectId = selectedProj.id;
-        finalStrategicCat = selectedProj.project_category || "Internal ICT Projects";
-      } else {
-        // Intake Pool: awaiting assignment to an ICT Project in the Projects Portfolio
-        finalProjectId = null;
-        finalStrategicCat = "Internal ICT Projects";
-      }
-
+      const finalProjectId = selectedProj ? selectedProj.id : null;
+      const finalStrategicCat = selectedProj ? (selectedProj.project_category || "Internal ICT Projects") : overrideStrategicCat;
       const finalFundSource = selectedProj?.funding_source || overrideFundSource;
       const selectedStratObj = strategicCategories.find(s => s.name === finalStrategicCat);
       const effectiveUacs = resolvedEffectiveUacs;
@@ -754,11 +723,7 @@ export default function ConsolidatedQueue() {
 
       if (approveImmediately) {
         await approveProposal(token, activeOverrideItem.id);
-        if (governanceMode === "intake_pool") {
-          setSuccess(`'${overrideItemName}' approved into the Intake Pool. Remember to bind it to an ICT Project in the Projects Portfolio before compiling the ISSP.`);
-        } else {
-          setSuccess(`Classification committed and proposal '${overrideItemName}' approved under project '${selectedProj.project_title}'.`);
-        }
+        setSuccess(`Classification committed and proposal '${overrideItemName}' approved under project '${selectedProj?.project_title || "ICT Portfolio"}'.`);
       } else {
         setSuccess(`Governance classification saved for '${overrideItemName}'.`);
       }
@@ -811,15 +776,13 @@ export default function ConsolidatedQueue() {
     }
   };
 
-  // Dynamic Tabs Array with Accurate Real-time Intake Pool Counter
+  // Dynamic Tabs Array with Clarified Labels
   const dynamicTabs = useMemo(() => {
-    const unlinkedApprovedCount = proposals.filter(p => p.status === "Approved" && !p.project_id).length;
     const pendingCount = proposals.filter(p => p.status === "Submitted").length;
 
     return [
       { id: "all", label: "All Line Items" },
       { id: "pending_review", label: `Pending Review (${pendingCount})`, isAlert: pendingCount > 0 },
-      { id: "intake_pool", label: `Intake Pool (${unlinkedApprovedCount})`, isWarning: unlinkedApprovedCount > 0 },
       ...(strategicCategories.length > 0
         ? strategicCategories.map(c => ({ id: c.name, label: c.name }))
         : [
@@ -831,7 +794,7 @@ export default function ConsolidatedQueue() {
       ),
       { id: "Capital Outlay", label: "Capital Outlay (CO)" },
       { id: "MOOE", label: "MOOE Services" },
-      { id: "needs_linked", label: "Needs Linked" }
+      { id: "needs_linked", label: "Sec 8.0 Needs Linked" }
     ];
   }, [proposals, strategicCategories]);
 
@@ -839,13 +802,10 @@ export default function ConsolidatedQueue() {
     if (activeTab === "pending_review") {
       return item.status === "Submitted";
     }
-    if (activeTab === "intake_pool") {
-      return item.status === "Approved" && !item.project_id;
-    }
     if (activeTab === "Capital Outlay") return item.expenditure_class === "Capital Outlay";
     if (activeTab === "MOOE") return item.expenditure_class !== "Capital Outlay";
     if (activeTab === "needs_linked") return Boolean(item.needs_assessment_id);
-    if (!["all", "pending_review", "intake_pool", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
+    if (!["all", "pending_review", "Capital Outlay", "MOOE", "needs_linked"].includes(activeTab)) {
       if ((item.strategic_category || "").toLowerCase() !== activeTab.toLowerCase()) return false;
     }
     if (fundFilter && item.fund_source !== fundFilter && !item.fund_source?.startsWith(fundFilter)) return false;
@@ -863,7 +823,7 @@ export default function ConsolidatedQueue() {
             <span>Master Review Queue &amp; Governance Intake</span>
           </h2>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-1">
-            Audit department submissions, assign UACS Object Codes ({formatPHP(policySettings.capitalization_threshold)} capitalization threshold), and govern pipeline compilation. Approved proposals enter the <strong>Intake Pool</strong> until formally linked to an ICT Project in the Projects Portfolio (Part III.E).
+            Audit department submissions, assign UACS Object Codes ({formatPHP(policySettings.capitalization_threshold)} capitalization threshold), and govern pipeline compilation. Approved proposals belong strictly to an authorized ICT Project in Part III.E.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -903,9 +863,14 @@ export default function ConsolidatedQueue() {
       )}
 
       {success && (
-        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center gap-2.5 shadow-xs animate-fadeIn">
-          <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-          <span>{success}</span>
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-955/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold rounded-xl flex items-center justify-between gap-2.5 shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>{success}</span>
+          </div>
+          <button onClick={() => setSuccess(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
@@ -924,7 +889,6 @@ export default function ConsolidatedQueue() {
             >
               <span>{tab.label}</span>
               {tab.isAlert && <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />}
-              {tab.isWarning && <span className="w-2 h-2 rounded-full bg-rose-400" />}
             </button>
           ))}
         </div>
@@ -1015,7 +979,7 @@ export default function ConsolidatedQueue() {
                     />
                   </th>
                   <th className="py-3 px-3.5 w-40">Department / Office</th>
-                  <th className="py-3 px-3.5">Requested Resource &amp; Pipeline Status</th>
+                  <th className="py-3 px-3.5">Requested Resource &amp; Governance Provenance</th>
                   <th className="py-3 px-3.5">UACS Code &amp; Class</th>
                   <th className="py-3 px-3.5">Financing Source</th>
                   <th className="py-3 px-3.5">Target Schedule</th>
@@ -1035,7 +999,7 @@ export default function ConsolidatedQueue() {
                   const isSubmitted = item.status === "Submitted";
                   const isApproved = item.status === "Approved";
                   const hasAssignedOutcome = Boolean(item.outcome_id || item.outcome?.id);
-                  const linkedProjTitle = item.project_rel?.project_title || projects.find(p => String(p.id) === String(item.project_id))?.project_title;
+                  const linkedProjTitle = item.project_rel?.project_title || item.project_title || projects.find(p => String(p.id) === String(item.project_id))?.project_title;
 
                   return (
                     <tr 
@@ -1073,7 +1037,7 @@ export default function ConsolidatedQueue() {
                         </span>
                       </td>
 
-                      {/* Resource Description & Pipeline Linkage Badges */}
+                      {/* Resource Description & Explicit Project / Needs Provenance */}
                       <td className="py-3.5 px-3.5 align-top max-w-xs space-y-1.5">
                         <div className="font-bold text-slate-900 dark:text-white text-xs">{item.item_name}</div>
                         
@@ -1089,26 +1053,18 @@ export default function ConsolidatedQueue() {
                             </span>
                           )}
 
-                          {/* Pipeline Compilation Status Badges */}
-                          {linkedProjTitle ? (
-                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20 flex items-center gap-1 truncate max-w-[170px]" title={`Compiled in ISSP via project: ${linkedProjTitle}`}>
+                          {/* Explicit Project Linkage Badge (No confusing intake pool states) */}
+                          {item.project_id ? (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20 flex items-center gap-1 truncate max-w-[170px]" title={`Project: ${linkedProjTitle || item.project_title}`}>
                               <Layers className="w-2.5 h-2.5 shrink-0" />
-                              <span>Project: {linkedProjTitle}</span>
+                              <span>Project: {linkedProjTitle || item.project_title || "Linked"}</span>
                             </span>
-                          ) : isApproved ? (
-                            <div className="flex items-center gap-1">
-                              <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20 flex items-center gap-1" title="Approved in queue but unlinked to an ICT Project. Quarantined from PDF until assigned to a project portfolio in Part III.E.">
-                                <FolderKanban className="w-2.5 h-2.5" />
-                                <span>Intake Pool (Awaiting Project Link)</span>
-                              </span>
-                              <Link
-                                to="/admin/projects/internal"
-                                className="text-[9px] font-bold text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center"
-                              >
-                                <span>Assign Project &rarr;</span>
-                              </Link>
-                            </div>
-                          ) : null}
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold border font-mono bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/10 dark:text-rose-400 dark:border-rose-500/20 flex items-center gap-1" title="Unlinked: Must be bound to an ICT Project">
+                              <FolderKanban className="w-2.5 h-2.5" />
+                              <span>Unlinked (Assign Project)</span>
+                            </span>
+                          )}
 
                           {isStudentSystem && (
                             <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20">
@@ -1128,13 +1084,13 @@ export default function ConsolidatedQueue() {
                             </span>
                           )}
 
-                          {/* Section 8.0 Needs Assessment Provenance Badge */}
+                          {/* Clarified Section 8.0 Needs Assessment Badge */}
                           {item.needs_assessment_id && (
                             <span 
                               className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border font-mono bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-500/10 dark:text-teal-300 dark:border-teal-500/20 cursor-help"
-                              title={linkedNa ? `Linked Needs Assessment: ${linkedNa.title}\nProblem: ${linkedNa.current_problem}` : `Needs Assessment ID: ${item.needs_assessment_id}`}
+                              title={linkedNa ? `Needs Assessment: ${linkedNa.title}\nProblem: ${linkedNa.current_problem}` : `Needs Assessment ID: ${item.needs_assessment_id}`}
                             >
-                              Needs Linked: {linkedNa?.title ? linkedNa.title.slice(0, 22) + "..." : "Attached"}
+                              Needs Assessment: {linkedNa?.title ? linkedNa.title.slice(0, 22) + "..." : "Attached"}
                             </span>
                           )}
                         </div>
@@ -1253,7 +1209,7 @@ export default function ConsolidatedQueue() {
                               <Link
                                 to="/admin/projects/internal"
                                 className="px-2 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 dark:bg-purple-955/50 dark:text-purple-300 dark:border-purple-800 text-[10px] font-bold font-mono inline-flex items-center gap-1"
-                                title="Bind this approved proposal to an ICT Project in Part III.E"
+                                title="Bind this proposal to an ICT Project in Part III.E to include it in the compiled plan"
                               >
                                 <FolderKanban className="w-3 h-3" />
                                 <span>Assign Project</span>
@@ -1331,7 +1287,7 @@ export default function ConsolidatedQueue() {
         </div>
       </div>
 
-      {/* OVERRIDE & GOVERNANCE ASSIGNMENT MODAL (Strictly Project-Bound vs. Intake Pool) */}
+      {/* OVERRIDE & GOVERNANCE ASSIGNMENT MODAL (Explicit Project-Bound Portfolio Mapping) */}
       {activeOverrideItem && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-2xl p-6 space-y-4 shadow-2xl overflow-y-auto max-h-[90vh]">
@@ -1573,109 +1529,48 @@ export default function ConsolidatedQueue() {
                 </div>
               </div>
 
-              {/* STEP 3: Strategic Allocation Gate & ICT Project Portfolio (Part III.E) */}
+              {/* STEP 3: Project Charter Binding (Part III.E) */}
               <div className="space-y-3 p-3.5 bg-slate-50 dark:bg-slate-955 rounded-xl border border-slate-200 dark:border-slate-800">
                 <span className="text-[10px] uppercase font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                   <span className="w-4 h-4 rounded-full bg-slate-700 text-white flex items-center justify-center font-mono text-[9px] font-bold">3</span>
                   <FolderKanban className="w-3.5 h-3.5 text-purple-500" />
-                  <span>Governance Allocation Gate &amp; Strategic Portfolio (Part III.E)</span>
+                  <span>Target ICT Project Charter &amp; Portfolio (Part III.E)</span>
                 </span>
 
-                {/* 2-Choice Governance Selector: Project-Bound vs Intake Pool */}
-                <div className="space-y-2">
-                  <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 block">
-                    Pipeline Allocation Intent (All proposals must bind to an ICT Project)
+                <div className="space-y-1.5 animate-fadeIn">
+                  <label className="text-[9.5px] uppercase font-bold text-purple-700 dark:text-purple-300 flex items-center justify-between">
+                    <span>Target ICT Project Charter (Part III.E)</span>
+                    <span className="text-rose-500 font-bold">*Required</span>
                   </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
-                      governanceMode === "project_bound"
-                        ? "bg-purple-50/90 dark:bg-slate-955 border-purple-400 dark:border-purple-800 text-purple-900 dark:text-purple-200 ring-1 ring-purple-400"
-                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
-                    }`}>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name="govMode"
-                          checked={governanceMode === "project_bound"}
-                          onChange={() => {
-                            setGovernanceMode("project_bound");
-                            if (projects.length > 0 && !overrideProjectId) {
-                              setOverrideProjectId(String(projects[0].id));
-                              setOverrideStrategicCat(projects[0].project_category || "Internal ICT Projects");
-                            }
-                          }}
-                          className="accent-purple-600"
-                        />
-                        <span className="font-bold text-xs">Bind to ICT Project (Part III.E)</span>
-                      </div>
-                      <span className="text-[9.5px] opacity-75 mt-1 block">Inherits project category &amp; compiles into official plan</span>
-                    </label>
-
-                    <label className={`p-2.5 rounded-xl border flex flex-col justify-between cursor-pointer transition-all ${
-                      governanceMode === "intake_pool"
-                        ? "bg-amber-50/90 dark:bg-slate-955 border-amber-400 dark:border-amber-800 text-amber-900 dark:text-amber-200 ring-1 ring-amber-400"
-                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400"
-                    }`}>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name="govMode"
-                          checked={governanceMode === "intake_pool"}
-                          onChange={() => {
-                            setGovernanceMode("intake_pool");
-                            setOverrideProjectId("");
-                          }}
-                          className="accent-amber-600"
-                        />
-                        <span className="font-bold text-xs">Hold in Intake Pool</span>
-                      </div>
-                      <span className="text-[9.5px] opacity-75 mt-1 block">Approved in queue; bind to a project later in Projects Portfolio</span>
-                    </label>
-                  </div>
-                </div>
-
-                {governanceMode === "intake_pool" && (
-                  <div className="p-2.5 bg-amber-50/90 dark:bg-slate-955 border border-amber-300 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 rounded-xl text-[10.5px] flex items-start gap-1.5 animate-fadeIn">
-                    <Info className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-                    <span>
-                      <strong>Intake Pool Notice:</strong> This proposal will be approved into the departmental intake pool. It will <strong>NOT</strong> leak into Table B.1 or Table IV.A until an administrator assigns it to a Part III.E Project Charter in the Projects Portfolio.
-                    </span>
-                  </div>
-                )}
-
-                {governanceMode === "project_bound" && (
-                  <div className="space-y-1.5 animate-fadeIn">
-                    <label className="text-[9.5px] uppercase font-bold text-purple-700 dark:text-purple-300 flex items-center justify-between">
-                      <span>Select Target ICT Project Charter (Part III.E)</span>
-                      <span className="text-rose-500 font-bold">*Required</span>
-                    </label>
-                    <select
-                      value={overrideProjectId}
-                      required={governanceMode === "project_bound"}
-                      onChange={(e) => {
-                        const pId = e.target.value;
-                        setOverrideProjectId(pId);
-                        if (pId) {
-                          const pObj = projects.find(p => String(p.id) === String(pId));
-                          if (pObj) {
-                            setOverrideStrategicCat(pObj.project_category || "Internal ICT Projects");
-                            if (pObj.funding_source) {
-                              setOverrideFundSource(pObj.funding_source);
-                            }
+                  <select
+                    value={overrideProjectId}
+                    required
+                    onChange={(e) => {
+                      const pId = e.target.value;
+                      setOverrideProjectId(pId);
+                      if (pId) {
+                        const pObj = projects.find(p => String(p.id) === String(pId));
+                        if (pObj) {
+                          setOverrideStrategicCat(pObj.project_category || "Internal ICT Projects");
+                          if (pObj.funding_source) {
+                            setOverrideFundSource(pObj.funding_source);
                           }
                         }
-                      }}
-                      className="w-full p-2.5 bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs font-semibold"
-                    >
-                      <option value="">-- Choose Target ICT Project --</option>
-                      {projects.map(p => (
-                        <option key={p.id} value={p.id}>
-                          [{p.project_category}] {p.project_title}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+                      }
+                    }}
+                    className="w-full p-2.5 bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs font-semibold"
+                  >
+                    <option value="">-- Choose Target ICT Project --</option>
+                    {projects.map(p => (
+                      <option key={p.id} value={p.id}>
+                        [{p.project_category}] {p.project_title}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[9px] text-slate-400 font-sans block pt-0.5">
+                    *Every approved proposal must belong to an authorized ICT Project. This governs Table B.1 Category and Table B.2 Fund Source inheritance.
+                  </span>
+                </div>
 
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <div className="space-y-1">
@@ -1698,12 +1593,12 @@ export default function ConsolidatedQueue() {
                   <div className="space-y-1">
                     <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between">
                       <span>Spending Bucket (Table B.1)</span>
-                      {governanceMode === "project_bound" && <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>}
+                      <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>
                     </label>
                     <select
                       value={overrideStrategicCat}
                       onChange={(e) => setOverrideStrategicCat(e.target.value)}
-                      disabled={governanceMode === "project_bound" || governanceMode === "intake_pool"}
+                      disabled={true}
                       className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer font-semibold text-xs disabled:opacity-60"
                     >
                       {strategicCategories.length > 0 ? (
@@ -1768,12 +1663,12 @@ export default function ConsolidatedQueue() {
                 <div className="space-y-1">
                   <label className="text-[9.5px] uppercase font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between">
                     <span>Financing Fund Source</span>
-                    {governanceMode === "project_bound" && <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>}
+                    <span className="text-[8.5px] text-purple-600 dark:text-purple-400 font-mono">(Project Inherited)</span>
                   </label>
                   <select
                     value={overrideFundSource}
                     onChange={(e) => setOverrideFundSource(e.target.value)}
-                    disabled={governanceMode === "project_bound"}
+                    disabled={true}
                     className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white outline-none cursor-pointer text-xs disabled:opacity-60"
                   >
                     <option value="General Appropriations Act (GAA)">General Appropriations Act (GAA)</option>

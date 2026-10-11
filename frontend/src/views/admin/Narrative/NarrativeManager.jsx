@@ -70,7 +70,8 @@ import {
   Zap,
   Cloud,
   Coins,
-  Target
+  Target,
+  Database 
 } from "lucide-react";
 
 // Presets for Standard Public-Sector Stakeholder Groups

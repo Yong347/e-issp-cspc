@@ -175,7 +175,7 @@ export default function Login() {
         <div className="pt-4 border-t border-[#cbd8e6] dark:border-slate-800 space-y-2 text-center text-[10px] text-slate-500 dark:text-slate-400 font-mono">
           <div className="flex items-center justify-center gap-1.5 text-slate-700 dark:text-slate-300 font-bold">
             <Lock className="w-3.5 h-3.5 text-blue-500" />
-            <span>DICT ISSP v.2026 CSPC © All rights reserved</span>
+            <span>DICT ISSP v.2026 &bull; {agencyName} &copy; All rights reserved</span>
           </div>
           <p className="text-[9.5px] text-slate-400 dark:text-slate-500 leading-tight">
             Official Government System &bull; Unauthorized access prohibited

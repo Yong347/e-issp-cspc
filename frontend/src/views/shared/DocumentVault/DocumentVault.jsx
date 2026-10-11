@@ -391,12 +391,12 @@ export default function DocumentVault() {
     const endYr = narrative?.issp_period_to || (planningYears && planningYears[planningYears.length - 1]) || 2030;
 
     const rawCio = String(narrative?.cio_name || narrative?.signatory_prepared_by || "").trim();
-    const isGenericCio = !rawCio || ["chief information officer", "cio", "none", "null", "undefined"].includes(rawCio.toLowerCase());
-    const cioSignatory = isGenericCio ? "REY T. CORTEZ, MIT" : rawCio.toUpperCase();
+    const cioSignatory = rawCio ? rawCio.toUpperCase() : "CHIEF INFORMATION OFFICER";
 
     const rawHead = String(narrative?.head_of_agency_name || narrative?.signatory_approved_by || "").trim();
-    const isGenericHead = !rawHead || ["head of agency", "agency head", "college president", "president", "none", "null", "undefined"].includes(rawHead.toLowerCase());
-    const headSignatory = isGenericHead ? "AMADO A. OLIVA JR, PhD." : rawHead.toUpperCase();
+    const headSignatory = rawHead 
+      ? rawHead.toUpperCase() 
+      : String(narrative?.agency_head_position || "HEAD OF AGENCY").toUpperCase();
 
     const agencyHeadTitle = narrative?.agency_head_position || "Agency Head";
     const websiteUrl = narrative?.agency_website_url || "www.agency.gov.ph";
@@ -1068,8 +1068,7 @@ export default function DocumentVault() {
                   <p style={{ fontSize: "8.5pt", textTransform: "uppercase", letterSpacing: "1.2px", margin: 0, color: "#475569", lineHeight: 1.35, fontFamily: "sans-serif" }}>
                     Republic of the Philippines<br />
                     <strong style={{ fontSize: "12pt", color: "#0f172a", fontFamily: "Palatino Linotype, Book Antiqua, Palatino, serif" }}>{agencyName.toUpperCase()}</strong><br />
-                    <span style={{ fontSize: "8.5pt", color: "#64748b" }}>{narrative?.agency_address || "Nabua, Camarines Sur"}</span>
-                  </p>
+                    <span style={{ fontSize: "8.5pt", color: "#64748b" }}>{narrative?.agency_address || ""}</span></p>
                 </div>
 
                 <div style={{ textAlign: "center", margin: "18px 0 16px 0" }}>
