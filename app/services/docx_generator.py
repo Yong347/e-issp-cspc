@@ -843,6 +843,7 @@ def create_issp_docx(
     dr_teams: Optional[List[Any]] = None,
     dr_bias: Optional[List[Any]] = None,
     dr_metrics: Optional[List[Any]] = None,
+    document_composition: Optional[Dict[str, Any]] = None,
     **kwargs
 ) -> io.BytesIO:
     """
@@ -2932,6 +2933,73 @@ def create_issp_docx(
                 set_cell_margins(r.cells[c_i], top=35, bottom=35, left=60, right=60)
             r.cells[0].paragraphs[0].add_run(clean_str(dm.indicator)).font.bold = True
             r.cells[1].paragraphs[0].add_run(clean_str(dm.target_metric))
+
+    supplemental_sections = (document_composition or {}).get("sections", [])
+    if supplemental_sections:
+        doc.add_page_break()
+        doc.add_heading("Supplemental Sections", level=1)
+
+        def add_attachment_link(paragraph, label: str, url: str) -> None:
+            relationship_id = paragraph.part.relate_to(
+                url,
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                is_external=True
+            )
+            hyperlink = OxmlElement("w:hyperlink")
+            hyperlink.set(qn("r:id"), relationship_id)
+            run = OxmlElement("w:r")
+            run_properties = OxmlElement("w:rPr")
+            color = OxmlElement("w:color")
+            color.set(qn("w:val"), "0563C1")
+            run_properties.append(color)
+            underline = OxmlElement("w:u")
+            underline.set(qn("w:val"), "single")
+            run_properties.append(underline)
+            run.append(run_properties)
+            text_node = OxmlElement("w:t")
+            text_node.text = label
+            run.append(text_node)
+            hyperlink.append(run)
+            paragraph._p.append(hyperlink)
+
+        def render_composition_section(section: Dict[str, Any], level: int = 2) -> None:
+            doc.add_heading(clean_str(section.get("title"), "Untitled section"), level=min(level, 3))
+            for block in section.get("blocks", []):
+                block_title = clean_str(block.get("title"), "")
+                if block_title:
+                    doc.add_heading(block_title, level=min(level + 1, 4))
+                block_type = block.get("type")
+                if block_type == "paragraph":
+                    doc.add_paragraph(clean_str(block.get("content"), ""))
+                elif block_type in ("bullet_list", "numbered_list", "survey"):
+                    entries = block.get("questions", []) if block_type == "survey" else block.get("items", [])
+                    style = "List Number" if block_type in ("numbered_list", "survey") else "List Bullet"
+                    for entry in entries:
+                        doc.add_paragraph(clean_str(entry), style=style)
+                elif block_type == "table":
+                    columns = block.get("columns", [])
+                    if columns:
+                        table = doc.add_table(rows=1, cols=len(columns))
+                        table.style = "Table Grid"
+                        for index, column in enumerate(columns):
+                            table.rows[0].cells[index].text = clean_str(column)
+                        for row in block.get("rows", []):
+                            cells = table.add_row().cells
+                            for index, cell in enumerate(row):
+                                cells[index].text = clean_str(cell)
+                elif block_type == "attachment":
+                    paragraph = doc.add_paragraph()
+                    file_name = clean_str(block.get("file_name"), "Uploaded file")
+                    file_url = clean_str(block.get("file_url"), "")
+                    if file_url:
+                        add_attachment_link(paragraph, file_name, file_url)
+                    else:
+                        paragraph.add_run(file_name)
+            for child in section.get("children", []):
+                render_composition_section(child, level + 1)
+
+        for section in supplemental_sections:
+            render_composition_section(section)
 
     # Save Word document to byte buffer
     buf = io.BytesIO()

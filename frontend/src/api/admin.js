@@ -1126,6 +1126,33 @@ export const getNarrative = async (token, cycle) => {
   return handleResponse(res, "Failed to load planning narrative");
 };
 
+export const getIsspDocumentComposition = async (token, cycle) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/composition`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load ISSP composition");
+};
+
+export const saveIsspDocumentComposition = async (token, cycle, composition) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/composition`, {
+    method: "PUT",
+    headers: getHeaders(token),
+    body: JSON.stringify(composition)
+  });
+  return handleResponse(res, "Failed to save ISSP composition");
+};
+
+export const uploadIsspCompositionAttachment = async (token, cycle, file) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/composition/upload`, {
+    method: "POST",
+    headers: getHeaders(token, true),
+    body: formData
+  });
+  return handleResponse(res, "Failed to upload ISSP attachment");
+};
+
 export const updateNarrative = async (token, cycle, payload) => {
   const cioResolvedName = (payload.signatory_prepared_by || payload.cio_name || "").trim();
   const headResolvedName = (payload.signatory_approved_by || payload.head_of_agency_name || "").trim();

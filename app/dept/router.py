@@ -88,6 +88,41 @@ def coerce_optional_uuid(v: Any) -> Optional[uuid.UUID]:
         return None
 
 
+def validate_department_cycle_reference(
+    db: Session,
+    model: Any,
+    record_id: Optional[uuid.UUID],
+    dept_id: Optional[int],
+    active_period: Optional[str],
+    label: str,
+    allow_global: bool = False,
+):
+    """Rejects references that do not belong to the active planning cycle or the current department."""
+    if record_id is None:
+        return None
+
+    record = db.query(model).filter(model.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{label} record not found.")
+
+    record_period = getattr(record, "issp_period", None)
+    if active_period and record_period and str(record_period) != str(active_period):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{label} is not valid for the active ISSP cycle."
+        )
+
+    if dept_id is not None:
+        record_dept = getattr(record, "department_id", None)
+        if record_dept is not None and record_dept != dept_id and not allow_global:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"{label} does not belong to your department."
+            )
+
+    return record
+
+
 def is_datetime_expired(dt: Optional[datetime]) -> bool:
     """
     Safely evaluates if a given datetime is in the past, supporting both 
@@ -655,8 +690,10 @@ def create_merged_proposal(
 
     resolved_outcome_id = getattr(payload, "outcome_id", None)
     if resolved_outcome_id is not None:
-        outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == resolved_outcome_id).first()
-        if not outcome:
+        outcome = validate_department_cycle_reference(
+            db, OrganizationalOutcome, resolved_outcome_id, user["department_id"], active_period, "Target Organizational Outcome"
+        )
+        if outcome is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Target Organizational Outcome ID {resolved_outcome_id} does not exist in active registry."
@@ -664,15 +701,25 @@ def create_merged_proposal(
 
     resolved_needs_assessment_id = coerce_optional_uuid(payload.needs_assessment_id)
     if resolved_needs_assessment_id:
-        na = db.query(NeedsAssessment).filter(NeedsAssessment.id == resolved_needs_assessment_id).first()
-        if not na:
+        na = validate_department_cycle_reference(
+            db, NeedsAssessment, resolved_needs_assessment_id, user["department_id"], active_period, "Needs Assessment"
+        )
+        if na is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Needs Assessment with ID {resolved_needs_assessment_id} not found."
             )
 
     resolved_project_id = coerce_optional_uuid(payload.project_id)
+    if resolved_project_id:
+        validate_department_cycle_reference(
+            db, IctProject, resolved_project_id, None, active_period, "ICT Project", allow_global=True
+        )
     resolved_system_id = coerce_optional_uuid(getattr(payload, "system_id", None))
+    if resolved_system_id:
+        validate_department_cycle_reference(
+            db, InformationSystem, resolved_system_id, user["department_id"], active_period, "Information System"
+        )
     resolved_category = payload.category or "Hardware"
     resolved_strategic_cat = payload.strategic_category or "Office Productivity"
     resolved_fund_source = payload.fund_source or "General Appropriations Act (GAA)"
@@ -959,8 +1006,10 @@ def update_merged_proposal(
 
     resolved_outcome_id = getattr(payload, "outcome_id", None)
     if resolved_outcome_id is not None:
-        outcome = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.id == resolved_outcome_id).first()
-        if not outcome:
+        outcome = validate_department_cycle_reference(
+            db, OrganizationalOutcome, resolved_outcome_id, user["department_id"], proposal.issp_period, "Target Organizational Outcome"
+        )
+        if outcome is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Target Organizational Outcome ID {resolved_outcome_id} does not exist."
@@ -969,8 +1018,10 @@ def update_merged_proposal(
 
     resolved_needs_assessment_id = coerce_optional_uuid(payload.needs_assessment_id)
     if resolved_needs_assessment_id:
-        na = db.query(NeedsAssessment).filter(NeedsAssessment.id == resolved_needs_assessment_id).first()
-        if not na:
+        na = validate_department_cycle_reference(
+            db, NeedsAssessment, resolved_needs_assessment_id, user["department_id"], proposal.issp_period, "Needs Assessment"
+        )
+        if na is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Needs Assessment with ID {resolved_needs_assessment_id} not found."
@@ -978,7 +1029,9 @@ def update_merged_proposal(
 
     resolved_project_id = coerce_optional_uuid(payload.project_id)
     if resolved_project_id:
-        proj = db.query(IctProject).filter(IctProject.id == resolved_project_id).first()
+        proj = validate_department_cycle_reference(
+            db, IctProject, resolved_project_id, None, proposal.issp_period, "ICT Project", allow_global=True
+        )
         if not proj:
             resolved_project_id = None
         else:
@@ -987,6 +1040,14 @@ def update_merged_proposal(
 
     resolved_system_id = coerce_optional_uuid(getattr(payload, "system_id", None))
     if resolved_system_id is not None:
+        system = validate_department_cycle_reference(
+            db, InformationSystem, resolved_system_id, user["department_id"], proposal.issp_period, "Information System"
+        )
+        if system is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Information System ID {resolved_system_id} not found or not linked to your department."
+            )
         proposal.system_id = resolved_system_id
 
     issp_period, aligned_quantities = align_and_validate_years(db, payload.yearly_quantities, is_submitting=False)
@@ -1488,7 +1549,9 @@ def create_department_proposed_system(
     # Handle project_id linkage with automatic fallback to an active ICT Project
     project_id = coerce_optional_uuid(getattr(payload, "project_id", None) or dumped.get("project_id"))
     if project_id:
-        proj = db.query(IctProject).filter(IctProject.id == project_id).first()
+        proj = validate_department_cycle_reference(
+            db, IctProject, project_id, None, active_period, "ICT Project", allow_global=True
+        )
         dumped["project_id"] = proj.id if proj else None
     else:
         matched_proj = db.query(IctProject).filter(

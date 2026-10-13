@@ -865,6 +865,18 @@ class ISSPSingularityEngine:
                 "50202010 00 - Training Expenses (MOOE)",
                 "50211030 00 - Consulting/Outsourced Development (MOOE)"
             ]
+        # Ensure all systems with an active proposed cost are synchronized into proposals before running the pivot
+        try:
+            from app.utils.helpers import sync_system_proposal
+            systems_with_cost = db.query(InformationSystem).filter(
+                InformationSystem.issp_period == issp_period,
+                InformationSystem.proposed_cost > 0
+            ).all()
+            for s_cost_item in systems_with_cost:
+                sync_system_proposal(db, s_cost_item)
+            db.flush()
+        except Exception as sync_err:
+            logger.debug(f"Pre-parity system sync note: {sync_err}")
 
         # -------------------------------------------------------------
         # 5. QUERY PROPOSAL LINE ITEMS (ACTIVE/NON-ARCHIVED)

@@ -62,6 +62,8 @@ export function clearAuthSession() {
     localStorage.removeItem("user_role");
     localStorage.removeItem("department_id");
     localStorage.removeItem("user_email");
+    localStorage.removeItem("role");
+    localStorage.removeItem("userId");
   } catch (err) {
     console.error("Failed to clear auth session keys:", err);
   }

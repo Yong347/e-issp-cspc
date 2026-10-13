@@ -3,6 +3,8 @@ import os
 import io
 import csv
 import html
+import hmac
+import hashlib
 import uuid
 import json
 import logging
@@ -12,6 +14,7 @@ import inspect
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Union
+from urllib.parse import urlencode
 
 from fastapi import (
     APIRouter, 
@@ -24,7 +27,7 @@ from fastapi import (
     Form, 
     Request
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import func, or_, and_, String, cast, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 from pydantic import BaseModel, Field
@@ -81,7 +84,8 @@ from app.database.models import (
     RoleTag,
     ScopeChoice,
     DynamicChecklistCriteria,
-    IsspPlanArchive
+    IsspPlanArchive,
+    IsspDocumentComposition
 )
 from app.schemas import (
     AdminOverridePayload,
@@ -157,7 +161,9 @@ from app.schemas import (
     HarmonizationCriterionUpdate,
     HarmonizationCriterionResponse,
     DevelopmentStrategyCreate,
-    DevelopmentStrategyResponse
+    DevelopmentStrategyResponse,
+    IsspDocumentCompositionPayload,
+    IsspDocumentCompositionResponse
 )
 from app.auth.router import require_admin, require_user, require_supply_or_admin
 from app.tasks.pdf_tasks import compile_issp_document
@@ -1205,6 +1211,130 @@ def get_master_narrative(
         db.refresh(narrative)
 
     return MasterNarrativeResponse.model_validate(narrative)
+
+
+@router.get("/narratives/{issp_period}/composition", response_model=IsspDocumentCompositionResponse)
+def get_issp_document_composition(
+    issp_period: str,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        raise HTTPException(status_code=404, detail="Planning cycle narrative not found.")
+
+    record = db.query(IsspDocumentComposition).filter(
+        IsspDocumentComposition.issp_period == issp_period
+    ).first()
+    composition = record.composition_json if record else {"version": 1, "sections": []}
+    return IsspDocumentCompositionResponse(
+        issp_period=issp_period,
+        updated_at=record.updated_at if record else None,
+        **composition
+    )
+
+
+@router.put("/narratives/{issp_period}/composition", response_model=IsspDocumentCompositionResponse)
+def save_issp_document_composition(
+    issp_period: str,
+    payload: IsspDocumentCompositionPayload,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        raise HTTPException(status_code=404, detail="Planning cycle narrative not found.")
+
+    expected_file_prefix = f"issp-composition/{issp_period}/"
+
+    def validate_attachment_keys(sections):
+        for section in sections:
+            for block in section.blocks:
+                if block.type == "attachment" and (
+                    not block.file_key.startswith(expected_file_prefix)
+                    or "/" in block.file_key[len(expected_file_prefix):]
+                    or "\\" in block.file_key[len(expected_file_prefix):]
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Attachment references must come from this ISSP cycle's upload endpoint."
+                    )
+            validate_attachment_keys(section.children)
+
+    validate_attachment_keys(payload.sections)
+
+    record = db.query(IsspDocumentComposition).filter(
+        IsspDocumentComposition.issp_period == issp_period
+    ).first()
+    if not record:
+        record = IsspDocumentComposition(issp_period=issp_period)
+        db.add(record)
+
+    record.composition_json = payload.model_dump(mode="json")
+    record.updated_by_user_id = admin["id"]
+    db.commit()
+    db.refresh(record)
+    return IsspDocumentCompositionResponse(
+        issp_period=issp_period,
+        updated_at=record.updated_at,
+        **record.composition_json
+    )
+
+
+@router.post("/narratives/{issp_period}/composition/upload")
+async def upload_issp_composition_attachment(
+    issp_period: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    if not narrative:
+        raise HTTPException(status_code=404, detail="Planning cycle narrative not found.")
+
+    safe_name = secure_filename(file.filename or "attachment")
+    allowed_extensions = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".png", ".jpg", ".jpeg"}
+    extension = os.path.splitext(safe_name)[1].lower()
+    if extension not in allowed_extensions:
+        raise HTTPException(status_code=415, detail="Upload a PDF, Office document, or image file.")
+
+    file_bytes = await file.read(20 * 1024 * 1024 + 1)
+    if len(file_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Attachments must be 20 MB or smaller.")
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+
+    file_key = f"issp-composition/{issp_period}/{uuid.uuid4().hex}_{safe_name}"
+    uploaded = storage_client.upload_binary(file_bytes, file_key)
+    if not uploaded:
+        raise HTTPException(status_code=500, detail="Failed to upload attachment to storage.")
+    return {"file_key": file_key, "file_name": safe_name}
+
+
+@router.get("/public/issp-composition-files")
+def download_issp_composition_attachment(
+    issp_period: str = Query(...),
+    file_key: str = Query(...),
+    signature: str = Query(...)
+):
+    expected_prefix = f"issp-composition/{issp_period}/"
+    file_name = file_key[len(expected_prefix):] if file_key.startswith(expected_prefix) else ""
+    if not file_name or "/" in file_name or "\\" in file_name:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+
+    signed_value = f"{issp_period}\n{file_key}".encode("utf-8")
+    expected_signature = hmac.new(
+        settings.SECRET_KEY.encode("utf-8"),
+        signed_value,
+        hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+
+    download_url = storage_client.generate_download_url(file_key)
+    if not download_url:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+    return RedirectResponse(download_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @router.post("/narratives/{issp_period}", response_model=MasterNarrativeResponse)

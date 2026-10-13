@@ -5,7 +5,7 @@ import json
 import enum
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional, List, Dict, Any, Union
+from typing import Literal, Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, ConfigDict
 
 from app.config import settings
@@ -1485,6 +1485,77 @@ class BulkCeilingValidationPayload(BaseModel):
 # ==========================================================
 # 13. MASTER NARRATIVES & COMPLETED PLAN ARCHIVE SCHEMAS
 # ==========================================================
+
+class IsspCompositionBlock(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=1, max_length=64)
+    type: Literal["paragraph", "bullet_list", "numbered_list", "table", "survey", "attachment"]
+    title: str = Field(default="", max_length=200)
+    content: str = Field(default="", max_length=20000)
+    items: List[str] = Field(default_factory=list, max_length=200)
+    columns: List[str] = Field(default_factory=list, max_length=20)
+    rows: List[List[str]] = Field(default_factory=list, max_length=500)
+    questions: List[str] = Field(default_factory=list, max_length=200)
+    file_key: Optional[str] = Field(default=None, max_length=500)
+    file_name: Optional[str] = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_block_content(self):
+        if self.type == "table":
+            if not self.columns:
+                raise ValueError("Tables require at least one column.")
+            if any(len(row) != len(self.columns) for row in self.rows):
+                raise ValueError("Every table row must match the number of columns.")
+        if self.type == "survey" and not self.questions:
+            raise ValueError("Survey blocks require at least one question.")
+        if self.type in ("bullet_list", "numbered_list") and not self.items:
+            raise ValueError("List blocks require at least one item.")
+        if self.type == "attachment" and not (self.file_key and self.file_name):
+            raise ValueError("Attachment blocks require an uploaded file.")
+        return self
+
+
+class IsspCompositionSection(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=1, max_length=64)
+    title: str = Field(..., min_length=1, max_length=200)
+    children: List["IsspCompositionSection"] = Field(default_factory=list, max_length=100)
+    blocks: List[IsspCompositionBlock] = Field(default_factory=list, max_length=200)
+
+
+class IsspDocumentCompositionPayload(BaseModel):
+    version: Literal[1] = 1
+    sections: List[IsspCompositionSection] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_tree(self):
+        section_ids = set()
+        block_ids = set()
+        section_count = 0
+        block_count = 0
+
+        def visit(section: IsspCompositionSection, depth: int) -> None:
+            nonlocal section_count, block_count
+            section_count += 1
+            if depth > 5 or section_count > 250:
+                raise ValueError("Composition may contain at most 250 sections and 5 nested levels.")
+            if section.id in section_ids:
+                raise ValueError("Section IDs must be unique within a composition.")
+            section_ids.add(section.id)
+            for block in section.blocks:
+                block_count += 1
+                if block_count > 1000 or block.id in block_ids:
+                    raise ValueError("Composition block IDs must be unique and at most 1000 blocks are allowed.")
+                block_ids.add(block.id)
+            for child in section.children:
+                visit(child, depth + 1)
+
+        for section in self.sections:
+            visit(section, 1)
+        return self
+
+
+class IsspDocumentCompositionResponse(IsspDocumentCompositionPayload):
+    issp_period: str
+    updated_at: Optional[datetime] = None
 
 class ISPlannerSchema(BaseModel):
     name: str = Field(..., example="Lead Systems Analyst")

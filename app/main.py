@@ -1629,18 +1629,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    raw_error_message = str(exc)
-    sanitized_error = raw_error_message
-    for keyword in ["password", "secret", "token", "key", "private", "database_url"]:
-        if keyword in sanitized_error.lower():
-            sanitized_error = f"[REDACTED_SENSITIVE_DATA_CONTAINING_{keyword.upper()}]"
-            break
-
-    logger.error(f"Unhandled Exception: {sanitized_error}", exc_info=exc)
+    logger.error("Unhandled Exception: a non-specific internal error occurred.", exc_info=exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         headers=get_cors_headers(request),
-        content={"detail": f"{type(exc).__name__}: {str(exc)}"}
+        content={"detail": "An unexpected internal server error occurred."}
     )
 
 
@@ -1653,17 +1646,21 @@ app.include_router(dept_router)
 app.include_router(admin_router)
 app.include_router(supply_router)
 
-# Mount local upload file system statically (defensive fallback directory creation)
+# Mount local upload file system statically only in non-production environments.
+# Production systems should prefer signed, authenticated retrieval endpoints instead of exposing uploaded files directly.
 try:
     os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
-    app.mount(
-        "/static/uploads", 
-        StaticFiles(directory=settings.LOCAL_UPLOAD_DIR), 
-        name="static"
-    )
-    logger.info(f"Successfully mounted local uploads directory: {settings.LOCAL_UPLOAD_DIR}")
+    if settings.ENV != "production":
+        app.mount(
+            "/static/uploads",
+            StaticFiles(directory=settings.LOCAL_UPLOAD_DIR),
+            name="static"
+        )
+        logger.info(f"Successfully mounted local uploads directory for non-production use: {settings.LOCAL_UPLOAD_DIR}")
+    else:
+        logger.warning("Public static upload mount disabled in production. Use authenticated signed download links only.")
 except Exception as e:
-    logger.error(f"Failed to configure or mount local upload directory: {str(e)}")
+    logger.error(f"Failed to configure local upload directory: {str(e)}")
 
 
 # ==========================================================

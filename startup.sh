@@ -33,4 +33,7 @@ fi
 
 # 4. Start Uvicorn immediately using python -m
 echo "[AZURE STARTUP] Starting FastAPI server on port 8000..."
-exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+TRUSTED_PROXY_IPS="${TRUSTED_PROXY_IPS:-127.0.0.1,::1}"
+exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+    --proxy-headers \
+    --forwarded-allow-ips="${TRUSTED_PROXY_IPS}"

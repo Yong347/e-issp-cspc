@@ -964,6 +964,18 @@ class MasterNarrative(Base):
         return "agency" in sc
 
 
+class IsspDocumentComposition(Base):
+    __tablename__ = "issp_document_compositions"
+
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
+        primary_key=True
+    )
+    composition_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    updated_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class OrganizationalOutcome(Base):
     __tablename__ = "organizational_outcomes"
 

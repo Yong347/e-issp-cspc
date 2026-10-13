@@ -238,6 +238,12 @@ export default function DashboardLayout() {
                           <span>Narrative Studio &amp; DRBCP</span>
                         </div>
                       </NavLink>
+                      <NavLink to="/admin/issp-composition" className={navClass}>
+                        <div className="flex items-center gap-2.5">
+                          <FileText className="w-4 h-4 opacity-75" />
+                          <span>ISSP Composition</span>
+                        </div>
+                      </NavLink>
                       <NavLink to="/admin/outcomes" className={navClass}>
                         <div className="flex items-center gap-2.5">
                           <GraduationCap className="w-4 h-4 opacity-75" />

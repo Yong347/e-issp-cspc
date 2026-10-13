@@ -38,9 +38,12 @@ const safeDecodeJWT = (token) => {
  */
 const clearAuthSession = () => {
   localStorage.removeItem("access_token");
+  localStorage.removeItem("token");
   localStorage.removeItem("user_role");
   localStorage.removeItem("department_id");
   localStorage.removeItem("user_email");
+  localStorage.removeItem("role");
+  localStorage.removeItem("userId");
 };
 
 export function AuthProvider({ children }) {
@@ -50,7 +53,7 @@ export function AuthProvider({ children }) {
   // Synchronizes and restores existing session credentials on mount
   useEffect(() => {
     try {
-      const token = localStorage.getItem("access_token");
+      const token = localStorage.getItem("access_token") || localStorage.getItem("token");
       const storedRole = localStorage.getItem("user_role");
       const storedDeptId = localStorage.getItem("department_id");
       const storedEmail = localStorage.getItem("user_email");
@@ -118,6 +121,7 @@ export function AuthProvider({ children }) {
       : null;
 
     localStorage.setItem("access_token", token);
+    localStorage.setItem("token", token);
     localStorage.setItem("user_role", resolvedRole);
 
     if (resolvedEmail) {

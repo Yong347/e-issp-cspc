@@ -1,5 +1,10 @@
 # app/tasks/pdf_tasks.py
 import io
+import copy
+import hashlib
+import hmac
+import html
+import os
 import re
 import time
 import json
@@ -10,6 +15,7 @@ import mimetypes
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from pathlib import Path
+from urllib.parse import urlencode
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import or_, func, cast, String
 from sqlalchemy.orm import joinedload, selectinload
@@ -38,7 +44,8 @@ from app.database.models import (
     IctStaffPosition,
     StrategicCategory,
     UacsCatalogItem,
-    ProposalStatus
+    ProposalStatus,
+    IsspDocumentComposition
 )
 from app.storage.s3_client import storage_client
 from app.celery_app import celery_app
@@ -428,6 +435,38 @@ def compile_issp_document(self, metadata: dict):
             else:
                 raise ValueError(f"Active planning cycle '{issp_period}' is not configured in the database.")
 
+        composition_record = db.query(IsspDocumentComposition).filter(
+            IsspDocumentComposition.issp_period == issp_period
+        ).first()
+        document_composition = copy.deepcopy(
+            composition_record.composition_json if composition_record else {"version": 1, "sections": []}
+        )
+
+        def resolve_attachment_urls(sections):
+            for section in sections or []:
+                for block in section.get("blocks", []):
+                    file_key = block.get("file_key")
+                    if block.get("type") == "attachment" and file_key:
+                        signed_value = f"{issp_period}\n{file_key}".encode("utf-8")
+                        signature = hmac.new(
+                            settings.SECRET_KEY.encode("utf-8"),
+                            signed_value,
+                            hashlib.sha256
+                        ).hexdigest()
+                        base_url = getattr(settings, "API_BASE_URL", "").rstrip("/")
+                        website_hostname = os.getenv("WEBSITE_HOSTNAME")
+                        if website_hostname and ("localhost" in base_url or not base_url):
+                            base_url = f"https://{website_hostname}"
+                        query = urlencode({
+                            "issp_period": issp_period,
+                            "file_key": file_key,
+                            "signature": signature
+                        })
+                        block["file_url"] = f"{base_url}/api/admin/public/issp-composition-files?{query}"
+                resolve_attachment_urls(section.get("children", []))
+
+        resolve_attachment_urls(document_composition.get("sections", []))
+
         outcomes = db.query(OrganizationalOutcome).filter(OrganizationalOutcome.issp_period == issp_period).all()
         concerns = db.query(StrategicConcern).filter(StrategicConcern.issp_period == issp_period).order_by(StrategicConcern.order_index.asc()).all()
 
@@ -512,7 +551,8 @@ def compile_issp_document(self, metadata: dict):
                 cyber_controls=cyber_controls,
                 dr_teams=dr_teams,
                 dr_bias=dr_bias,
-                dr_metrics=dr_metrics
+                dr_metrics=dr_metrics,
+                document_composition=document_composition
             )
             docx_bytes = docx_buffer.getvalue()
             issp_id = f"ISSP-{issp_period}-FINAL"
@@ -558,9 +598,27 @@ def compile_issp_document(self, metadata: dict):
         # DEFAULT: WEASYPRINT PDF COMPILATION
         safe_update_progress(task_ref, "PROGRESS", 65, "Compiling dynamic DICT v.2026 HTML templates...")
         html_content = generate_complete_issp_html(
-            db, narrative, outcomes, concerns, systems, projects, performance_metrics, items, inventory,
-            human_capitals, staff_positions, stakeholders, egov_checklists,
-            glossary, network_infra, cyber_controls, dr_teams, dr_bias, dr_metrics, parity_data
+            db,
+            narrative,
+            outcomes,
+            concerns,
+            systems,
+            projects,
+            performance_metrics,
+            items,
+            inventory,
+            human_capitals,
+            staff_positions,
+            stakeholders,
+            egov_checklists,
+            glossary,
+            network_infra,
+            cyber_controls,
+            dr_teams,
+            dr_bias,
+            dr_metrics,
+            parity_data,
+            document_composition
         )
 
         safe_update_progress(task_ref, "PROGRESS", 80, "Rendering PDF binary via layout engine...")
@@ -885,7 +943,8 @@ def generate_complete_issp_html(
     dr_teams: List[DisasterRecoveryTeam],
     dr_bias: List[BusinessImpactAnalysis],
     dr_metrics: List[DRBCPMetric],
-    parity_data: Dict[str, Any]
+    parity_data: Dict[str, Any],
+    document_composition: Optional[Dict[str, Any]] = None
 ) -> str:
     # Dynamically extract planning cycle span from narrative
     start_year = getattr(narrative, "issp_period_from", None)
@@ -1431,6 +1490,30 @@ def generate_complete_issp_html(
         for idx, yr in enumerate(years_range)
     )
 
+    def composition_anchor(path: tuple[int, ...]) -> str:
+        return "supplement-" + "-".join(str(index) for index in path)
+
+    def composition_toc_rows(sections: List[Dict[str, Any]], path: tuple[int, ...] = ()) -> str:
+        rows = []
+        for index, section in enumerate(sections):
+            section_path = path + (index,)
+            title = html.escape(str(section.get("title") or "Untitled section"))
+            rows.append(make_toc_row(
+                f"#{composition_anchor(section_path)}",
+                title,
+                indent=min(len(path) + 1, 3)
+            ))
+            rows.append(composition_toc_rows(section.get("children", []), section_path))
+        return "".join(rows)
+
+    supplemental_sections = (document_composition or {}).get("sections", [])
+    supplemental_toc_rows = composition_toc_rows(supplemental_sections)
+    supplemental_toc = (
+        make_toc_row("#sec-supplemental", "SUPPLEMENTAL SECTIONS", indent=0, is_bold=True)
+        + supplemental_toc_rows
+        if supplemental_sections else ""
+    )
+
     toc_html = f"""
     <div class="page-toc" id="sec-toc">
         <div class="section-header">TABLE OF CONTENTS</div>
@@ -1478,6 +1561,7 @@ def generate_complete_issp_html(
                 {make_toc_row("#sec-part4-b4", "B.4. OBJECT OF EXPENDITURE", indent=2)}
                 {make_toc_row("#sec-annex1", "ANNEX 1: EXISTING INFORMATION & COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY", indent=0, is_bold=True)}
                 {make_toc_row("#sec-annex2", "ANNEX 2: DISASTER RECOVERY AND BUSINESS CONTINUITY PLAN (DRBCP) FOR ICT RESOURCES", indent=0, is_bold=True)}
+                {supplemental_toc}
             </tbody>
         </table>
     </div>
@@ -2802,4 +2886,58 @@ def generate_complete_issp_html(
     </div>
     """
 
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{running_header_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}</body></html>"
+    def render_composition_section(
+        section: Dict[str, Any],
+        path: tuple[int, ...],
+        level: int = 2
+    ) -> str:
+        heading_level = min(level, 6)
+        title = html.escape(str(section.get("title") or "Untitled section"))
+        anchor = composition_anchor(path)
+        markup = [f'<h{heading_level} id="{anchor}" class="composition-heading">{title}</h{heading_level}>']
+        for block in section.get("blocks", []):
+            block_title = html.escape(str(block.get("title") or ""))
+            if block_title:
+                markup.append(f'<h{min(heading_level + 1, 6)}>{block_title}</h{min(heading_level + 1, 6)}>')
+            block_type = block.get("type")
+            if block_type == "paragraph":
+                markup.append(f'<p>{html.escape(str(block.get("content") or "")).replace(chr(10), "<br>")}</p>')
+            elif block_type in ("bullet_list", "numbered_list"):
+                tag = "ul" if block_type == "bullet_list" else "ol"
+                entries = "".join(f'<li>{html.escape(str(item))}</li>' for item in block.get("items", []))
+                markup.append(f"<{tag}>{entries}</{tag}>")
+            elif block_type == "survey":
+                entries = "".join(f'<li>{html.escape(str(question))}</li>' for question in block.get("questions", []))
+                markup.append(f'<ol class="survey-questions">{entries}</ol>')
+            elif block_type == "table":
+                columns = block.get("columns", [])
+                headers = "".join(f'<th>{html.escape(str(column))}</th>' for column in columns)
+                rows = "".join(
+                    "<tr>" + "".join(f'<td>{html.escape(str(cell))}</td>' for cell in row) + "</tr>"
+                    for row in block.get("rows", [])
+                )
+                markup.append(f'<table class="composition-table"><thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table>')
+            elif block_type == "attachment":
+                file_name = html.escape(str(block.get("file_name") or "Uploaded file"))
+                file_url = html.escape(str(block.get("file_url") or ""), quote=True)
+                if file_url:
+                    markup.append(f'<p class="composition-attachment"><a href="{file_url}">{file_name}</a></p>')
+                else:
+                    markup.append(f'<p class="composition-attachment">{file_name}</p>')
+        for index, child in enumerate(section.get("children", [])):
+            markup.append(render_composition_section(child, path + (index,), level + 1))
+        return "".join(markup)
+
+    supplemental_html = ""
+    if supplemental_sections:
+        supplemental_html = (
+            '<section id="sec-supplemental" class="supplemental-sections" style="page-break-before: always;">'
+            '<h1>Supplemental Sections</h1>'
+            + "".join(
+                render_composition_section(section, (index,))
+                for index, section in enumerate(supplemental_sections)
+            )
+            + "</section>"
+        )
+
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{running_header_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}{supplemental_html}</body></html>"

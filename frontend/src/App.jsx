@@ -25,9 +25,10 @@ import CeilingControl from "./views/admin/Budget/CeilingControl";
 import CategorizationManager from "./views/admin/Governance/CategorizationManager";
 import ComplianceAnalytics from "./views/admin/Analytics/ComplianceAnalytics";
 import NarrativeManager from "./views/admin/Narrative/NarrativeManager";
+import IsspCompositionEditor from "./views/admin/Narrative/IsspCompositionEditor";
 import DiagramVault from "./views/admin/Narrative/DiagramVault";
 import UserWhitelisting from "./views/admin/Users/UserWhitelisting";
-import CatalogManager from "./views/admin/Catalog/CatalogManager";
+import CatalogManager from "./views/admin/catalog/CatalogManager";
 import AuditTrails from "./views/admin/Audit/AuditTrails";
 import DocumentVault from "./views/shared/DocumentVault/DocumentVault";
 
@@ -166,6 +167,7 @@ export default function App() {
             <Route path="analytics" element={<ComplianceAnalytics />} />
             
             <Route path="narratives" element={<NarrativeManager />} />
+            <Route path="issp-composition" element={<IsspCompositionEditor />} />
             <Route path="diagrams" element={<DiagramVault />} />
             <Route path="users" element={<UserWhitelisting />} />
             <Route path="catalog" element={<CatalogManager />} />
