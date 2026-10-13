@@ -5,6 +5,7 @@ import csv
 import html
 import hmac
 import hashlib
+import re
 import uuid
 import json
 import logging
@@ -27,7 +28,7 @@ from fastapi import (
     Form, 
     Request
 )
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import func, or_, and_, String, cast, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 from pydantic import BaseModel, Field
@@ -1335,6 +1336,46 @@ def download_issp_composition_attachment(
     if not download_url:
         raise HTTPException(status_code=404, detail="Attachment not found.")
     return RedirectResponse(download_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@router.get("/public/generated-issp-files")
+def download_generated_issp_document(
+    file_key: str = Query(...),
+    signature: str = Query(...)
+):
+    if not re.fullmatch(r"generated_issps/ISSP-[A-Za-z0-9._-]+-FINAL\.(pdf|docx)", file_key):
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    signed_value = f"generated-issp\n{file_key}".encode("utf-8")
+    expected_signature = hmac.new(
+        settings.SECRET_KEY.encode("utf-8"),
+        signed_value,
+        hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    if storage_client.storage_type == "s3":
+        download_url = storage_client.generate_download_url(file_key)
+        if not download_url:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        return RedirectResponse(download_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    local_path = storage_client.safe_local_path_resolve(file_key)
+    if local_path is None or not local_path.is_file():
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    extension = os.path.splitext(file_key)[1].lower()
+    media_type = (
+        "application/pdf"
+        if extension == ".pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    return FileResponse(
+        path=local_path,
+        media_type=media_type,
+        filename=os.path.basename(file_key)
+    )
 
 
 @router.post("/narratives/{issp_period}", response_model=MasterNarrativeResponse)

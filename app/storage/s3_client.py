@@ -1,12 +1,14 @@
 # app/storage/s3_client.py
 import os
 import re
+import hmac
+import hashlib
 import base64
 import logging
 import mimetypes
 import urllib.request
 from typing import Dict, Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError
@@ -344,6 +346,16 @@ class ISSPStorageClient:
             # If running on Azure App Service and API_BASE_URL has localhost or is empty
             if website_hostname and ("localhost" in base_url or not base_url):
                 base_url = f"https://{website_hostname}"
+
+            if clean_key.startswith("generated_issps/"):
+                signed_value = f"generated-issp\n{clean_key}".encode("utf-8")
+                signature = hmac.new(
+                    settings.SECRET_KEY.encode("utf-8"),
+                    signed_value,
+                    hashlib.sha256
+                ).hexdigest()
+                query = urlencode({"file_key": clean_key, "signature": signature})
+                return f"{base_url}/api/admin/public/generated-issp-files?{query}" if base_url else f"/api/admin/public/generated-issp-files?{query}"
 
             if base_url:
                 return f"{base_url}/static/uploads/{clean_key}"
