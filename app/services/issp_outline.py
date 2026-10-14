@@ -330,7 +330,7 @@ def get_issp_outline(
             node["records"] = source_records.get(node["key"], [])
             node["visible"] = override.get("visible", True)
             node["title_override"] = override.get("title")
-            node["order"] = override.get("order", index)
+            node["order"] = override.get("order") if override.get("order") is not None else index
             node["replacement_section_id"] = override.get("replacement_section_id")
             apply_settings(node["children"])
         nodes.sort(key=lambda node: (node["order"], node["key"]))
