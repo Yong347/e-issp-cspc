@@ -5,6 +5,7 @@ import csv
 import html
 import hmac
 import hashlib
+import mimetypes
 import re
 import uuid
 import json
@@ -1442,6 +1443,36 @@ def download_generated_issp_document(
         media_type=media_type,
         filename=os.path.basename(file_key)
     )
+
+
+@router.get("/public/diagram-files")
+def download_diagram_file(
+    file_key: str = Query(...),
+    signature: str = Query(...)
+):
+    if not re.fullmatch(r"diagrams/[A-Za-z0-9._/-]+", file_key) or ".." in file_key:
+        raise HTTPException(status_code=404, detail="Diagram not found.")
+
+    expected_signature = hmac.new(
+        settings.SECRET_KEY.encode("utf-8"),
+        f"diagram-file\n{file_key}".encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise HTTPException(status_code=404, detail="Diagram not found.")
+
+    if storage_client.storage_type == "s3":
+        download_url = storage_client.generate_download_url(file_key)
+        if not download_url:
+            raise HTTPException(status_code=404, detail="Diagram not found.")
+        return RedirectResponse(download_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    local_path = storage_client.safe_local_path_resolve(file_key)
+    if local_path is None or not local_path.is_file():
+        raise HTTPException(status_code=404, detail="Diagram not found.")
+
+    media_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
+    return FileResponse(path=local_path, media_type=media_type)
 
 
 @router.post("/narratives/{issp_period}", response_model=MasterNarrativeResponse)

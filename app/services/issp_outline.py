@@ -349,7 +349,12 @@ def _effective_outline(
     resolved = []
     ordered_sections = sorted(
         enumerate(sections),
-        key=lambda item: (settings.get(item[1]["key"], {}).get("order", item[0]), item[0])
+        key=lambda item: (
+            settings.get(item[1]["key"], {}).get("order")
+            if isinstance(settings.get(item[1]["key"], {}).get("order"), (int, float))
+            else item[0],
+            item[0],
+        )
     )
     for _, node in ordered_sections:
         override = settings.get(node["key"], {})

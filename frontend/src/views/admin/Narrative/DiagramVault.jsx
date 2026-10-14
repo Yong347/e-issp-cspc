@@ -250,7 +250,8 @@ export default function DiagramVault() {
 
     // Validate MIME type
     const validMimes = ["image/png", "image/jpeg", "image/jpg", "image/svg+xml", "image/webp"];
-    if (!validMimes.includes(file.type)) {
+    const validExt = /\.(png|jpe?g|svg|webp)$/i;
+    if (!validMimes.includes(file.type) && !validExt.test(file.name || "")) {
       setError("Invalid image file format. Supported formats: PNG, JPG, JPEG, SVG, WebP.");
       return;
     }

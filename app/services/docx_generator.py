@@ -126,7 +126,12 @@ def _apply_docx_outline_overrides(
         nodes[:] = [
             node for _, node in sorted(
                 enumerate(nodes),
-                key=lambda item: (overrides.get(item[1]["key"], {}).get("order", item[0]), item[0])
+                key=lambda item: (
+                    overrides.get(item[1]["key"], {}).get("order")
+                    if isinstance(overrides.get(item[1]["key"], {}).get("order"), (int, float))
+                    else item[0],
+                    item[0],
+                )
             )
         ]
         for node in nodes:
@@ -1667,7 +1672,12 @@ def create_issp_docx(
         nodes[:] = [
             node for _, node in sorted(
                 enumerate(nodes),
-                key=lambda item: (outline_settings.get(item[1]["key"], {}).get("order", item[0]), item[0])
+                key=lambda item: (
+                    outline_settings.get(item[1]["key"], {}).get("order")
+                    if isinstance(outline_settings.get(item[1]["key"], {}).get("order"), (int, float))
+                    else item[0],
+                    item[0],
+                )
             )
         ]
         for node in nodes:

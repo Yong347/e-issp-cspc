@@ -8,7 +8,7 @@ import logging
 import mimetypes
 import urllib.request
 from typing import Dict, Any, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, parse_qs
 from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError
@@ -113,7 +113,12 @@ class ISSPStorageClient:
         """
         if not url:
             return None
-            
+
+        if "/api/admin/public/diagram-files" in str(url):
+            signed_keys = parse_qs(urlparse(str(url)).query).get("file_key")
+            if signed_keys:
+                return signed_keys[0].replace("\\", "/").lstrip("/")
+
         clean_url = str(url).split("?")[0].replace("\\", "/").strip()
         
         # Extract from local emulator prefix
@@ -185,7 +190,11 @@ class ISSPStorageClient:
                 logger.error(f"Direct local disk read failed for {clean_url}: {e}")
 
         # External HTTP/HTTPS asset fetch
-        if clean_url.startswith(("http://", "https://")) and self.bucket_name not in clean_url:
+        is_own_local_asset = (
+            self.storage_type != "s3"
+            and ("static/uploads/" in clean_url or "/api/admin/public/diagram-files" in str(object_url))
+        )
+        if clean_url.startswith(("http://", "https://")) and self.bucket_name not in clean_url and not is_own_local_asset:
             try:
                 agency_slug = re.sub(r'[^a-zA-Z0-9]', '', getattr(settings, 'DEFAULT_AGENCY_NAME', 'ISSP'))
                 req = urllib.request.Request(
@@ -346,6 +355,15 @@ class ISSPStorageClient:
             # If running on Azure App Service and API_BASE_URL has localhost or is empty
             if website_hostname and ("localhost" in base_url or not base_url):
                 base_url = f"https://{website_hostname}"
+
+            if clean_key.startswith("diagrams/"):
+                signature = hmac.new(
+                    settings.SECRET_KEY.encode("utf-8"),
+                    f"diagram-file\n{clean_key}".encode("utf-8"),
+                    hashlib.sha256
+                ).hexdigest()
+                query = urlencode({"file_key": clean_key, "signature": signature})
+                return f"{base_url}/api/admin/public/diagram-files?{query}"
 
             if clean_key.startswith("generated_issps/"):
                 signed_value = f"generated-issp\n{clean_key}".encode("utf-8")
