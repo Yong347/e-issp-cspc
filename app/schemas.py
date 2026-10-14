@@ -1831,6 +1831,18 @@ class MasterNarrativeResponse(BaseModel):
     def coerce_scope_choice(cls, v: Any) -> Any:
         return coerce_enum(ScopeChoice, v)
 
+    @field_validator(
+        'agency_logo_url', 'dict_logo_url', 'bagong_pilipinas_logo_url',
+        'network_diagram_url', 'fiber_backbone_url', 'system_architecture_url',
+        'org_chart_url', 'existing_ict_org_url', 'proposed_ict_org_url',
+        'site_development_plan_url', 'process_flow_diagram_url',
+        mode='after'
+    )
+    @classmethod
+    def normalize_diagram_urls(cls, v: Optional[str]) -> Optional[str]:
+        from app.storage.s3_client import storage_client
+        return storage_client.normalize_asset_url(v)
+
     @field_validator('drbcp_affected_assets_json', mode='before')
     @classmethod
     def deserialize_json_lists(cls, v: Any) -> Any:

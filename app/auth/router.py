@@ -13,6 +13,7 @@ from app.database.session import get_db
 from app.database.models import User, RoleTag, MasterNarrative, AuditTrail
 from app.schemas import TokenResponse
 from app.config import settings
+from app.storage.s3_client import storage_client
 from app.utils.helpers import log_audit_event
 
 logger = logging.getLogger("app.auth.router")
@@ -174,9 +175,9 @@ async def get_active_planning_cycle(db: Session = Depends(get_db)):
                 "from_year": active_cycle.issp_period_from or 2026,
                 "to_year": active_cycle.issp_period_to or 2028,
                 "agency_name": active_cycle.agency_name or settings.DEFAULT_AGENCY_NAME,
-                "agency_logo_url": active_cycle.agency_logo_url,
-                "dict_logo_url": getattr(active_cycle, "dict_logo_url", None),
-                "bagong_pilipinas_logo_url": getattr(active_cycle, "bagong_pilipinas_logo_url", None)
+                "agency_logo_url": storage_client.normalize_asset_url(active_cycle.agency_logo_url),
+                "dict_logo_url": storage_client.normalize_asset_url(getattr(active_cycle, "dict_logo_url", None)),
+                "bagong_pilipinas_logo_url": storage_client.normalize_asset_url(getattr(active_cycle, "bagong_pilipinas_logo_url", None))
             }
     except Exception as e:
         try:

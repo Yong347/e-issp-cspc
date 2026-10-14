@@ -379,6 +379,17 @@ class ISSPStorageClient:
                 return f"{base_url}/static/uploads/{clean_key}"
             return f"/static/uploads/{clean_key}"
 
+    def normalize_asset_url(self, url: Optional[str]) -> Optional[str]:
+        """Rewrites legacy local /static/uploads/diagrams URLs to the signed diagram endpoint."""
+        if not url or self.storage_type == "s3":
+            return url
+        text = str(url)
+        marker = "static/uploads/"
+        if marker in text and "diagrams/" in text.split(marker, 1)[1][:9]:
+            key = text.split("?")[0].split(marker, 1)[1].strip("/")
+            return self.generate_download_url(key) or url
+        return url
+
     def upload_binary(self, file_data: bytes, key: str, content_type: Optional[str] = None) -> bool:
         """
         Direct binary upload handler required by upload_narrative_diagram and other endpoints.
