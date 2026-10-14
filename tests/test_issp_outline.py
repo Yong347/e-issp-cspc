@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database.models import Base, Department, ExistingInventory, MasterNarrative
 from app.admin.router import _build_issp_composition_response
+from app.schemas import IsspOfficialSectionSetting
 from app.services.docx_generator import _apply_docx_outline_overrides
 from app.services.issp_outline import (
     apply_pdf_outline_overrides,
@@ -155,7 +156,14 @@ def test_outline_settings_are_cycle_scoped_and_do_not_delete_source_rows():
         db.flush()
 
         configured = get_issp_outline(db, "2026-2028", 3, {"annex1": {"visible": False}})
+        pydantic_configured = get_issp_outline(
+            db,
+            "2026-2028",
+            3,
+            {"annex1": IsspOfficialSectionSetting(visible=False)},
+        )
         annex1 = next(section for section in configured if section["key"] == "annex1")
+        pydantic_annex1 = next(section for section in pydantic_configured if section["key"] == "annex1")
         response = _build_issp_composition_response(
             db,
             db.query(MasterNarrative).filter(MasterNarrative.issp_period == "2026-2028").one(),
@@ -166,6 +174,7 @@ def test_outline_settings_are_cycle_scoped_and_do_not_delete_source_rows():
         other_annex1 = next(section for section in other_cycle if section["key"] == "annex1")
 
         assert annex1["visible"] is False
+        assert pydantic_annex1["visible"] is False
         assert annex1["record_count"] == 1
         assert annex1["children"][0]["records"][0]["item_name"] == "Test laptop"
         api_annex1 = next(section for section in response.outline if section.key == "annex1")

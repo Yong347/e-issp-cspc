@@ -137,6 +137,15 @@ def flatten_outline(
     return flattened
 
 
+def _normalize_official_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for key, value in (settings or {}).items():
+        if hasattr(value, "model_dump"):
+            value = value.model_dump()
+        normalized[key] = value if isinstance(value, dict) else {}
+    return normalized
+
+
 def get_issp_outline(
     db: Session,
     issp_period: str,
@@ -312,7 +321,7 @@ def get_issp_outline(
             if int((record.get("yearly_quantities") or {}).get(str(year), 0) or 0) > 0
         ]
         record_counts[key] = len(source_records[key])
-    overrides = settings or {}
+    overrides = _normalize_official_settings(settings)
 
     def apply_settings(nodes: List[Dict[str, Any]]) -> None:
         for index, node in enumerate(nodes):
@@ -494,7 +503,7 @@ def apply_pdf_outline_overrides(
     official_settings: Optional[Dict[str, Any]] = None,
     custom_sections: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    settings = official_settings or {}
+    settings = _normalize_official_settings(official_settings)
     custom_sections = custom_sections or []
     custom_titles = {}
 
