@@ -44,9 +44,11 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.enum.section import WD_ORIENTATION, WD_SECTION_START
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn, nsdecls
+from docx.text.paragraph import Paragraph
 from sqlalchemy.orm import object_session
 
 from app.config import settings
+from app.services.issp_outline import flatten_outline, get_default_issp_outline
 from app.utils.helpers import (
     get_adjusted_unit_cost_for_year,
     get_cycle_year_range,
@@ -54,6 +56,281 @@ from app.utils.helpers import (
 )
 
 logger = logging.getLogger("app.services.docx_generator")
+
+
+DOCX_OUTLINE_LABELS = {
+    "definitions": ("DEFINITION OF TERMS",),
+    "part1": ("PART I. AGENCY PROFILE & STRATEGIC CONTEXT",),
+    "part1-a": ("A. Mandate, Vision, Mission",),
+    "part1-a1": ("A.1. Mandate",),
+    "part1-a2": ("A.2. Vision Statement",),
+    "part1-a3": ("A.3. Mission Statement",),
+    "part1-a4": ("A.4. Organizational Outcomes", "A.4. Organizational Outcome"),
+    "part1-b": ("B. Organizational Structure",),
+    "part1-b1": ("B.1. Chief Information Officer",),
+    "part1-b2": ("B.2. Human Capital",),
+    "part1-c": ("C. Stakeholder Analysis",),
+    "part2": ("PART II. CURRENT ICT ASSESSMENT",),
+    "part2-a": ("A. Strategic Concerns",),
+    "part2-b": ("B. Existing Network Infrastructure",),
+    "part2-b1": ("B1. LAN/WAN Set-Up", "B1. LAN/WAN SET-UP"),
+    "part2-b2": ("B2. CYBERSECURITY CONTROL CHECKLIST", "B2. Cybersecurity"),
+    "part2-c": ("C. Existing / Operational Information Systems", "C. Existing/Operational Information Systems"),
+    "part2-d": ("D. E-Government Programs",),
+    "part3": ("PART III. PROPOSED ICT STRATEGY",),
+    "part3-a": ("A. Proposed Network Infrastructure",),
+    "part3-a1": ("A.1. LAN/WAN Set-Up", "A.1. LAN/WAN SET-UP"),
+    "part3-a2": ("A.2. CYBERSECURITY CONTROL CHECKLIST", "A.2. Cybersecurity"),
+    "part3-b": ("B. ENTERPRISE ARCHITECTURE", "B. Enterprise Architecture"),
+    "part3-c": ("C. Proposed ICT Human Capital",),
+    "part3-d": ("D. Proposed Information Systems",),
+    "part3-e": ("E. Strategic ICT Projects Portfolio", "E. ICT Projects"),
+    "part3-e1": ("E.1. INTERNAL ICT PROJECTS", "E.1. Internal ICT Projects"),
+    "part3-e2": ("E.2. CROSS-AGENCY ICT PROJECTS", "E.2. Cross-Agency ICT Projects"),
+    "part3-f": ("F. Performance Measurement Framework",),
+    "part3-f1": ("F.1. INTERNAL ICT PROJECTS", "F.1. Internal ICT Projects"),
+    "part3-f2": ("F.2. CROSS-AGENCY ICT PROJECTS", "F.2. Cross-Agency ICT Projects"),
+    "part3-f3": ("F.3. INSTITUTIONAL ICT GOVERNANCE KPIS", "F.3. Institutional ICT Governance KPIs"),
+    "part4": ("PART IV. RESOURCE REQUIREMENTS", "PART IV. RESOURCE REQUIREMENTS & SUMMARY OF INVESTMENTS"),
+    "part4-a": ("A. Detailed Resource Deployment",),
+    "part4-b": ("B. Summary of Investments",),
+    "part4-b1": ("B.1. General Summary",),
+    "part4-b2": ("B.2. Fund Source",),
+    "part4-b3": ("B.3. Statement of Expenditure",),
+    "part4-b4": ("B.4. Object of Expenditure",),
+    "annex1": ("ANNEX 1: EXISTING INFORMATION & COMMUNICATIONS TECHNOLOGY",),
+    "annex1-equipment": ("1. ICT Equipment Inventory",),
+    "annex1-software": ("2. ICT Software Inventory",),
+    "annex2": ("ANNEX 2: DISASTER RECOVERY", "ANNEX 2: DISASTER RECOVERY & BUSINESS CONTINUITY PLAN"),
+    "annex2-overview": ("1. Plan Overview",),
+    "annex2-bia": ("2. Business Impact Analysis",),
+    "annex2-assets": ("3. ICT Component Inventory",),
+    "annex2-recovery": ("4. Technical Recovery Strategy",),
+    "annex2-sop": ("5. Standard Operating Procedures",),
+    "annex2-compliance": ("6. Compliance, Scalability",),
+    "annex2-kpis": ("Key Performance Indicators for DRBCP",),
+}
+
+
+def _apply_docx_outline_overrides(
+    doc,
+    issp_period: str,
+    year_count: int,
+    settings_json: Dict[str, Any],
+    supplemental_sections: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    sections = get_default_issp_outline(issp_period, year_count)
+    overrides = settings_json or {}
+
+    def sort_nodes(nodes):
+        nodes[:] = [
+            node for _, node in sorted(
+                enumerate(nodes),
+                key=lambda item: (overrides.get(item[1]["key"], {}).get("order", item[0]), item[0])
+            )
+        ]
+        for node in nodes:
+            sort_nodes(node["children"])
+
+    sort_nodes(sections)
+    flat = flatten_outline(sections)
+    by_key = {node["key"]: node for node in flat}
+    visibility = {}
+    source_visibility = {}
+    display_titles = {}
+
+    def resolve_visibility(nodes, parent_visible=True):
+        for node in nodes:
+            setting = overrides.get(node["key"], {})
+            replacement_id = setting.get("replacement_section_id")
+            local_visible = setting.get("visible", True)
+            visibility[node["key"]] = parent_visible and (local_visible or bool(replacement_id))
+            source_visibility[node["key"]] = parent_visible and local_visible and not replacement_id
+            replacement_title = next((
+                section.get("title") for section in (supplemental_sections or [])
+                if section.get("id") == replacement_id
+            ), None)
+            display_titles[node["key"]] = str(setting.get("title") or replacement_title or node["title"]).strip()
+            resolve_visibility(node["children"], visibility[node["key"]] and not replacement_id)
+
+    resolve_visibility(sections)
+
+    body = doc.element.body
+    body_blocks = list(body)
+    start_index = 0
+    for index, block in enumerate(body_blocks):
+        if block.tag == qn("w:p") and Paragraph(block, doc._body).text.strip().upper() == "DEFINITION OF TERMS":
+            start_index = index
+            break
+
+    markers = {}
+    marker_paragraphs = {}
+    marker_blocks = {}
+    for block_index in range(start_index, len(body_blocks)):
+        block = body_blocks[block_index]
+        paragraphs = [Paragraph(block, doc._body)] if block.tag == qn("w:p") else [
+            Paragraph(paragraph, doc._body) for paragraph in block.findall(".//" + qn("w:p"))
+        ]
+        for paragraph in paragraphs:
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            for key, aliases in DOCX_OUTLINE_LABELS.items():
+                if key not in by_key or key in markers:
+                    continue
+                alias = next((value for value in aliases if text.casefold().startswith(value.casefold())), None)
+                if alias:
+                    markers[key] = block_index
+                    marker_paragraphs[key] = (paragraph, alias)
+                    marker_blocks[key] = block
+
+    replacement_ids = {
+        setting.get("replacement_section_id")
+        for setting in overrides.values()
+        if setting.get("replacement_section_id")
+    }
+    section_boundaries = {}
+    replacement_anchors = {}
+    for section_index, section in enumerate(supplemental_sections or []):
+        start_name = f"issp_custom_section_start_{section_index}"
+        end_name = f"issp_custom_section_end_{section_index}"
+        start_block = end_block = None
+        for block in list(body):
+            names = [marker.get(qn("w:name")) for marker in block.findall(".//" + qn("w:bookmarkStart"))]
+            if start_name in names:
+                start_block = block
+            if end_name in names:
+                end_block = block
+        if start_block is not None and end_block is not None:
+            section_boundaries[section["id"]] = (start_block, end_block)
+
+    for node in flat:
+        setting = overrides.get(node["key"], {})
+        replacement_id = setting.get("replacement_section_id")
+        if not replacement_id or replacement_id not in section_boundaries or node["key"] not in marker_blocks:
+            continue
+        start_block, end_block = section_boundaries[replacement_id]
+        current_blocks = list(body)
+        start_index = current_blocks.index(start_block)
+        end_index = current_blocks.index(end_block)
+        moved_blocks = current_blocks[start_index + 1:end_index]
+        destination = marker_blocks[node["key"]]
+        insertion_index = current_blocks.index(destination)
+        for block in current_blocks[start_index:end_index + 1]:
+            if block.getparent() is body:
+                body.remove(block)
+        for offset, block in enumerate(moved_blocks):
+            body.insert(insertion_index + offset, block)
+        if moved_blocks:
+            replacement_anchors[node["key"]] = moved_blocks[0]
+        section_boundaries.pop(replacement_id, None)
+
+    for section in supplemental_sections or []:
+        parent_key = section.get("parent_official_key")
+        if not parent_key or section["id"] not in section_boundaries or parent_key not in marker_blocks:
+            continue
+        start_block, end_block = section_boundaries[section["id"]]
+        current_blocks = list(body)
+        start_index = current_blocks.index(start_block)
+        end_index = current_blocks.index(end_block)
+        moved_blocks = current_blocks[start_index + 1:end_index]
+        parent_anchor = replacement_anchors.get(parent_key, marker_blocks[parent_key])
+        insertion_index = current_blocks.index(parent_anchor) + 1
+        for block in current_blocks[start_index:end_index + 1]:
+            if block.getparent() is body:
+                body.remove(block)
+        for offset, block in enumerate(moved_blocks):
+            body.insert(insertion_index + offset, block)
+        section_boundaries.pop(section["id"], None)
+
+    body_blocks = list(body)
+    markers = {
+        key: body_blocks.index(marker_blocks[key])
+        for key in marker_blocks
+        if marker_blocks[key].getparent() is body
+    }
+
+    if supplemental_sections and not section_boundaries:
+        for paragraph in list(doc.paragraphs):
+            if paragraph.text.strip() == "Supplemental Sections":
+                previous = paragraph._p.getprevious()
+                paragraph._p.getparent().remove(paragraph._p)
+                if previous is not None and previous.tag == qn("w:p") and previous.find(".//" + qn("w:br")) is not None:
+                    previous.getparent().remove(previous)
+                break
+
+    for year_index in range(year_count):
+        key = f"part4-a-year-{year_index + 1}"
+        alias = f"A.{year_index + 1}. [YEAR #{year_index + 1}]"
+        for block_index in range(start_index, len(body_blocks)):
+            block = body_blocks[block_index]
+            paragraphs = [Paragraph(block, doc._body)] if block.tag == qn("w:p") else [
+                Paragraph(paragraph, doc._body) for paragraph in block.findall(".//" + qn("w:p"))
+            ]
+            paragraph = next((item for item in paragraphs if item.text.strip().startswith(alias)), None)
+            if paragraph:
+                markers[key] = block_index
+                marker_paragraphs[key] = (paragraph, alias)
+                marker_blocks[key] = block
+                break
+
+    for key, (paragraph, alias) in marker_paragraphs.items():
+        setting_title = overrides.get(key, {}).get("title")
+        if not setting_title:
+            continue
+        replacement = str(setting_title).strip()
+        for run in paragraph.runs:
+            if run.text.casefold().startswith(alias.casefold()):
+                run.text = replacement + run.text[len(alias):]
+                break
+
+    root_keys = [node["key"] for node in sections if node["key"] in marker_blocks]
+    natural_roots = sorted((body.index(marker_blocks[key]), key) for key in root_keys)
+    if len(natural_roots) > 1 and [key for _, key in natural_roots] != root_keys:
+        body_blocks = list(body)
+        supplemental_position = next((
+            index for index, block in enumerate(body_blocks)
+            if block.tag == qn("w:p") and Paragraph(block, doc._body).text.strip() == "Supplemental Sections"
+        ), None)
+        content_start = natural_roots[0][0]
+        content_end = supplemental_position if supplemental_position is not None else len(body_blocks) - 1
+        chunks = {}
+        for index, (position, key) in enumerate(natural_roots):
+            end_position = natural_roots[index + 1][0] if index + 1 < len(natural_roots) else content_end
+            chunks[key] = body_blocks[position:end_position]
+        for block in body_blocks[content_start:content_end]:
+            if block.getparent() is body:
+                body.remove(block)
+        insertion_index = content_start
+        for key in root_keys:
+            for block in chunks.get(key, []):
+                body.insert(insertion_index, block)
+                insertion_index += 1
+        body_blocks = list(body)
+        markers = {key: body_blocks.index(marker_blocks[key]) for key in marker_blocks if marker_blocks[key].getparent() is body}
+
+    hidden_ranges = []
+    for node in flat:
+        key = node["key"]
+        if source_visibility.get(key, visibility.get(key, True)) or key not in markers:
+            continue
+        parent_key = node.get("parent_key")
+        if parent_key and not visibility.get(parent_key, True):
+            continue
+        start = markers[key]
+        end = next((
+            markers[candidate["key"]]
+            for candidate in flat[flat.index(node) + 1:]
+            if candidate["depth"] <= node["depth"]
+            and candidate["key"] in markers
+            and markers[candidate["key"]] > start
+        ), len(body_blocks) - 1)
+        hidden_ranges.append((start, end))
+
+    for start, end in sorted(hidden_ranges, reverse=True):
+        for block in body_blocks[start:end]:
+            if block.getparent() is body:
+                body.remove(block)
 
 # =========================================================================
 # CANONICAL DICT STATUTORY GLOSSARY FALLBACK
@@ -1382,6 +1659,93 @@ def create_issp_docx(
         ("5. Standard Operating Procedures (SOP)", 1, False, str(page_annex2)),
         ("6. Compliance, Scalability and Sustainability (MITHI Res. 2025-01)", 1, False, str(page_annex2))
     ])
+
+    outline_tree = get_default_issp_outline(issp_period, len(planning_years))
+    outline_settings = (document_composition or {}).get("official_sections", {})
+
+    def sort_outline_settings(nodes):
+        nodes[:] = [
+            node for _, node in sorted(
+                enumerate(nodes),
+                key=lambda item: (outline_settings.get(item[1]["key"], {}).get("order", item[0]), item[0])
+            )
+        ]
+        for node in nodes:
+            sort_outline_settings(node["children"])
+
+    sort_outline_settings(outline_tree)
+    outline_nodes = flatten_outline(outline_tree)
+    toc_keys = [
+        node["key"] for node in outline_nodes
+        if node["key"] != "annex2-kpis" and (node["key"] != "part3-f3" or pmf_f3)
+    ]
+    if len(toc_keys) == len(toc_items):
+        visible_by_key = {}
+
+        def resolve_toc_settings(nodes, parent_visible=True):
+            for node in nodes:
+                setting = outline_settings.get(node["key"], {})
+                replacement_id = setting.get("replacement_section_id")
+                section_visible = parent_visible and (setting.get("visible", True) or bool(replacement_id))
+                visible_by_key[node["key"]] = section_visible
+                resolve_toc_settings(node["children"], section_visible and not replacement_id)
+
+        resolve_toc_settings(outline_tree)
+        configured_toc_items = []
+        configured_toc_keys = []
+        custom_sections = (document_composition or {}).get("sections", [])
+        replacement_ids = {
+            setting.get("replacement_section_id")
+            for setting in outline_settings.values()
+            if setting.get("replacement_section_id")
+        }
+
+        def append_custom_toc(section, depth: int, page_ref: str) -> None:
+            configured_toc_items.append((
+                clean_str(section.get("title"), "Untitled section"),
+                min(depth, 3),
+                False,
+                page_ref
+            ))
+            configured_toc_keys.append(None)
+            for child in section.get("children", []):
+                append_custom_toc(child, depth + 1, page_ref)
+
+        for section_key, item in zip(toc_keys, toc_items):
+            if not visible_by_key.get(section_key, True):
+                continue
+            title, indent_level, is_bold, section_ref = item
+            section_setting = outline_settings.get(section_key, {})
+            setting_title = section_setting.get("title")
+            replacement_id = section_setting.get("replacement_section_id")
+            replacement_section = next((
+                section for section in (document_composition or {}).get("sections", [])
+                if section.get("id") == replacement_id
+            ), None)
+            if not setting_title and replacement_section:
+                setting_title = replacement_section.get("title")
+            if setting_title:
+                title = str(setting_title).strip()
+            configured_toc_items.append((title, indent_level, is_bold, section_ref))
+            configured_toc_keys.append(section_key)
+            linked_custom_sections = [
+                section for section in custom_sections
+                if section.get("parent_official_key") == section_key
+                or outline_settings.get(section_key, {}).get("replacement_section_id") == section.get("id")
+            ]
+            for custom_section in linked_custom_sections:
+                append_custom_toc(custom_section, indent_level + 1, section_ref)
+
+        unplaced_sections = [
+            section for section in custom_sections
+            if not section.get("parent_official_key") and section.get("id") not in replacement_ids
+        ]
+        if unplaced_sections:
+            configured_toc_items.append(("SUPPLEMENTAL SECTIONS", 0, True, str(page_annex2)))
+            configured_toc_keys.append(None)
+            for section in unplaced_sections:
+                append_custom_toc(section, 1, str(page_annex2))
+        toc_items = configured_toc_items
 
     toc_table = doc.add_table(rows=len(toc_items), cols=2)
     toc_table.style = 'Table Grid'
@@ -2939,6 +3303,16 @@ def create_issp_docx(
         doc.add_page_break()
         doc.add_heading("Supplemental Sections", level=1)
 
+        def add_section_bookmark(name: str, bookmark_id: int) -> None:
+            marker = doc.add_paragraph()
+            start = OxmlElement("w:bookmarkStart")
+            start.set(qn("w:id"), str(bookmark_id))
+            start.set(qn("w:name"), name)
+            marker._p.append(start)
+            end = OxmlElement("w:bookmarkEnd")
+            end.set(qn("w:id"), str(bookmark_id))
+            marker._p.append(end)
+
         def add_attachment_link(paragraph, label: str, url: str) -> None:
             relationship_id = paragraph.part.relate_to(
                 url,
@@ -2998,8 +3372,18 @@ def create_issp_docx(
             for child in section.get("children", []):
                 render_composition_section(child, level + 1)
 
-        for section in supplemental_sections:
+        for section_index, section in enumerate(supplemental_sections):
+            add_section_bookmark(f"issp_custom_section_start_{section_index}", section_index * 2 + 1)
             render_composition_section(section)
+            add_section_bookmark(f"issp_custom_section_end_{section_index}", section_index * 2 + 2)
+
+    _apply_docx_outline_overrides(
+        doc,
+        issp_period,
+        len(planning_years),
+        (document_composition or {}).get("official_sections", {}),
+        supplemental_sections
+    )
 
     # Save Word document to byte buffer
     buf = io.BytesIO()

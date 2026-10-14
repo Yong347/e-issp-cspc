@@ -23,6 +23,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from app.config import settings
 from app.database.session import SessionLocal
 from app.services.issp_engine import ISSPSingularityEngine
+from app.services.issp_outline import apply_pdf_outline_overrides
 from app.database.models import (
     MasterNarrative,
     OrganizationalOutcome,
@@ -2749,7 +2750,7 @@ def generate_complete_issp_html(
     annex1_html = f"""
     <div class="page-break" id="sec-annex1">
         <div class="section-header">ANNEX 1: EXISTING INFORMATION &amp; COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY</div>
-        <div class="sub-header">1. ICT Equipment Inventory</div>
+        <div class="sub-header" id="sec-annex1-equipment">1. ICT Equipment Inventory</div>
         <table class="annex1-table">
             <thead><tr><th style="width:34%;">ICT RESOURCES</th><th style="width:26%;">OFFICE LOCATION</th><th class="center" style="width:13%;">OPERATIONAL</th><th class="center" style="width:14%;">END OF LIFE</th><th class="center" style="width:13%;">BACKUP</th></tr></thead>
             <tbody>{eq_rows_html}</tbody>
@@ -2758,7 +2759,7 @@ def generate_complete_issp_html(
 
     <div class="page-break" id="sec-annex1">
         <div class="section-header">ANNEX 1: EXISTING INFORMATION &amp; COMMUNICATIONS TECHNOLOGY (ICT) ASSET INVENTORY (CONTINUED)</div>
-        <div class="sub-header">2. ICT Software Inventory</div>
+        <div class="sub-header" id="sec-annex1-software">2. ICT Software Inventory</div>
         <table class="annex1-table">
             <thead><tr><th style="width:40%;">ICT RESOURCES</th><th style="width:30%;">OFFICE LOCATION</th><th class="center" style="width:15%;">PERPETUAL</th><th class="center" style="width:15%;">SUBSCRIPTION</th></tr></thead>
             <tbody>{sw_rows_html}</tbody>
@@ -2845,14 +2846,14 @@ def generate_complete_issp_html(
         <div class="section-header">ANNEX 2: DISASTER RECOVERY AND BUSINESS CONTINUITY PLAN (DRBCP) FOR ICT RESOURCES</div>
         <p style="font-size:8pt; color:#475569; margin-bottom: 4px;">Governed under DICT Standards, ISO 22301, and MITHI Resolution 2025-01.</p>
         
-        <div class="sub-header" style="margin-top: 4px;">1. Plan Overview &amp; Governance</div>
+        <div class="sub-header" id="sec-annex2-overview" style="margin-top: 4px;">1. Plan Overview &amp; Governance</div>
         <p style="margin:2px 0; font-size: 8pt;"><strong>Agency:</strong> {agency_name_clean} &nbsp;|&nbsp; <strong>Version:</strong> {narrative.issp_period}.1 &nbsp;|&nbsp; <strong>Approval Date:</strong> {drbcp_approval_date}</p>
         <table>
             <thead><tr><th style="width:25%;">Role</th><th style="width:45%;">Responsibility</th><th style="width:30%;">Contact</th></tr></thead>
             <tbody>{drt_rows or '<tr><td colspan="3" class="center">No DRT personnel configured.</td></tr>'}</tbody>
         </table>
 
-        <div class="sub-header" style="margin-top:4px;">2. Business Impact Analysis (BIA) Summary</div>
+        <div class="sub-header" id="sec-annex2-bia" style="margin-top:4px;">2. Business Impact Analysis (BIA) Summary</div>
         <table>
             <thead>
                 <tr>
@@ -2866,19 +2867,19 @@ def generate_complete_issp_html(
             <tbody>{bia_rows or '<tr><td colspan="5" class="center">No mission-critical systems evaluated for DRBCP.</td></tr>'}</tbody>
         </table>
 
-        <div class="sub-header" style="margin-top:4px;">3. ICT Component Inventory &amp; Affected Assets</div>
+        <div class="sub-header" id="sec-annex2-assets" style="margin-top:4px;">3. ICT Component Inventory &amp; Affected Assets</div>
         <ul style="font-size: 8pt; margin: 2px 0;">{affected_assets_html}</ul>
 
-        <div class="sub-header" style="margin-top:4px;">4. Technical Recovery Strategy</div>
+        <div class="sub-header" id="sec-annex2-recovery" style="margin-top:4px;">4. Technical Recovery Strategy</div>
         <div style="font-size: 8pt; line-height: 1.35; margin-bottom: 6px;">{dr_recovery_strategy_text}</div>
 
-        <div class="sub-header" style="margin-top:4px;">5. Standard Operating Procedures (SOP)</div>
+        <div class="sub-header" id="sec-annex2-sop" style="margin-top:4px;">5. Standard Operating Procedures (SOP)</div>
         <div style="font-size: 8pt; line-height: 1.35; margin-bottom: 6px;">{dr_sop_phases_text}</div>
 
-        <div class="sub-header" style="margin-top:4px;">6. Compliance, Scalability, and Sustainability (MITHI Resolution 2025-01 &amp; SPAR Reporting)</div>
+        <div class="sub-header" id="sec-annex2-compliance" style="margin-top:4px;">6. Compliance, Scalability, and Sustainability (MITHI Resolution 2025-01 &amp; SPAR Reporting)</div>
         <div style="font-size: 8pt; line-height: 1.35; margin-bottom: 6px;">{sec6_compliance_html}</div>
 
-        <div class="sub-header" style="margin-top:6px;">Key Performance Indicators (KPIs) for DRBCP</div>
+        <div class="sub-header" id="sec-annex2-kpis" style="margin-top:6px;">Key Performance Indicators (KPIs) for DRBCP</div>
         <table>
             <thead><tr><th style="width:50%;">Indicator</th><th style="width:50%;">Target Metric</th></tr></thead>
             <tbody>{dr_kpi_rows or '<tr><td colspan="2" class="center">No DR KPIs defined.</td></tr>'}</tbody>
@@ -2934,10 +2935,19 @@ def generate_complete_issp_html(
             '<section id="sec-supplemental" class="supplemental-sections" style="page-break-before: always;">'
             '<h1>Supplemental Sections</h1>'
             + "".join(
-                render_composition_section(section, (index,))
+                f'<div data-composition-section-id="{html.escape(str(section.get("id") or ""), quote=True)}">'
+                + render_composition_section(section, (index,))
+                + "</div>"
                 for index, section in enumerate(supplemental_sections)
             )
             + "</section>"
         )
 
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{running_header_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}{supplemental_html}</body></html>"
+    document_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>ISSP Compilation</title>{css}</head><body>{cover_html}{running_header_html}{toc_html}{defs_html}{part1_html}{part2_html}{part3_html}{part4a_html}{part4b_html}{annex1_html}{annex2_html}{supplemental_html}</body></html>"
+    return apply_pdf_outline_overrides(
+        document_html,
+        str(getattr(narrative, "issp_period", "")),
+        len(years_range),
+        (document_composition or {}).get("official_sections", {}),
+        (document_composition or {}).get("sections", [])
+    )

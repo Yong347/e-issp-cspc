@@ -38,6 +38,7 @@ from app.config import settings
 from app.database.session import get_db, SessionLocal
 from app.services.issp_engine import ISSPSingularityEngine
 from app.services.lifecycle_service import ISSPLifecycleEngine
+from app.services.issp_outline import flatten_outline, get_default_issp_outline, get_issp_outline
 from app.database.models import (
     Proposal,
     ResourceRequirementItem,
@@ -1214,6 +1215,30 @@ def get_master_narrative(
     return MasterNarrativeResponse.model_validate(narrative)
 
 
+def _build_issp_composition_response(
+    db: Session,
+    narrative: MasterNarrative,
+    composition: Dict[str, Any],
+    updated_at: Optional[datetime]
+) -> IsspDocumentCompositionResponse:
+    period_parts = str(narrative.issp_period).split("-")
+    if len(period_parts) == 2 and all(part.isdigit() for part in period_parts):
+        year_count = max(1, min(10, int(period_parts[1]) - int(period_parts[0]) + 1))
+    else:
+        start = getattr(narrative, "issp_period_from", None)
+        end = getattr(narrative, "issp_period_to", None)
+        year_count = max(1, min(10, int(end) - int(start) + 1)) if start and end else 3
+
+    payload = IsspDocumentCompositionPayload.model_validate(composition)
+    outline = get_issp_outline(db, narrative.issp_period, year_count, payload.official_sections)
+    return IsspDocumentCompositionResponse(
+        issp_period=narrative.issp_period,
+        updated_at=updated_at,
+        outline=outline,
+        **payload.model_dump()
+    )
+
+
 @router.get("/narratives/{issp_period}/composition", response_model=IsspDocumentCompositionResponse)
 def get_issp_document_composition(
     issp_period: str,
@@ -1227,11 +1252,12 @@ def get_issp_document_composition(
     record = db.query(IsspDocumentComposition).filter(
         IsspDocumentComposition.issp_period == issp_period
     ).first()
-    composition = record.composition_json if record else {"version": 1, "sections": []}
-    return IsspDocumentCompositionResponse(
-        issp_period=issp_period,
-        updated_at=record.updated_at if record else None,
-        **composition
+    composition = record.composition_json if record else {"version": 2, "sections": [], "official_sections": {}}
+    return _build_issp_composition_response(
+        db,
+        narrative,
+        composition,
+        record.updated_at if record else None
     )
 
 
@@ -1245,6 +1271,45 @@ def save_issp_document_composition(
     narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
     if not narrative:
         raise HTTPException(status_code=404, detail="Planning cycle narrative not found.")
+
+    period_parts = str(issp_period).split("-")
+    year_count = max(1, min(10, int(period_parts[1]) - int(period_parts[0]) + 1)) if len(period_parts) == 2 and all(part.isdigit() for part in period_parts) else 3
+    allowed_section_keys = {
+        section["key"]
+        for section in flatten_outline(get_default_issp_outline(issp_period, year_count))
+    }
+    allowed_replacement_keys = {
+        section["key"] for section in get_default_issp_outline(issp_period, year_count)
+    }
+    invalid_section_keys = set(payload.official_sections) - allowed_section_keys
+    if invalid_section_keys:
+        raise HTTPException(status_code=422, detail="Composition contains unknown official section keys.")
+
+    def validate_official_parents(sections):
+        for section in sections:
+            if section.parent_official_key and section.parent_official_key not in allowed_section_keys:
+                raise HTTPException(status_code=422, detail="Supplemental section references an unknown official parent.")
+            validate_official_parents(section.children)
+
+    validate_official_parents(payload.sections)
+
+    replacement_ids = [
+        setting.replacement_section_id
+        for setting in payload.official_sections.values()
+        if setting.replacement_section_id
+    ]
+    top_level_section_ids = {section.id for section in payload.sections}
+    if any(
+        setting.replacement_section_id and section_key not in allowed_replacement_keys
+        for section_key, setting in payload.official_sections.items()
+    ):
+        raise HTTPException(status_code=422, detail="Only top-level official sections can be replaced.")
+    if any(section_id not in top_level_section_ids for section_id in replacement_ids):
+        raise HTTPException(status_code=422, detail="Replacement sections must be top-level supplemental sections.")
+    if any(section.parent_official_key for section in payload.sections if section.id in replacement_ids):
+        raise HTTPException(status_code=422, detail="A replacement section cannot also be nested under an official section.")
+    if len(replacement_ids) != len(set(replacement_ids)):
+        raise HTTPException(status_code=422, detail="A supplemental section can replace only one official section.")
 
     expected_file_prefix = f"issp-composition/{issp_period}/"
 
@@ -1275,10 +1340,11 @@ def save_issp_document_composition(
     record.updated_by_user_id = admin["id"]
     db.commit()
     db.refresh(record)
-    return IsspDocumentCompositionResponse(
-        issp_period=issp_period,
-        updated_at=record.updated_at,
-        **record.composition_json
+    return _build_issp_composition_response(
+        db,
+        narrative,
+        record.composition_json,
+        record.updated_at
     )
 
 

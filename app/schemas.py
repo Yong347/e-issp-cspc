@@ -1517,13 +1517,36 @@ class IsspCompositionBlock(BaseModel):
 class IsspCompositionSection(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=1, max_length=64)
     title: str = Field(..., min_length=1, max_length=200)
+    parent_official_key: Optional[str] = Field(default=None, max_length=64)
     children: List["IsspCompositionSection"] = Field(default_factory=list, max_length=100)
     blocks: List[IsspCompositionBlock] = Field(default_factory=list, max_length=200)
 
 
+class IsspOfficialSectionSetting(BaseModel):
+    visible: bool = True
+    title: Optional[str] = Field(default=None, max_length=200)
+    order: Optional[int] = Field(default=None, ge=0, le=1000)
+    replacement_section_id: Optional[str] = Field(default=None, max_length=64)
+
+
+class IsspOutlineNodeResponse(BaseModel):
+    key: str
+    title: str
+    title_override: Optional[str] = None
+    anchor: str
+    source: str
+    record_count: int = 0
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+    visible: bool = True
+    order: Optional[int] = None
+    replacement_section_id: Optional[str] = None
+    children: List["IsspOutlineNodeResponse"] = Field(default_factory=list)
+
+
 class IsspDocumentCompositionPayload(BaseModel):
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 2
     sections: List[IsspCompositionSection] = Field(default_factory=list, max_length=100)
+    official_sections: Dict[str, IsspOfficialSectionSetting] = Field(default_factory=dict, max_length=100)
 
     @model_validator(mode="after")
     def validate_tree(self):
@@ -1556,6 +1579,7 @@ class IsspDocumentCompositionPayload(BaseModel):
 class IsspDocumentCompositionResponse(IsspDocumentCompositionPayload):
     issp_period: str
     updated_at: Optional[datetime] = None
+    outline: List[IsspOutlineNodeResponse] = Field(default_factory=list)
 
 class ISPlannerSchema(BaseModel):
     name: str = Field(..., example="Lead Systems Analyst")
