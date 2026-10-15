@@ -650,6 +650,23 @@ export default function IsspCompositionEditor() {
         Hiding a section only removes it from this cycle’s generated documents. Source data remains in its existing planning module.
       </div>
 
+      {!loading && !cycleLoading && (() => {
+        const problems = validateSections(composition.sections);
+        const countAttachments = (sections) => sections.reduce((total, section) => total + (section.blocks || []).filter((block) => block.type === "attachment" && block.file_name && !/\.(png|jpe?g)$/i.test(block.file_name)).length + countAttachments(section.children || []), 0);
+        const linkOnly = countAttachments(composition.sections);
+        const warnings = [
+          ...problems,
+          ...(linkOnly ? [`${linkOnly} uploaded file(s) are not PNG/JPG and will appear as download links, not embedded pages.`] : []),
+          ...(isDirty ? ["You have unsaved changes. Save before compiling."] : [])
+        ];
+        return (
+          <div className={`rounded-2xl border px-4 py-3 text-sm shadow-xs ${warnings.length ? "border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100" : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200"}`}>
+            <p className="font-semibold">{warnings.length ? "Before you compile" : "Ready to compile"}</p>
+            {warnings.length ? <ul className="mt-1 list-disc pl-5">{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className="mt-1">No issues found. Everything is saved.</p>}
+          </div>
+        );
+      })()}
+
       {error && <div role="alert" className="flex items-start gap-2 whitespace-pre-line rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 shadow-xs dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200"><AlertCircle size={17} className="mt-0.5 shrink-0" />{error}</div>}
       {notice && <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 shadow-xs dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">{notice}</div>}
       {loading || cycleLoading ? (

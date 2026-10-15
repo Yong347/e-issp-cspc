@@ -40,6 +40,7 @@ from app.database.session import get_db, SessionLocal
 from app.services.issp_engine import ISSPSingularityEngine
 from app.services.lifecycle_service import ISSPLifecycleEngine
 from app.services.issp_outline import flatten_outline, get_default_issp_outline, get_issp_outline
+from app.utils.file_checks import file_matches_extension
 from app.database.models import (
     Proposal,
     ResourceRequirementItem,
@@ -1373,6 +1374,8 @@ async def upload_issp_composition_attachment(
         raise HTTPException(status_code=413, detail="Attachments must be 20 MB or smaller.")
     if not file_bytes:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if not file_matches_extension(extension, file_bytes):
+        raise HTTPException(status_code=415, detail="The file content does not match its extension.")
 
     file_key = f"issp-composition/{issp_period}/{uuid.uuid4().hex}_{safe_name}"
     uploaded = storage_client.upload_binary(file_bytes, file_key)
