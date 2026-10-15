@@ -79,6 +79,12 @@ export default function AdminDashboard() {
   const [generationStatusMsg, setGenerationStatusMsg] = useState("");
   const [pdfDownloadUrl, setPdfDownloadUrl] = useState("");
   const [docxDownloadUrl, setDocxDownloadUrl] = useState("");
+
+  const bustCache = useCallback((url) => {
+    if (!url) return "";
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}v=${Date.now()}`;
+  }, []);
   
   // Real-time Event Logger & Audit Logs
   const [auditLogs, setAuditLogs] = useState([]);
@@ -328,11 +334,12 @@ export default function AdminDashboard() {
         const downloadUrl = data.result?.file_url || data.download_url || (typeof data.result === "string" ? data.result : "");
         const isDocx = (data.result?.format === "docx") || downloadUrl.includes(".docx") || exportFormat === "docx";
         const formatLabel = isDocx ? "Word (.docx)" : "PDF";
+        const cachedUrl = bustCache(downloadUrl);
 
         if (isDocx) {
-          setDocxDownloadUrl(downloadUrl);
+          setDocxDownloadUrl(cachedUrl);
         } else {
-          setPdfDownloadUrl(downloadUrl);
+          setPdfDownloadUrl(cachedUrl);
         }
 
         setGenerationStatusMsg(`Official ISSP ${formatLabel} certified and archived successfully!`);

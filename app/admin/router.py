@@ -1426,7 +1426,11 @@ def download_generated_issp_document(
         download_url = storage_client.generate_download_url(file_key)
         if not download_url:
             raise HTTPException(status_code=404, detail="Document not found.")
-        return RedirectResponse(download_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+        return RedirectResponse(
+            download_url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+        )
 
     local_path = storage_client.safe_local_path_resolve(file_key)
     if local_path is None or not local_path.is_file():
@@ -1441,7 +1445,8 @@ def download_generated_issp_document(
     return FileResponse(
         path=local_path,
         media_type=media_type,
-        filename=os.path.basename(file_key)
+        filename=os.path.basename(file_key),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
     )
 
 
@@ -1465,14 +1470,22 @@ def download_diagram_file(
         download_url = storage_client.generate_download_url(file_key)
         if not download_url:
             raise HTTPException(status_code=404, detail="Diagram not found.")
-        return RedirectResponse(download_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+        return RedirectResponse(
+            download_url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+        )
 
     local_path = storage_client.safe_local_path_resolve(file_key)
     if local_path is None or not local_path.is_file():
         raise HTTPException(status_code=404, detail="Diagram not found.")
 
     media_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
-    return FileResponse(path=local_path, media_type=media_type)
+    return FileResponse(
+        path=local_path,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+    )
 
 
 @router.post("/narratives/{issp_period}", response_model=MasterNarrativeResponse)

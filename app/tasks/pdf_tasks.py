@@ -440,8 +440,11 @@ def compile_issp_document(self, metadata: dict):
             IsspDocumentComposition.issp_period == issp_period
         ).first()
         document_composition = copy.deepcopy(
-            composition_record.composition_json if composition_record else {"version": 1, "sections": []}
+            composition_record.composition_json if composition_record else {"version": 2, "sections": [], "official_sections": {}}
         )
+        if not isinstance(document_composition, dict):
+            document_composition = {"version": 2, "sections": [], "official_sections": {}}
+        document_composition.setdefault("official_sections", {})
 
         def resolve_attachment_urls(sections):
             for section in sections or []:

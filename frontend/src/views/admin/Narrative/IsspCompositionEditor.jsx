@@ -316,6 +316,11 @@ export default function IsspCompositionEditor() {
       const result = await saveIsspDocumentComposition(null, activeCycle, composition);
       setSavedAt(result.updated_at || new Date().toISOString());
       setOutline(result.outline || []);
+      setComposition((current) => ({
+        ...current,
+        sections: result.sections || current.sections,
+        official_sections: result.official_sections || current.official_sections
+      }));
       setNotice("ISSP outline saved. Generate a new ISSP to apply the changes to its documents.");
     } catch (saveError) {
       setError(saveError.message || "Unable to save this ISSP composition.");
