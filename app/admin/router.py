@@ -89,7 +89,8 @@ from app.database.models import (
     ScopeChoice,
     DynamicChecklistCriteria,
     IsspPlanArchive,
-    IsspDocumentComposition
+    IsspDocumentComposition,
+    IsspCompositionVersion
 )
 from app.schemas import (
     AdminOverridePayload,
@@ -1217,6 +1218,9 @@ def get_master_narrative(
     return MasterNarrativeResponse.model_validate(narrative)
 
 
+MAX_COMPOSITION_VERSIONS = 20
+
+
 def _build_issp_composition_response(
     db: Session,
     narrative: MasterNarrative,
@@ -1342,6 +1346,21 @@ def save_issp_document_composition(
 
     record.composition_json = payload.model_dump(mode="json")
     record.updated_by_user_id = admin["id"]
+    db.add(IsspCompositionVersion(
+        issp_period=issp_period,
+        composition_json=record.composition_json,
+        saved_by_user_id=admin["id"]
+    ))
+    db.flush()
+    stale_ids = [
+        row.id for row in db.query(IsspCompositionVersion.id)
+        .filter(IsspCompositionVersion.issp_period == issp_period)
+        .order_by(IsspCompositionVersion.id.desc())
+        .offset(MAX_COMPOSITION_VERSIONS)
+        .all()
+    ]
+    if stale_ids:
+        db.query(IsspCompositionVersion).filter(IsspCompositionVersion.id.in_(stale_ids)).delete(synchronize_session=False)
     db.commit()
     db.refresh(record)
     return _build_issp_composition_response(
@@ -1350,6 +1369,43 @@ def save_issp_document_composition(
         record.composition_json,
         record.updated_at
     )
+
+
+@router.get("/narratives/{issp_period}/composition/versions")
+def list_issp_composition_versions(
+    issp_period: str,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    rows = db.query(IsspCompositionVersion).filter(
+        IsspCompositionVersion.issp_period == issp_period
+    ).order_by(IsspCompositionVersion.id.desc()).limit(MAX_COMPOSITION_VERSIONS).all()
+    return [
+        {
+            "id": row.id,
+            "saved_at": row.saved_at,
+            "saved_by_user_id": row.saved_by_user_id,
+            "section_count": len((row.composition_json or {}).get("sections", []))
+        }
+        for row in rows
+    ]
+
+
+@router.get("/narratives/{issp_period}/composition/versions/{version_id}", response_model=IsspDocumentCompositionResponse)
+def get_issp_composition_version(
+    issp_period: str,
+    version_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(require_admin)
+):
+    narrative = db.query(MasterNarrative).filter(MasterNarrative.issp_period == issp_period).first()
+    version = db.query(IsspCompositionVersion).filter(
+        IsspCompositionVersion.issp_period == issp_period,
+        IsspCompositionVersion.id == version_id
+    ).first()
+    if not narrative or not version:
+        raise HTTPException(status_code=404, detail="Composition version not found.")
+    return _build_issp_composition_response(db, narrative, version.composition_json, version.saved_at)
 
 
 @router.post("/narratives/{issp_period}/composition/upload")

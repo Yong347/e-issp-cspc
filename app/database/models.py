@@ -976,6 +976,20 @@ class IsspDocumentComposition(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class IsspCompositionVersion(Base):
+    __tablename__ = "issp_composition_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    issp_period: Mapped[str] = mapped_column(
+        ForeignKey("master_narratives.issp_period", onupdate="CASCADE", ondelete="CASCADE"),
+        index=True,
+        nullable=False
+    )
+    composition_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    saved_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    saved_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class OrganizationalOutcome(Base):
     __tablename__ = "organizational_outcomes"
 

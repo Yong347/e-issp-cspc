@@ -3,6 +3,8 @@ import { useCycle } from "../../../context/CycleContext";
 import {
   getIsspDocumentComposition,
   saveIsspDocumentComposition,
+  listIsspCompositionVersions,
+  getIsspCompositionVersion,
   uploadIsspCompositionAttachment
 } from "../../../api/admin";
 import {
@@ -301,6 +303,28 @@ export default function IsspCompositionEditor() {
   const [savedAt, setSavedAt] = useState(null);
   const [snapshot, setSnapshot] = useState(null);
   const isDirty = snapshot !== null && JSON.stringify(composition) !== snapshot;
+  const [versions, setVersions] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const refreshVersions = () => {
+    if (!activeCycle) return;
+    listIsspCompositionVersions(null, activeCycle).then(setVersions).catch(() => setVersions([]));
+  };
+
+  const restoreVersion = async (versionId) => {
+    if (isDirty && !window.confirm("Load this version? Your current unsaved changes will be replaced.")) return;
+    setError("");
+    try {
+      const data = await getIsspCompositionVersion(null, activeCycle, versionId);
+      setComposition({ version: 2, sections: data.sections || [], official_sections: data.official_sections || {} });
+      setOutline(data.outline || []);
+      setNotice("Older version loaded into the editor. Click Save changes to make it the current version.");
+    } catch (restoreError) {
+      setError(restoreError.message || "Unable to load that version.");
+    }
+  };
+
+  useEffect(() => { refreshVersions(); }, [activeCycle, savedAt]);
   useEffect(() => {
     let alive = true;
     if (cycleLoading || !activeCycle) return undefined;
@@ -463,7 +487,7 @@ export default function IsspCompositionEditor() {
             onChange={(event) => updateSection(section.id, (current) => ({ ...current, insert_before_official_key: event.target.value || null }))}
             className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
           >
-            <option value="">At the end (Supplemental Sections)</option>
+            <option value="">At the end of the document</option>
             {outline.map((node) => (
               <option key={node.key} value={node.key}>Before: {composition.official_sections[node.key]?.title || node.title}</option>
             ))}
@@ -629,6 +653,9 @@ export default function IsspCompositionEditor() {
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Cycle {activeCycle || "..."}. Manage document sections while preserving their source records.</p>
         </div>
         <div className="flex flex-col items-end gap-1">
+          <button type="button" onClick={() => setShowHistory((open) => !open)} className="rounded-xl border border-slate-300 px-3 py-2 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800">
+            Version history ({versions.length})
+          </button>
           <button type="button" onClick={save} disabled={saving || loading || cycleLoading} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50">
             {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
             {saving ? "Saving" : "Save changes"}
@@ -636,6 +663,27 @@ export default function IsspCompositionEditor() {
           {isDirty && <span className="text-xs font-medium text-amber-700 dark:text-amber-400">You have unsaved changes</span>}
         </div>
       </header>
+
+      {showHistory && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-slate-700 dark:bg-slate-900">
+          <h2 className="mb-2 text-sm font-bold text-slate-900 dark:text-white">Version history</h2>
+          {versions.length === 0 ? (
+            <p className="text-sm text-slate-500">No saved versions yet. A version is recorded every time you save.</p>
+          ) : (
+            <ul className="divide-y divide-slate-200 dark:divide-slate-700">
+              {versions.map((version, index) => (
+                <li key={version.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                  <span>
+                    {new Date(`${version.saved_at}Z`).toLocaleString()} · {version.section_count} added section(s)
+                    {index === 0 && <span className="ml-2 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">Current</span>}
+                  </span>
+                  {index !== 0 && <button type="button" onClick={() => restoreVersion(version.id)} className="rounded-xl border border-slate-300 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800">Load this version</button>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950 shadow-xs dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-100">
         <p className="font-semibold">How it works</p>

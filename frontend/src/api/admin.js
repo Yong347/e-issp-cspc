@@ -1142,6 +1142,20 @@ export const saveIsspDocumentComposition = async (token, cycle, composition) => 
   return handleResponse(res, "Failed to save ISSP composition");
 };
 
+export const listIsspCompositionVersions = async (token, cycle) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/composition/versions`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load version history");
+};
+
+export const getIsspCompositionVersion = async (token, cycle, versionId) => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/narratives/${encodeURIComponent(cycle)}/composition/versions/${versionId}`, {
+    headers: getHeaders(token)
+  });
+  return handleResponse(res, "Failed to load that version");
+};
+
 export const uploadIsspCompositionAttachment = async (token, cycle, file) => {
   const formData = new FormData();
   formData.append("file", file);
