@@ -1488,10 +1488,11 @@ class BulkCeilingValidationPayload(BaseModel):
 
 class IsspCompositionBlock(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=1, max_length=64)
-    type: Literal["paragraph", "bullet_list", "numbered_list", "table", "survey", "attachment"]
+    type: Literal["paragraph", "bullet_list", "numbered_list", "checklist", "table", "survey", "attachment"]
     title: str = Field(default="", max_length=200)
     content: str = Field(default="", max_length=20000)
     items: List[str] = Field(default_factory=list, max_length=200)
+    states: List[Literal["unchecked", "checked", "crossed"]] = Field(default_factory=list, max_length=200)
     columns: List[str] = Field(default_factory=list, max_length=20)
     rows: List[List[str]] = Field(default_factory=list, max_length=500)
     questions: List[str] = Field(default_factory=list, max_length=200)
@@ -1507,8 +1508,10 @@ class IsspCompositionBlock(BaseModel):
                 raise ValueError("Every table row must match the number of columns.")
         if self.type == "survey" and not self.questions:
             raise ValueError("Survey blocks require at least one question.")
-        if self.type in ("bullet_list", "numbered_list") and not self.items:
+        if self.type in ("bullet_list", "numbered_list", "checklist") and not self.items:
             raise ValueError("List blocks require at least one item.")
+        if self.type == "checklist":
+            self.states = (list(self.states) + ["unchecked"] * len(self.items))[:len(self.items)]
         if self.type == "attachment" and not (self.file_key and self.file_name):
             raise ValueError("Attachment blocks require an uploaded file.")
         return self

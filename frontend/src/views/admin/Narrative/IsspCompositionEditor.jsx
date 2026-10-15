@@ -37,13 +37,79 @@ const createBlock = (type) => ({
   type,
   title: "",
   content: "",
-  items: [],
+  items: type === "checklist" ? [""] : [],
+  states: type === "checklist" ? ["unchecked"] : [],
   columns: type === "table" ? ["Column 1", "Column 2"] : [],
   rows: type === "table" ? [["", ""]] : [],
   questions: [],
   file_key: null,
   file_name: null
 });
+
+function insertSectionAfterTree(sections, sectionId, newSection) {
+  const index = sections.findIndex((section) => section.id === sectionId);
+  if (index >= 0) {
+    const next = [...sections];
+    next.splice(index + 1, 0, {
+      ...newSection,
+      parent_official_key: sections[index].parent_official_key || null,
+      insert_before_official_key: sections[index].insert_before_official_key || null
+    });
+    return next;
+  }
+  return sections.map((section) => ({
+    ...section,
+    children: insertSectionAfterTree(section.children || [], sectionId, newSection)
+  }));
+}
+
+function moveItem(list, index, direction) {
+  const target = index + direction;
+  if (target < 0 || target >= list.length) return list;
+  const next = [...list];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next;
+}
+
+const CHECK_STATES = ["unchecked", "checked", "crossed"];
+const CHECK_SYMBOLS = { unchecked: "", checked: "✓", crossed: "✕" };
+const CHECK_STYLES = {
+  unchecked: "border-slate-400 text-transparent",
+  checked: "border-emerald-600 bg-emerald-50 text-emerald-700",
+  crossed: "border-rose-600 bg-rose-50 text-rose-700"
+};
+
+function ChecklistEditor({ block, onChange }) {
+  const items = block.items?.length ? block.items : [""];
+  const states = items.map((_, index) => block.states?.[index] || "unchecked");
+  const update = (nextItems, nextStates) => onChange({ items: nextItems, states: nextStates });
+  return (
+    <div className="space-y-2">
+      {items.map((item, index) => (
+        <div key={index} className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => update(items, states.map((state, i) => i === index ? CHECK_STATES[(CHECK_STATES.indexOf(state) + 1) % CHECK_STATES.length] : state))}
+            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border-2 text-base font-bold ${CHECK_STYLES[states[index]]}`}
+            aria-label={`Item ${index + 1} is ${states[index]}. Click to change.`}
+            title="Click to switch: empty, checked, crossed"
+          >{CHECK_SYMBOLS[states[index]]}</button>
+          <input
+            value={item}
+            onChange={(event) => update(items.map((value, i) => i === index ? event.target.value : value), states)}
+            placeholder="Checklist item"
+            className={`flex-1 ${inputClass}`}
+          />
+          <button type="button" onClick={() => update(moveItem(items, index, -1), moveItem(states, index, -1))} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move item up"><ArrowUp size={14} /></button>
+          <button type="button" onClick={() => update(moveItem(items, index, 1), moveItem(states, index, 1))} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move item down"><ArrowDown size={14} /></button>
+          <button type="button" onClick={() => items.length > 1 && update(items.filter((_, i) => i !== index), states.filter((_, i) => i !== index))} disabled={items.length <= 1} className="rounded-lg p-1.5 text-rose-700 hover:bg-rose-50 disabled:opacity-30" aria-label="Remove item"><Trash2 size={14} /></button>
+        </div>
+      ))}
+      <button type="button" onClick={() => update([...items, ""], [...states, "unchecked"])} className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"><Plus size={13} /> Add item</button>
+      <p className="text-xs text-slate-500">Click a box to cycle: empty → ✓ checked → ✕ crossed.</p>
+    </div>
+  );
+}
 
 function updateSectionTree(sections, sectionId, update) {
   return sections.map((section) => {
@@ -108,6 +174,7 @@ const BLOCK_LABELS = {
   paragraph: "Paragraph",
   bullet_list: "Bulleted list",
   numbered_list: "Numbered list",
+  checklist: "Checklist",
   table: "Table",
   survey: "Survey questions",
   attachment: "Uploaded attachment"
@@ -123,6 +190,7 @@ function validateSections(sections, path = []) {
       const name = `${where}: ${BLOCK_LABELS[block.type]} #${index + 1}`;
       if (block.type === "paragraph" && !block.content?.trim()) problems.push(`${name} is empty. Write some text or remove it.`);
       if ((block.type === "bullet_list" || block.type === "numbered_list") && !(block.items || []).length) problems.push(`${name} needs at least one item.`);
+      if (block.type === "checklist" && !(block.items || []).some((item) => item.trim())) problems.push(`${name} needs at least one item with text.`);
       if (block.type === "survey" && !(block.questions || []).length) problems.push(`${name} needs at least one question.`);
       if (block.type === "table" && !(block.columns || []).some((column) => column.trim())) problems.push(`${name} needs at least one column heading.`);
       if (block.type === "attachment" && !(block.file_key && block.file_name)) problems.push(`${name} has no uploaded file yet.`);
@@ -214,16 +282,20 @@ function TableEditor({ block, onChange }) {
   );
 }
 
-function BlockEditor({ block, onChange, onRemove, onUpload, uploading }) {
+function BlockEditor({ block, onChange, onRemove, onUpload, uploading, onMove }) {
   const label = BLOCK_LABELS[block.type];
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-slate-700 dark:bg-slate-900">
       <div className="mb-3 flex items-center justify-between gap-3">
         <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</label>
-        <button type="button" onClick={onRemove} className="rounded-lg p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${label.toLowerCase()}`} title="Remove block">
-          <Trash2 size={16} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => onMove(-1)} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move block up" title="Move up"><ArrowUp size={16} /></button>
+          <button type="button" onClick={() => onMove(1)} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move block down" title="Move down"><ArrowDown size={16} /></button>
+          <button type="button" onClick={onRemove} className="rounded-lg p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${label.toLowerCase()}`} title="Remove block">
+            <Trash2 size={16} />
+          </button>
+        </div>
       </div>
       <input
         value={block.title || ""}
@@ -263,6 +335,7 @@ function BlockEditor({ block, onChange, onRemove, onUpload, uploading }) {
           <p className="mt-1 text-xs text-slate-500">{block.type === "survey" ? "One question per line." : "One item per line."}</p>
         </>
       )}
+      {block.type === "checklist" && <ChecklistEditor block={block} onChange={onChange} />}
       {block.type === "table" && <TableEditor block={block} onChange={onChange} />}
       {block.type === "attachment" && (
         <div className="rounded-xl border-2 border-dashed border-slate-300 p-4 text-center dark:border-slate-600">
@@ -427,6 +500,20 @@ export default function IsspCompositionEditor() {
     }));
   };
 
+  const addSectionAfter = (sectionId) => {
+    setComposition((current) => ({
+      ...current,
+      sections: insertSectionAfterTree(current.sections, sectionId, createSection())
+    }));
+  };
+
+  const addSectionAtStart = () => {
+    setComposition((current) => ({
+      ...current,
+      sections: [{ ...createSection(), insert_before_official_key: current.sections.find((section) => !section.parent_official_key)?.insert_before_official_key || null }, ...current.sections]
+    }));
+  };
+
   const addOfficialSubsection = (parentOfficialKey) => {
     const section = createSection("New subsection", parentOfficialKey);
     setComposition((current) => ({ ...current, sections: [...current.sections, section] }));
@@ -476,6 +563,7 @@ export default function IsspCompositionEditor() {
         <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, -1) }))} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section up" title="Move up"><ArrowUp size={16} /></button>
         <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, 1) }))} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section down" title="Move down"><ArrowDown size={16} /></button>
         <button type="button" onClick={() => addSection(section.id)} className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-2.5 py-2 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"><Plus size={14} /> Subsection</button>
+        <button type="button" onClick={() => addSectionAfter(section.id)} className="inline-flex items-center gap-1 rounded-xl border border-emerald-700 px-2.5 py-2 text-xs font-medium text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/40"><Plus size={14} /> Section below</button>
         <button type="button" onClick={() => deleteCustomSection(section.id)} className="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950" aria-label="Delete section" title="Delete section"><Trash2 size={16} /></button>
       </div>
 
@@ -504,6 +592,7 @@ export default function IsspCompositionEditor() {
             onChange={(patch) => updateBlock(section.id, block.id, patch)}
             onRemove={() => updateSection(section.id, (current) => ({ ...current, blocks: current.blocks.filter((item) => item.id !== block.id) }))}
             onUpload={(file) => uploadAttachment(section.id, block.id, file)}
+            onMove={(direction) => updateSection(section.id, (current) => ({ ...current, blocks: moveItem(current.blocks, current.blocks.findIndex((item) => item.id === block.id), direction) }))}
           />
         ))}
       </div>
@@ -512,6 +601,7 @@ export default function IsspCompositionEditor() {
           ["paragraph", "Paragraph"],
           ["bullet_list", "Bulleted list"],
           ["numbered_list", "Numbered list"],
+          ["checklist", "Checklist"],
           ["table", "Table"],
           ["survey", "Survey questions"],
           ["attachment", "Upload file"]
@@ -727,6 +817,9 @@ export default function IsspCompositionEditor() {
           </section>
           <section className="space-y-4">
             <h2 className="text-sm font-bold text-slate-900 dark:text-white">Additional sections</h2>
+          {composition.sections.some((section) => !section.parent_official_key) && (
+            <button type="button" onClick={addSectionAtStart} className="inline-flex items-center gap-1 rounded-xl border border-dashed border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:border-emerald-600 hover:text-emerald-700 dark:border-slate-600 dark:text-slate-300"><Plus size={13} /> Add section at the top</button>
+          )}
           {composition.sections.some((section) => !section.parent_official_key) ? composition.sections.filter((section) => !section.parent_official_key).map((section) => renderSection(section)) : (
             <div className="rounded-2xl border border-dashed border-slate-300 px-5 py-10 text-center shadow-xs dark:border-slate-700">
               <FileText className="mx-auto mb-3 text-slate-400" size={24} />

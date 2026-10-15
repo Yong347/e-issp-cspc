@@ -3503,6 +3503,18 @@ def create_issp_docx(
                     doc.add_paragraph(clean_str(block.get("content"), ""))
                 if block_type == "paragraph":
                     doc.add_paragraph(clean_str(block.get("content"), ""))
+                elif block_type == "checklist":
+                    states = block.get("states") or []
+                    symbols = {"unchecked": "\u2610", "checked": "\u2611", "crossed": "\u2612"}
+                    for item_index, item in enumerate(block.get("items", [])):
+                        state = states[item_index] if item_index < len(states) else "unchecked"
+                        row = doc.add_paragraph()
+                        row.paragraph_format.left_indent = Inches(0.25)
+                        row.paragraph_format.space_after = Pt(2)
+                        box = row.add_run(symbols.get(state, symbols["unchecked"]) + "  ")
+                        box.font.name = "Segoe UI Symbol"
+                        box._element.rPr.rFonts.set(qn("w:eastAsia"), "Segoe UI Symbol")
+                        row.add_run(clean_str(item))
                 elif block_type in ("bullet_list", "numbered_list", "survey"):
                     entries = block.get("questions", []) if block_type == "survey" else block.get("items", [])
                     style = "List Number" if block_type in ("numbered_list", "survey") else "List Bullet"

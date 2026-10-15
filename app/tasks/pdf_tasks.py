@@ -256,6 +256,21 @@ def resolve_local_img_path(url: Optional[str]) -> Optional[str]:
         return None
 
 
+def checklist_box_uri(state: str) -> str:
+    """Inline SVG checkbox, so the PDF does not depend on symbol fonts."""
+    mark = ""
+    if state == "checked":
+        mark = '<path d="M3.5 8.5 6.5 11.5 12.5 4.5" fill="none" stroke="#166534" stroke-width="2"/>'
+    elif state == "crossed":
+        mark = '<path d="M4 4 12 12M12 4 4 12" fill="none" stroke="#991b1b" stroke-width="2"/>'
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">'
+        '<rect x="1" y="1" width="14" height="14" fill="white" stroke="#334155" stroke-width="1.2"/>'
+        f'{mark}</svg>'
+    )
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
+
+
 def fmt_currency(val: Any) -> str:
     if val is None:
         return "₱0.00"
@@ -1276,6 +1291,21 @@ def generate_complete_issp_html(
             margin-bottom: 2.5px !important;
             line-height: 1.35 !important;
             break-inside: avoid;
+        }}
+
+        .checklist-row {{
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            margin: 3px 0;
+            break-inside: avoid;
+        }}
+
+        .checklist-box {{
+            width: 12px;
+            height: 12px;
+            margin-top: 1px;
+            flex-shrink: 0;
         }}
 
         .section-header {{
@@ -2937,6 +2967,16 @@ def generate_complete_issp_html(
                 tag = "ul" if block_type == "bullet_list" else "ol"
                 entries = "".join(f'<li>{html.escape(str(item))}</li>' for item in block.get("items", []))
                 markup.append(f"<{tag}>{entries}</{tag}>")
+            elif block_type == "checklist":
+                states = block.get("states") or []
+                rows_html = []
+                for item_index, item in enumerate(block.get("items", [])):
+                    state = states[item_index] if item_index < len(states) else "unchecked"
+                    rows_html.append(
+                        f'<div class="checklist-row"><img class="checklist-box" src="{checklist_box_uri(state)}" alt="{state}" />'
+                        f'<span>{html.escape(str(item))}</span></div>'
+                    )
+                markup.append(f'<div class="checklist">{"".join(rows_html)}</div>')
             elif block_type == "survey":
                 entries = "".join(f'<li>{html.escape(str(question))}</li>' for question in block.get("questions", []))
                 markup.append(f'<ol class="survey-questions">{entries}</ol>')
