@@ -467,6 +467,10 @@ def compile_issp_document(self, metadata: dict):
                             "signature": signature
                         })
                         block["file_url"] = f"{base_url}/api/admin/public/issp-composition-files?{query}"
+                        if os.path.splitext(str(block.get("file_name") or file_key))[1].lower() in (".png", ".jpg", ".jpeg"):
+                            data_uri = storage_client.get_as_base64_uri(file_key)
+                            if data_uri and data_uri.startswith("data:image"):
+                                block["image_data_uri"] = data_uri
                 resolve_attachment_urls(section.get("children", []))
 
         resolve_attachment_urls(document_composition.get("sections", []))
@@ -1505,18 +1509,15 @@ def generate_complete_issp_html(
             rows.append(make_toc_row(
                 f"#{composition_anchor(section_path)}",
                 title,
-                indent=min(len(path) + 1, 3)
+                indent=min(len(path), 3),
+                is_bold=not path
             ))
             rows.append(composition_toc_rows(section.get("children", []), section_path))
         return "".join(rows)
 
     supplemental_sections = (document_composition or {}).get("sections", [])
     supplemental_toc_rows = composition_toc_rows(supplemental_sections)
-    supplemental_toc = (
-        make_toc_row("#sec-supplemental", "SUPPLEMENTAL SECTIONS", indent=0, is_bold=True)
-        + supplemental_toc_rows
-        if supplemental_sections else ""
-    )
+    supplemental_toc = supplemental_toc_rows
 
     toc_html = f"""
     <div class="page-toc" id="sec-toc">
@@ -2898,7 +2899,8 @@ def generate_complete_issp_html(
         heading_level = min(level, 6)
         title = html.escape(str(section.get("title") or "Untitled section"))
         anchor = composition_anchor(path)
-        markup = [f'<h{heading_level} id="{anchor}" class="composition-heading">{title}</h{heading_level}>']
+        heading_class = "section-header composition-heading" if level == 1 else "composition-heading"
+        markup = [f'<h{heading_level} id="{anchor}" class="{heading_class}">{title}</h{heading_level}>']
         for block in section.get("blocks", []):
             block_title = html.escape(str(block.get("title") or ""))
             if block_title:
@@ -2924,7 +2926,13 @@ def generate_complete_issp_html(
             elif block_type == "attachment":
                 file_name = html.escape(str(block.get("file_name") or "Uploaded file"))
                 file_url = html.escape(str(block.get("file_url") or ""), quote=True)
-                if file_url:
+                image_uri = html.escape(str(block.get("image_data_uri") or ""), quote=True)
+                if image_uri:
+                    markup.append(
+                        f'<figure class="composition-image" style="margin:8px 0; text-align:center; break-inside:avoid;">'
+                        f'<img src="{image_uri}" alt="{file_name}" style="max-width:100%; max-height:4.6in;"></figure>'
+                    )
+                elif file_url:
                     markup.append(f'<p class="composition-attachment"><a href="{file_url}">{file_name}</a></p>')
                 else:
                     markup.append(f'<p class="composition-attachment">{file_name}</p>')
@@ -2935,11 +2943,10 @@ def generate_complete_issp_html(
     supplemental_html = ""
     if supplemental_sections:
         supplemental_html = (
-            '<section id="sec-supplemental" class="supplemental-sections" style="page-break-before: always;">'
-            '<h1>Supplemental Sections</h1>'
+            '<section id="sec-supplemental" class="supplemental-sections">'
             + "".join(
-                f'<div data-composition-section-id="{html.escape(str(section.get("id") or ""), quote=True)}">'
-                + render_composition_section(section, (index,))
+                f'<div data-composition-section-id="{html.escape(str(section.get("id") or ""), quote=True)}" style="page-break-before: always;">'
+                + render_composition_section(section, (index,), 2 if section.get("parent_official_key") else 1)
                 + "</div>"
                 for index, section in enumerate(supplemental_sections)
             )

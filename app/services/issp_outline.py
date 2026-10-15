@@ -501,6 +501,42 @@ def _reorder_pdf_root_sections(body, outline: List[Dict[str, Any]], anchors: Dic
             insertion_index += 1
 
 
+def _move_page_number_reset(document, body, anchors, nodes_by_key) -> None:
+    """Restart page numbering at the first body section after the definitions, wherever it ends up."""
+    marker_class = "page-body-start"
+    for element in document.xpath(f"//*[contains(concat(' ', normalize-space(@class), ' '), ' {marker_class} ')]"):
+        remaining = [name for name in element.get("class", "").split() if name != marker_class]
+        if remaining:
+            element.set("class", " ".join(remaining))
+        else:
+            element.attrib.pop("class", None)
+
+    root_ids = set()
+    for key, elements in anchors.items():
+        node = nodes_by_key.get(key)
+        if not node or node["depth"] != 0 or key == "definitions":
+            continue
+        for element in elements:
+            while element.getparent() is not body and element.getparent() is not None:
+                element = element.getparent()
+            root_ids.add(id(element))
+
+    for child in body:
+        if not isinstance(child.tag, str):
+            continue
+        if id(child) in root_ids or child.get("data-composition-section-id"):
+            target = child
+        elif child.get("id") == "sec-supplemental":
+            target = next(iter(child.xpath("./*[@data-composition-section-id]")), None)
+        else:
+            continue
+        if target is None:
+            continue
+        classes = target.get("class", "").split()
+        target.set("class", " ".join(classes + [marker_class]))
+        return
+
+
 def apply_pdf_outline_overrides(
     document_html: str,
     issp_period: str,
@@ -671,17 +707,9 @@ def apply_pdf_outline_overrides(
             links = row.xpath(".//a")
             href = links[0].get("href", "") if links else ""
             if href == "#sec-supplemental":
-                handled_custom_ids = replacement_ids | {
-                    section["id"] for section in custom_sections
-                    if section.get("parent_official_key") or any(
-                        section["id"] == placed["id"] for nodes in placed_before.values() for placed, _ in nodes
-                    )
-                }
-                if custom_sections and all(section["id"] in handled_custom_ids for section in custom_sections):
-                    toc_body.remove(row)
-                    continue
-                supplemental_rows.append(row)
-            elif href.startswith("#supplement"):
+                toc_body.remove(row)
+                continue
+            if href.startswith("#supplement"):
                 if any(href == f"#{prefix}" for prefix in replacement_prefixes | placed_prefixes):
                     continue
                 supplemental_rows.append(row)
@@ -708,7 +736,8 @@ def apply_pdf_outline_overrides(
             anchor = "supplement-" + "-".join(str(index) for index in path)
             row = etree.SubElement(toc_body, "tr")
             cell = etree.SubElement(row, "td", attrib={"class": "toc-title", "style": f"padding-left: {min(depth, 3) * 14}px;"})
-            link = etree.SubElement(cell, "a", href=f"#{anchor}", style="color: #0f172a;")
+            link = etree.SubElement(cell, "a", href=f"#{anchor}")
+            link.set("style", "font-weight: bold; color: #1e3a8a;" if depth == 0 else "color: #0f172a;")
             link.text = title
             page_cell = etree.SubElement(row, "td", attrib={"class": "toc-page"})
             etree.SubElement(page_cell, "a", href=f"#{anchor}")
@@ -735,5 +764,7 @@ def apply_pdf_outline_overrides(
     if supplemental_root and not supplemental_root[0].xpath(".//*[@data-composition-section-id]"):
         parent = supplemental_root[0].getparent()
         parent.remove(supplemental_root[0])
+
+    _move_page_number_reset(document, body, anchors, nodes_by_key)
 
     return lxml_html.tostring(document, encoding="unicode", method="html", doctype="<!DOCTYPE html>")

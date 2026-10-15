@@ -218,7 +218,7 @@ def _apply_docx_outline_overrides(
         current_blocks = list(body)
         start_index = current_blocks.index(start_block)
         end_index = current_blocks.index(end_block)
-        moved_blocks = current_blocks[start_index + 1:end_index]
+        moved_blocks = _drop_leading_page_break(current_blocks[start_index + 1:end_index])
         destination = marker_blocks[node["key"]]
         insertion_index = current_blocks.index(destination)
         for block in current_blocks[start_index:end_index + 1]:
@@ -238,7 +238,7 @@ def _apply_docx_outline_overrides(
         current_blocks = list(body)
         start_index = current_blocks.index(start_block)
         end_index = current_blocks.index(end_block)
-        moved_blocks = current_blocks[start_index + 1:end_index]
+        moved_blocks = _drop_leading_page_break(current_blocks[start_index + 1:end_index])
         parent_anchor = replacement_anchors.get(parent_key, marker_blocks[parent_key])
         insertion_index = current_blocks.index(parent_anchor) + 1
         for block in current_blocks[start_index:end_index + 1]:
@@ -265,7 +265,8 @@ def _apply_docx_outline_overrides(
         current_blocks = list(body)
         start_pos = current_blocks.index(start_block)
         end_pos = current_blocks.index(end_block)
-        moved_blocks = current_blocks[start_pos + 1:end_pos]
+        moved_blocks = _drop_leading_page_break(current_blocks[start_pos + 1:end_pos])
+        moved_blocks.append(_make_page_break_block())
         for block in current_blocks[start_pos:end_pos + 1]:
             if block.getparent() is body:
                 body.remove(block)
@@ -284,14 +285,14 @@ def _apply_docx_outline_overrides(
         if marker_blocks[key].getparent() is body
     }
 
-    if supplemental_sections and not section_boundaries:
-        for paragraph in list(doc.paragraphs):
-            if paragraph.text.strip() == "Supplemental Sections":
-                previous = paragraph._p.getprevious()
-                paragraph._p.getparent().remove(paragraph._p)
-                if previous is not None and previous.tag == qn("w:p") and previous.find(".//" + qn("w:br")) is not None:
-                    previous.getparent().remove(previous)
-                break
+    def content_end_index() -> int:
+        # Sections left at the end of the document are not part of the reorderable official content.
+        leftover = [
+            list(body).index(start_block)
+            for start_block, _ in section_boundaries.values()
+            if start_block.getparent() is body
+        ]
+        return min(leftover) if leftover else len(list(body)) - 1
 
     for year_index in range(year_count):
         key = f"part4-a-year-{year_index + 1}"
@@ -325,12 +326,8 @@ def _apply_docx_outline_overrides(
     )
     if len(natural_roots) > 1 and [key for _, key in natural_roots] != root_keys:
         body_blocks = list(body)
-        supplemental_position = next((
-            index for index, block in enumerate(body_blocks)
-            if block.tag == qn("w:p") and Paragraph(block, doc._body).text.strip() == "Supplemental Sections"
-        ), None)
         content_start = natural_roots[0][0]
-        content_end = supplemental_position if supplemental_position is not None else len(body_blocks) - 1
+        content_end = content_end_index()
         chunks = {}
         for index, (position, key) in enumerate(natural_roots):
             end_position = natural_roots[index + 1][0] if index + 1 < len(natural_roots) else content_end
@@ -339,8 +336,15 @@ def _apply_docx_outline_overrides(
             if block.getparent() is body:
                 body.remove(block)
         insertion_index = content_start
+        last_key = root_keys[-1]
         for key in root_keys:
-            for block in chunks.get(key, []):
+            chunk = list(chunks.get(key, []))
+            if chunk:
+                if key != last_key and not _is_page_break_block(chunk[-1]):
+                    chunk.append(_make_page_break_block())
+                elif key == last_key and _is_page_break_block(chunk[-1]):
+                    chunk.pop()
+            for block in chunk:
                 body.insert(insertion_index, block)
                 insertion_index += 1
         body_blocks = list(body)
@@ -366,13 +370,73 @@ def _apply_docx_outline_overrides(
             if candidate["depth"] <= node["depth"]
             and candidate["key"] in markers
             and markers[candidate["key"]] > start
-        ), len(body_blocks) - 1)
+        ), content_end_index())
         hidden_ranges.append((start, end))
 
     for start, end in sorted(hidden_ranges, reverse=True):
         for block in body_blocks[start:end]:
             if block.getparent() is body:
                 body.remove(block)
+
+    # Bookmarks let the table of contents show real page numbers once Word updates its fields.
+    for index, (key, (paragraph, _alias)) in enumerate(marker_paragraphs.items()):
+        paragraph_element = paragraph._p
+        if body not in paragraph_element.iterancestors():
+            continue
+        bookmark_id = str(5000 + index)
+        start_mark = OxmlElement("w:bookmarkStart")
+        start_mark.set(qn("w:id"), bookmark_id)
+        start_mark.set(qn("w:name"), docx_toc_bookmark_name(key))
+        end_mark = OxmlElement("w:bookmarkEnd")
+        end_mark.set(qn("w:id"), bookmark_id)
+        properties = paragraph_element.find(qn("w:pPr"))
+        paragraph_element.insert(1 if properties is not None else 0, start_mark)
+        paragraph_element.append(end_mark)
+
+    # Fall back to the estimated number where a heading could not be bookmarked.
+    existing_bookmarks = {mark.get(qn("w:name")) for mark in body.iter(qn("w:bookmarkStart"))}
+    for instruction in list(body.iter(qn("w:instrText"))):
+        match = re.search(r"PAGEREF\s+(\S+)", instruction.text or "")
+        if not match or match.group(1) in existing_bookmarks:
+            continue
+        instruction_run = instruction.getparent()
+        begin_run = instruction_run.getprevious()
+        separate_run = instruction_run.getnext()
+        text_run = separate_run.getnext() if separate_run is not None else None
+        end_run = text_run.getnext() if text_run is not None else None
+        for stale in (begin_run, instruction_run, separate_run, end_run):
+            if stale is not None and stale.getparent() is not None:
+                stale.getparent().remove(stale)
+
+    settings_element = doc.settings.element
+    if settings_element.find(qn("w:updateFields")) is None:
+        update_fields = OxmlElement("w:updateFields")
+        update_fields.set(qn("w:val"), "true")
+        settings_element.append(update_fields)
+
+
+def docx_toc_bookmark_name(key: str) -> str:
+    return "toc_" + re.sub(r"[^A-Za-z0-9]", "_", str(key))[:30]
+
+
+def _is_page_break_block(block) -> bool:
+    return block.tag == qn("w:p") and any(
+        br.get(qn("w:type")) == "page" for br in block.iter(qn("w:br"))
+    )
+
+
+def _make_page_break_block():
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    page_break = OxmlElement("w:br")
+    page_break.set(qn("w:type"), "page")
+    run.append(page_break)
+    paragraph.append(run)
+    return paragraph
+
+
+def _drop_leading_page_break(blocks):
+    return blocks[1:] if blocks and _is_page_break_block(blocks[0]) else list(blocks)
 
 # =========================================================================
 # CANONICAL DICT STATUTORY GLOSSARY FALLBACK
@@ -1730,6 +1794,7 @@ def create_issp_docx(
         node["key"] for node in flatten_outline(get_default_issp_outline(issp_period, len(planning_years)))
         if node["key"] != "annex2-kpis" and (node["key"] != "part3-f3" or pmf_f3)
     ]
+    toc_row_keys: List[Optional[str]] = []
     if len(toc_keys) == len(toc_items) == len(natural_toc_keys):
         # toc_items are in the default document order; the outline may be reordered.
         toc_item_by_key = dict(zip(natural_toc_keys, toc_items))
@@ -1758,10 +1823,10 @@ def create_issp_docx(
             configured_toc_items.append((
                 clean_str(section.get("title"), "Untitled section"),
                 min(depth, 3),
-                False,
+                depth == 0,
                 page_ref
             ))
-            configured_toc_keys.append(None)
+            configured_toc_keys.append("custom:" + str(section.get("id")))
             for child in section.get("children", []):
                 append_custom_toc(child, depth + 1, page_ref)
 
@@ -1803,12 +1868,10 @@ def create_issp_docx(
             if not section.get("parent_official_key") and section.get("id") not in replacement_ids
             and not visible_by_key.get(section.get("insert_before_official_key"), False)
         ]
-        if unplaced_sections:
-            configured_toc_items.append(("SUPPLEMENTAL SECTIONS", 0, True, str(page_annex2)))
-            configured_toc_keys.append(None)
-            for section in unplaced_sections:
-                append_custom_toc(section, 1, str(page_annex2))
+        for section in unplaced_sections:
+            append_custom_toc(section, 0, str(page_annex2))
         toc_items = configured_toc_items
+        toc_row_keys = configured_toc_keys
 
     toc_table = doc.add_table(rows=len(toc_items), cols=2)
     toc_table.style = 'Table Grid'
@@ -1837,12 +1900,34 @@ def create_issp_docx(
         p1.paragraph_format.space_before = Pt(0)
         p1.paragraph_format.space_after = Pt(0)
         p1.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        row_key = toc_row_keys[idx] if idx < len(toc_row_keys) else None
         if section_ref:
-            run1 = p1.add_run(section_ref)
-            run1.font.name = "Palatino Linotype"
-            run1.font.size = Pt(7.5)
-            run1.font.bold = is_bold
-            run1.font.color.rgb = RGBColor(30, 58, 138) if is_bold else RGBColor(71, 85, 105)
+            if row_key:
+                # Real page-number field; Word refreshes it when the document opens.
+                bookmark_name = docx_toc_bookmark_name(row_key)
+                for step in ("begin", "instr", "separate", "text", "end"):
+                    field_run = p1.add_run()
+                    field_run.font.name = "Palatino Linotype"
+                    field_run.font.size = Pt(7.5)
+                    field_run.font.bold = is_bold
+                    field_run.font.color.rgb = RGBColor(30, 58, 138) if is_bold else RGBColor(71, 85, 105)
+                    if step == "instr":
+                        instruction = OxmlElement("w:instrText")
+                        instruction.set(qn("xml:space"), "preserve")
+                        instruction.text = f" PAGEREF {bookmark_name} \\h "
+                        field_run._r.append(instruction)
+                    elif step == "text":
+                        field_run.text = section_ref
+                    else:
+                        field_char = OxmlElement("w:fldChar")
+                        field_char.set(qn("w:fldCharType"), step)
+                        field_run._r.append(field_char)
+            else:
+                run1 = p1.add_run(section_ref)
+                run1.font.name = "Palatino Linotype"
+                run1.font.size = Pt(7.5)
+                run1.font.bold = is_bold
+                run1.font.color.rgb = RGBColor(30, 58, 138) if is_bold else RGBColor(71, 85, 105)
 
     doc.add_page_break()
 
@@ -3363,9 +3448,6 @@ def create_issp_docx(
 
     supplemental_sections = (document_composition or {}).get("sections", [])
     if supplemental_sections:
-        doc.add_page_break()
-        doc.add_heading("Supplemental Sections", level=1)
-
         def add_section_bookmark(name: str, bookmark_id: int) -> None:
             marker = doc.add_paragraph()
             start = OxmlElement("w:bookmarkStart")
@@ -3400,7 +3482,15 @@ def create_issp_docx(
             paragraph._p.append(hyperlink)
 
         def render_composition_section(section: Dict[str, Any], level: int = 2) -> None:
-            doc.add_heading(clean_str(section.get("title"), "Untitled section"), level=min(level, 3))
+            heading = doc.add_heading(clean_str(section.get("title"), "Untitled section"), level=min(level, 3))
+            bookmark_id = 9000 + len(list(doc.element.body.iter(qn("w:bookmarkStart"))))
+            heading_start = OxmlElement("w:bookmarkStart")
+            heading_start.set(qn("w:id"), str(bookmark_id))
+            heading_start.set(qn("w:name"), docx_toc_bookmark_name("custom:" + str(section.get("id"))))
+            heading_end = OxmlElement("w:bookmarkEnd")
+            heading_end.set(qn("w:id"), str(bookmark_id))
+            heading._p.insert(1 if heading._p.find(qn("w:pPr")) is not None else 0, heading_start)
+            heading._p.append(heading_end)
             for block in section.get("blocks", []):
                 block_title = clean_str(block.get("title"), "")
                 if block_title:
@@ -3425,19 +3515,33 @@ def create_issp_docx(
                             for index, cell in enumerate(row):
                                 cells[index].text = clean_str(cell)
                 elif block_type == "attachment":
-                    paragraph = doc.add_paragraph()
                     file_name = clean_str(block.get("file_name"), "Uploaded file")
                     file_url = clean_str(block.get("file_url"), "")
-                    if file_url:
-                        add_attachment_link(paragraph, file_name, file_url)
-                    else:
-                        paragraph.add_run(file_name)
+                    image_uri = str(block.get("image_data_uri") or "")
+                    picture_added = False
+                    if image_uri.startswith("data:image") and "," in image_uri:
+                        try:
+                            picture_stream = io.BytesIO(base64.b64decode(image_uri.split(",", 1)[1]))
+                            picture_paragraph = doc.add_paragraph()
+                            picture_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            picture_paragraph.add_run().add_picture(picture_stream, height=Inches(4.2))
+                            picture_added = True
+                        except Exception as picture_error:
+                            logger.warning(f"Could not embed attachment image {file_name}: {picture_error}")
+                    if not picture_added:
+                        paragraph = doc.add_paragraph()
+                        if file_url:
+                            add_attachment_link(paragraph, file_name, file_url)
+                        else:
+                            paragraph.add_run(file_name)
             for child in section.get("children", []):
                 render_composition_section(child, level + 1)
 
         for section_index, section in enumerate(supplemental_sections):
             add_section_bookmark(f"issp_custom_section_start_{section_index}", section_index * 2 + 1)
-            render_composition_section(section)
+            if not section.get("parent_official_key"):
+                doc.add_page_break()
+            render_composition_section(section, 1 if not section.get("parent_official_key") else 2)
             add_section_bookmark(f"issp_custom_section_end_{section_index}", section_index * 2 + 2)
 
     _apply_docx_outline_overrides(

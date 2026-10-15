@@ -547,13 +547,18 @@ export default function IsspCompositionEditor() {
             {isVisible ? <Eye size={15} className="text-emerald-700" /> : <EyeOff size={15} className="text-slate-400" />}
           </div>
           <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
-            Section title
-            <input
-              value={setting.title ?? node.title}
-              onChange={(event) => updateOfficialSection(node.key, { title: event.target.value })}
-              className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
-              maxLength={200}
-            />
+            Title in the compiled PDF/Word (the saved data is not changed)
+            <div className="mt-1 flex gap-2">
+              <input
+                value={setting.title ?? node.title}
+                onChange={(event) => updateOfficialSection(node.key, { title: event.target.value })}
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
+                maxLength={200}
+              />
+              {setting.title && setting.title !== node.title && (
+                <button type="button" onClick={() => updateOfficialSection(node.key, { title: null })} className="shrink-0 rounded-xl border border-slate-300 px-3 py-2 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800">Reset</button>
+              )}
+            </div>
           </label>
           {node.records?.length > 0 && (
             <details className="mt-3 border-t border-slate-200 pt-2 dark:border-slate-700">
@@ -609,7 +614,7 @@ export default function IsspCompositionEditor() {
   };
 
   return (
-    <main className="mx-auto max-w-6xl space-y-6 p-5 text-slate-800 md:p-8 dark:text-slate-100">
+    <main className="relative mx-auto max-w-6xl space-y-6 p-5 pb-16 text-slate-800 md:p-8 dark:text-slate-100">
       <header className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-700 dark:bg-slate-900">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400"><FileText size={15} /> ISSP composition</div>
