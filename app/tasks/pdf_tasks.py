@@ -2901,11 +2901,36 @@ def generate_complete_issp_html(
         anchor = composition_anchor(path)
         heading_class = "section-header composition-heading" if level == 1 else "composition-heading"
         markup = [f'<h{heading_level} id="{anchor}" class="{heading_class}">{title}</h{heading_level}>']
-        for block in section.get("blocks", []):
+        for block_index, block in enumerate(section.get("blocks", [])):
             block_title = html.escape(str(block.get("title") or ""))
+            block_type = block.get("type")
+            if block_type == "attachment":
+                file_name = html.escape(str(block.get("file_name") or "Uploaded file"))
+                file_url = html.escape(str(block.get("file_url") or ""), quote=True)
+                image_uri = html.escape(str(block.get("image_data_uri") or ""), quote=True)
+                if image_uri:
+                    page_style = ' style="break-before: auto;"' if block_index == 0 else ""
+                    caption_title = f'<div class="section-header">{block_title}</div>' if block_title else ""
+                    caption_text = (
+                        f'<div style="font-size: 8pt; line-height: 1.35; margin-bottom: 6px; text-align: justify;">'
+                        f'{html.escape(str(block.get("content") or "")).replace(chr(10), "<br>")}</div>'
+                    ) if str(block.get("content") or "").strip() else ""
+                    markup.append(
+                        f'<div class="full-page-schematic"{page_style}>{caption_title}{caption_text}'
+                        f'<img src="{image_uri}" class="schematic-img" alt="{file_name}" /></div>'
+                    )
+                    continue
+                if block_title:
+                    markup.append(f'<h{min(heading_level + 1, 6)}>{block_title}</h{min(heading_level + 1, 6)}>')
+                if str(block.get("content") or "").strip():
+                    markup.append(f'<p>{html.escape(str(block.get("content"))).replace(chr(10), "<br>")}</p>')
+                if file_url:
+                    markup.append(f'<p class="composition-attachment"><a href="{file_url}">{file_name}</a></p>')
+                else:
+                    markup.append(f'<p class="composition-attachment">{file_name}</p>')
+                continue
             if block_title:
                 markup.append(f'<h{min(heading_level + 1, 6)}>{block_title}</h{min(heading_level + 1, 6)}>')
-            block_type = block.get("type")
             if block_type == "paragraph":
                 markup.append(f'<p>{html.escape(str(block.get("content") or "")).replace(chr(10), "<br>")}</p>')
             elif block_type in ("bullet_list", "numbered_list"):
@@ -2923,19 +2948,6 @@ def generate_complete_issp_html(
                     for row in block.get("rows", [])
                 )
                 markup.append(f'<table class="composition-table"><thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table>')
-            elif block_type == "attachment":
-                file_name = html.escape(str(block.get("file_name") or "Uploaded file"))
-                file_url = html.escape(str(block.get("file_url") or ""), quote=True)
-                image_uri = html.escape(str(block.get("image_data_uri") or ""), quote=True)
-                if image_uri:
-                    markup.append(
-                        f'<figure class="composition-image" style="margin:8px 0; text-align:center; break-inside:avoid;">'
-                        f'<img src="{image_uri}" alt="{file_name}" style="max-width:100%; max-height:4.6in;"></figure>'
-                    )
-                elif file_url:
-                    markup.append(f'<p class="composition-attachment"><a href="{file_url}">{file_name}</a></p>')
-                else:
-                    markup.append(f'<p class="composition-attachment">{file_name}</p>')
         for index, child in enumerate(section.get("children", [])):
             markup.append(render_composition_section(child, path + (index,), level + 1))
         return "".join(markup)

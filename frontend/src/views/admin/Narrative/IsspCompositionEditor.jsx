@@ -223,11 +223,18 @@ function BlockEditor({ block, onChange, onRemove, onUpload, uploading }) {
           <Trash2 size={16} />
         </button>
       </div>
-      {block.type !== "attachment" && (
-        <input
-          value={block.title || ""}
-          onChange={(event) => onChange({ title: event.target.value })}
-          placeholder="Block heading (optional)"
+      <input
+        value={block.title || ""}
+        onChange={(event) => onChange({ title: event.target.value })}
+        placeholder={block.type === "attachment" ? "Image title, shown as a section-style header (optional)" : "Block heading (optional)"}
+        className={`mb-2 ${inputClass}`}
+      />
+      {block.type === "attachment" && (
+        <textarea
+          value={block.content || ""}
+          onChange={(event) => onChange({ content: event.target.value })}
+          rows={3}
+          placeholder="Paragraph shown above the image (optional)"
           className={`mb-2 ${inputClass}`}
         />
       )}

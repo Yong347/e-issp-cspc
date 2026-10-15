@@ -3491,11 +3491,16 @@ def create_issp_docx(
             heading_end.set(qn("w:id"), str(bookmark_id))
             heading._p.insert(1 if heading._p.find(qn("w:pPr")) is not None else 0, heading_start)
             heading._p.append(heading_end)
-            for block in section.get("blocks", []):
+            for block_index, block in enumerate(section.get("blocks", [])):
                 block_title = clean_str(block.get("title"), "")
+                block_type = block.get("type")
+                has_image = block_type == "attachment" and str(block.get("image_data_uri") or "").startswith("data:image")
+                if has_image and block_index > 0:
+                    doc.add_page_break()
                 if block_title:
                     doc.add_heading(block_title, level=min(level + 1, 4))
-                block_type = block.get("type")
+                if block_type == "attachment" and clean_str(block.get("content"), ""):
+                    doc.add_paragraph(clean_str(block.get("content"), ""))
                 if block_type == "paragraph":
                     doc.add_paragraph(clean_str(block.get("content"), ""))
                 elif block_type in ("bullet_list", "numbered_list", "survey"):
@@ -3524,7 +3529,12 @@ def create_issp_docx(
                             picture_stream = io.BytesIO(base64.b64decode(image_uri.split(",", 1)[1]))
                             picture_paragraph = doc.add_paragraph()
                             picture_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            picture_paragraph.add_run().add_picture(picture_stream, height=Inches(4.2))
+                            picture = picture_paragraph.add_run().add_picture(picture_stream, width=Inches(9.2))
+                            max_height = Inches(4.8)
+                            if picture.height > max_height:
+                                scale = max_height / picture.height
+                                picture.width = int(picture.width * scale)
+                                picture.height = int(max_height)
                             picture_added = True
                         except Exception as picture_error:
                             logger.warning(f"Could not embed attachment image {file_name}: {picture_error}")
