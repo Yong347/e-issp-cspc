@@ -15,6 +15,7 @@ from app.schemas import TokenResponse
 from app.config import settings
 from app.storage.s3_client import storage_client
 from app.utils.helpers import log_audit_event
+from app.utils.login_throttle import login_throttle
 
 logger = logging.getLogger("app.auth.router")
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
@@ -209,6 +210,14 @@ async def authenticate_standard(
         or (request.client.host if request.client else "Unknown")
     )
 
+    wait_seconds = login_throttle.retry_after(client_ip, username)
+    if wait_seconds:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed sign-in attempts. Try again in {max(1, wait_seconds // 60)} minute(s).",
+            headers={"Retry-After": str(wait_seconds)}
+        )
+
     if not is_domain_allowed(username):
         allowed_desc = ", ".join(settings.ALLOWED_EMAIL_DOMAINS)
         log_audit_event(
@@ -236,6 +245,7 @@ async def authenticate_standard(
     is_password_correct = verify_password(form_data.password, password_hash_to_verify)
 
     if not has_valid_user or not is_password_correct or not user.is_whitelisted:
+        login_throttle.record_failure(client_ip, username)
         log_audit_event(
             db=db,
             action="USER_LOGIN_FAILED",
@@ -251,6 +261,7 @@ async def authenticate_standard(
             detail="Invalid institutional credentials. Please verify your email and password."
         )
 
+    login_throttle.reset(client_ip, username)
     log_audit_event(
         db=db,
         action="USER_LOGIN_SUCCESS",
