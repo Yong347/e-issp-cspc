@@ -131,10 +131,10 @@ function BlockEditor({ block, onChange, onRemove, onUpload }) {
   }[block.type];
 
   return (
-    <div className="border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-slate-700 dark:bg-slate-900">
       <div className="mb-3 flex items-center justify-between gap-3">
         <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</label>
-        <button type="button" onClick={onRemove} className="rounded p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${label.toLowerCase()}`} title="Remove block">
+        <button type="button" onClick={onRemove} className="rounded-lg p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${label.toLowerCase()}`} title="Remove block">
           <Trash2 size={16} />
         </button>
       </div>
@@ -143,7 +143,7 @@ function BlockEditor({ block, onChange, onRemove, onUpload }) {
           value={block.title || ""}
           onChange={(event) => onChange({ title: event.target.value })}
           placeholder="Block heading (optional)"
-          className="mb-2 w-full border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
+          className="mb-2 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
         />
       )}
       {block.type === "paragraph" && (
@@ -152,7 +152,7 @@ function BlockEditor({ block, onChange, onRemove, onUpload }) {
           onChange={(event) => onChange({ content: event.target.value })}
           rows={4}
           placeholder="Write the section content"
-          className="w-full border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
+          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
         />
       )}
       {(block.type === "bullet_list" || block.type === "numbered_list" || block.type === "survey") && (
@@ -161,7 +161,7 @@ function BlockEditor({ block, onChange, onRemove, onUpload }) {
           onChange={(event) => onChange(block.type === "survey" ? { questions: toLines(event.target.value) } : { items: toLines(event.target.value) })}
           rows={4}
           placeholder={block.type === "survey" ? "Enter one question per line" : "Enter one item per line"}
-          className="w-full border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
+          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
         />
       )}
       {block.type === "table" && (
@@ -170,12 +170,12 @@ function BlockEditor({ block, onChange, onRemove, onUpload }) {
           onChange={(event) => onChange(parseTable(event.target.value))}
           rows={5}
           placeholder={'Column A | Column B\nValue 1 | Value 2'}
-          className="w-full border border-slate-300 px-3 py-2 font-mono text-sm dark:border-slate-600 dark:bg-slate-950"
+          className="w-full rounded-xl border border-slate-300 px-3 py-2 font-mono text-sm dark:border-slate-600 dark:bg-slate-950"
         />
       )}
       {block.type === "attachment" && (
         <div className="flex flex-wrap items-center gap-3">
-          <label className="inline-flex cursor-pointer items-center gap-2 border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800">
+          <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800">
             <FilePlus2 size={16} />
             <span>{block.file_name || "Upload a file"}</span>
             <input
@@ -330,18 +330,18 @@ export default function IsspCompositionEditor() {
   };
 
   const renderSection = (section, depth = 0) => (
-    <section key={section.id} className="border-l-2 border-emerald-600 pl-4" style={{ marginLeft: depth ? 18 : 0 }}>
+    <section key={section.id}     className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 shadow-xs dark:border-slate-700 dark:bg-slate-950/20" style={{ marginLeft: depth ? 18 : 0 }}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           value={section.title}
           onChange={(event) => updateSection(section.id, (current) => ({ ...current, title: event.target.value }))}
           aria-label="Section title"
-          className="min-w-[220px] flex-1 border border-slate-300 px-3 py-2 text-sm font-semibold dark:border-slate-600 dark:bg-slate-950"
+    className="min-w-[220px] flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold dark:border-slate-600 dark:bg-slate-950"
         />
-        <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, -1) }))} className="rounded p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section up" title="Move up"><ArrowUp size={16} /></button>
-        <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, 1) }))} className="rounded p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section down" title="Move down"><ArrowDown size={16} /></button>
-        <button type="button" onClick={() => addSection(section.id)} className="inline-flex items-center gap-1 border border-slate-300 px-2.5 py-2 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"><Plus size={14} /> Subsection</button>
-        <button type="button" onClick={() => deleteCustomSection(section.id)} className="rounded p-2 text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950" aria-label="Delete section" title="Delete section"><Trash2 size={16} /></button>
+        <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, -1) }))} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section up" title="Move up"><ArrowUp size={16} /></button>
+        <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, 1) }))} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section down" title="Move down"><ArrowDown size={16} /></button>
+        <button type="button" onClick={() => addSection(section.id)} className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-2.5 py-2 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"><Plus size={14} /> Subsection</button>
+        <button type="button" onClick={() => deleteCustomSection(section.id)} className="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950" aria-label="Delete section" title="Delete section"><Trash2 size={16} /></button>
       </div>
 
       <div className="mb-3 grid gap-3">
@@ -371,7 +371,7 @@ export default function IsspCompositionEditor() {
             key={type}
             type="button"
             onClick={() => updateSection(section.id, (current) => ({ ...current, blocks: [...current.blocks, createBlock(type)] }))}
-            className="border border-dashed border-slate-300 px-2.5 py-1.5 text-xs text-slate-700 hover:border-emerald-600 hover:text-emerald-700 dark:border-slate-600 dark:text-slate-300"
+            className="rounded-xl border border-dashed border-slate-300 px-2.5 py-1.5 text-xs text-slate-700 hover:border-emerald-600 hover:text-emerald-700 dark:border-slate-600 dark:text-slate-300"
           >+ {label}</button>
         ))}
       </div>
@@ -385,7 +385,7 @@ export default function IsspCompositionEditor() {
     const isVisible = setting.visible !== false || Boolean(replacement);
     const displayedTitle = setting.title ?? replacement?.title ?? node.title;
     return (
-      <details key={node.key} open={depth < 2} className="border-b border-slate-200 py-2 dark:border-slate-700">
+      <details key={node.key} open={depth < 2} className="rounded-xl border border-slate-200 bg-white p-3 shadow-xs dark:border-slate-700 dark:bg-slate-900">
         <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2">
           <span className={`min-w-[220px] flex-1 text-sm font-semibold ${isVisible ? "text-slate-800 dark:text-slate-100" : "text-slate-400 line-through"}`}>
             {displayedTitle}
@@ -412,7 +412,7 @@ export default function IsspCompositionEditor() {
                   type="button"
                   onClick={() => moveOfficialSection(node.key, siblings, -1)}
                   disabled={siblings[0]?.key === node.key}
-                  className="rounded p-1.5 text-slate-600 hover:bg-slate-100 disabled:opacity-30 dark:hover:bg-slate-800"
+                  className="rounded-lg p-1.5 text-slate-600 hover:bg-slate-100 disabled:opacity-30 dark:hover:bg-slate-800"
                   aria-label={`Move ${node.title} up`}
                   title="Move up"
                 ><ArrowUp size={15} /></button>
@@ -420,7 +420,7 @@ export default function IsspCompositionEditor() {
                   type="button"
                   onClick={() => moveOfficialSection(node.key, siblings, 1)}
                   disabled={siblings[siblings.length - 1]?.key === node.key}
-                  className="rounded p-1.5 text-slate-600 hover:bg-slate-100 disabled:opacity-30 dark:hover:bg-slate-800"
+                  className="rounded-lg p-1.5 text-slate-600 hover:bg-slate-100 disabled:opacity-30 dark:hover:bg-slate-800"
                   aria-label={`Move ${node.title} down`}
                   title="Move down"
                 ><ArrowDown size={15} /></button>
@@ -433,7 +433,7 @@ export default function IsspCompositionEditor() {
             <input
               value={setting.title ?? node.title}
               onChange={(event) => updateOfficialSection(node.key, { title: event.target.value })}
-              className="mt-1 w-full border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
+              className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
               maxLength={200}
             />
           </label>
@@ -463,7 +463,7 @@ export default function IsspCompositionEditor() {
                   replacement_section_id: event.target.value || null,
                   ...(event.target.value ? { visible: false } : {})
                 })}
-                className="mt-1 w-full border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
               >
                 <option value="">No replacement</option>
                 {composition.sections.map((section) => (
@@ -475,7 +475,7 @@ export default function IsspCompositionEditor() {
           <button
             type="button"
             onClick={() => addOfficialSubsection(node.key)}
-            className="mt-3 inline-flex items-center gap-1 border border-dashed border-emerald-700 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+            className="mt-3 inline-flex items-center gap-1 rounded-xl border border-dashed border-emerald-700 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
           ><Plus size={14} /> Add subsection</button>
           {composition.sections
             .filter((section) => section.parent_official_key === node.key)
@@ -491,43 +491,43 @@ export default function IsspCompositionEditor() {
   };
 
   return (
-    <main className="mx-auto max-w-6xl space-y-6 p-5 md:p-8">
-      <header className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-5 dark:border-slate-700">
+    <main className="mx-auto max-w-6xl space-y-6 p-5 text-slate-800 md:p-8 dark:text-slate-100">
+      <header className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-700 dark:bg-slate-900">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400"><FileText size={15} /> ISSP composition</div>
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">ISSP outline</h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Cycle {activeCycle || "..."}. Manage document sections while preserving their source records.</p>
         </div>
-        <button type="button" onClick={save} disabled={saving || loading || cycleLoading} className="inline-flex items-center gap-2 bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50">
+        <button type="button" onClick={save} disabled={saving || loading || cycleLoading} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50">
           {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
           {saving ? "Saving" : "Save changes"}
         </button>
       </header>
 
-      <div className="border-l-4 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:bg-amber-950/30 dark:text-amber-100">
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-xs dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
         Hiding a section only removes it from this cycle’s generated documents. Source data remains in its existing planning module.
       </div>
 
-      {error && <div role="alert" className="flex items-start gap-2 border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200"><AlertCircle size={17} className="mt-0.5 shrink-0" />{error}</div>}
-      {notice && <div role="status" className="border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">{notice}</div>}
+      {error && <div role="alert" className="flex items-start gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 shadow-xs dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200"><AlertCircle size={17} className="mt-0.5 shrink-0" />{error}</div>}
+      {notice && <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 shadow-xs dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">{notice}</div>}
       {loading || cycleLoading ? (
-        <div className="flex items-center gap-2 py-10 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Loading composition...</div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-xs dark:border-slate-700 dark:bg-slate-900"><Loader2 size={18} className="inline-block animate-spin align-text-bottom" /> Loading composition...</div>
       ) : (
         <div className="space-y-5">
-          <section className="border border-slate-200 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900">
+          <section className="rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-xs dark:border-slate-700 dark:bg-slate-900">
             <h2 className="mb-2 text-sm font-bold text-slate-900 dark:text-white">Existing ISSP sections</h2>
             <div>{outline.map((section) => renderOutlineNode(section, outline))}</div>
           </section>
           <section className="space-y-4">
             <h2 className="text-sm font-bold text-slate-900 dark:text-white">Additional sections</h2>
           {composition.sections.some((section) => !section.parent_official_key) ? composition.sections.filter((section) => !section.parent_official_key).map((section) => renderSection(section)) : (
-            <div className="border border-dashed border-slate-300 px-5 py-10 text-center dark:border-slate-700">
+            <div className="rounded-2xl border border-dashed border-slate-300 px-5 py-10 text-center shadow-xs dark:border-slate-700">
               <FileText className="mx-auto mb-3 text-slate-400" size={24} />
               <p className="text-sm font-medium text-slate-700 dark:text-slate-300">No supplemental sections yet</p>
               <p className="mt-1 text-xs text-slate-500">Add sections for cycle-specific content to include with the generated ISSP.</p>
             </div>
           )}
-          <button type="button" onClick={() => addSection()} className="inline-flex items-center gap-2 border border-emerald-700 px-3 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/40"><Plus size={16} /> Add section</button>
+          <button type="button" onClick={() => addSection()} className="inline-flex items-center gap-2 rounded-xl border border-emerald-700 px-3 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/40"><Plus size={16} /> Add section</button>
           {savedAt && <p className="text-xs text-slate-500">Last saved {new Date(savedAt).toLocaleString()}</p>}
           </section>
         </div>
