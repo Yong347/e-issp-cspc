@@ -1518,6 +1518,7 @@ class IsspCompositionSection(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=1, max_length=64)
     title: str = Field(..., min_length=1, max_length=200)
     parent_official_key: Optional[str] = Field(default=None, max_length=64)
+    insert_before_official_key: Optional[str] = Field(default=None, max_length=64)
     children: List["IsspCompositionSection"] = Field(default_factory=list, max_length=100)
     blocks: List[IsspCompositionBlock] = Field(default_factory=list, max_length=200)
 

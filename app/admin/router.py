@@ -1290,6 +1290,8 @@ def save_issp_document_composition(
         for section in sections:
             if section.parent_official_key and section.parent_official_key not in allowed_section_keys:
                 raise HTTPException(status_code=422, detail="Supplemental section references an unknown official parent.")
+            if section.insert_before_official_key and section.insert_before_official_key not in allowed_replacement_keys:
+                raise HTTPException(status_code=422, detail="Sections can only be placed before a top-level official section.")
             validate_official_parents(section.children)
 
     validate_official_parents(payload.sections)

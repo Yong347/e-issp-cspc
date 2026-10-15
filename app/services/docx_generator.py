@@ -248,6 +248,35 @@ def _apply_docx_outline_overrides(
             body.insert(insertion_index + offset, block)
         section_boundaries.pop(section["id"], None)
 
+    placed_first_blocks = {}
+    for section in supplemental_sections or []:
+        target_key = section.get("insert_before_official_key")
+        if (
+            section.get("parent_official_key")
+            or not target_key
+            or section["id"] not in section_boundaries
+            or target_key not in marker_blocks
+            or target_key not in by_key
+            or not visibility.get(target_key, True)
+            or marker_blocks[target_key].getparent() is not body
+        ):
+            continue
+        start_block, end_block = section_boundaries[section["id"]]
+        current_blocks = list(body)
+        start_pos = current_blocks.index(start_block)
+        end_pos = current_blocks.index(end_block)
+        moved_blocks = current_blocks[start_pos + 1:end_pos]
+        for block in current_blocks[start_pos:end_pos + 1]:
+            if block.getparent() is body:
+                body.remove(block)
+        target_block = replacement_anchors.get(target_key, marker_blocks[target_key])
+        insertion_index = list(body).index(target_block)
+        for offset, block in enumerate(moved_blocks):
+            body.insert(insertion_index + offset, block)
+        if moved_blocks:
+            placed_first_blocks.setdefault(target_key, moved_blocks[0])
+        section_boundaries.pop(section["id"], None)
+
     body_blocks = list(body)
     markers = {
         key: body_blocks.index(marker_blocks[key])
@@ -290,7 +319,10 @@ def _apply_docx_outline_overrides(
                 break
 
     root_keys = [node["key"] for node in sections if node["key"] in marker_blocks]
-    natural_roots = sorted((body.index(marker_blocks[key]), key) for key in root_keys)
+    natural_roots = sorted(
+        (body.index(placed_first_blocks.get(key, replacement_anchors.get(key, marker_blocks[key]))), key)
+        for key in root_keys
+    )
     if len(natural_roots) > 1 and [key for _, key in natural_roots] != root_keys:
         body_blocks = list(body)
         supplemental_position = next((
@@ -315,6 +347,11 @@ def _apply_docx_outline_overrides(
         markers = {key: body_blocks.index(marker_blocks[key]) for key in marker_blocks if marker_blocks[key].getparent() is body}
 
     hidden_ranges = []
+    # A section placed before an official section must not be removed with the preceding hidden section.
+    boundary_markers = dict(markers)
+    for placed_key, placed_block in placed_first_blocks.items():
+        if placed_block.getparent() is body and placed_key in markers:
+            boundary_markers[placed_key] = body_blocks.index(placed_block)
     for node in flat:
         key = node["key"]
         if source_visibility.get(key, visibility.get(key, True)) or key not in markers:
@@ -324,7 +361,7 @@ def _apply_docx_outline_overrides(
             continue
         start = markers[key]
         end = next((
-            markers[candidate["key"]]
+            boundary_markers[candidate["key"]]
             for candidate in flat[flat.index(node) + 1:]
             if candidate["depth"] <= node["depth"]
             and candidate["key"] in markers
@@ -1689,7 +1726,14 @@ def create_issp_docx(
         node["key"] for node in outline_nodes
         if node["key"] != "annex2-kpis" and (node["key"] != "part3-f3" or pmf_f3)
     ]
-    if len(toc_keys) == len(toc_items):
+    natural_toc_keys = [
+        node["key"] for node in flatten_outline(get_default_issp_outline(issp_period, len(planning_years)))
+        if node["key"] != "annex2-kpis" and (node["key"] != "part3-f3" or pmf_f3)
+    ]
+    if len(toc_keys) == len(toc_items) == len(natural_toc_keys):
+        # toc_items are in the default document order; the outline may be reordered.
+        toc_item_by_key = dict(zip(natural_toc_keys, toc_items))
+        toc_items = [toc_item_by_key[key] for key in toc_keys]
         visible_by_key = {}
 
         def resolve_toc_settings(nodes, parent_visible=True):
@@ -1725,6 +1769,14 @@ def create_issp_docx(
             if not visible_by_key.get(section_key, True):
                 continue
             title, indent_level, is_bold, section_ref = item
+            if indent_level == 0:
+                for placed in custom_sections:
+                    if (
+                        placed.get("insert_before_official_key") == section_key
+                        and not placed.get("parent_official_key")
+                        and placed.get("id") not in replacement_ids
+                    ):
+                        append_custom_toc(placed, 0, section_ref)
             section_setting = outline_settings.get(section_key, {})
             setting_title = section_setting.get("title")
             replacement_id = section_setting.get("replacement_section_id")
@@ -1749,6 +1801,7 @@ def create_issp_docx(
         unplaced_sections = [
             section for section in custom_sections
             if not section.get("parent_official_key") and section.get("id") not in replacement_ids
+            and not visible_by_key.get(section.get("insert_before_official_key"), False)
         ]
         if unplaced_sections:
             configured_toc_items.append(("SUPPLEMENTAL SECTIONS", 0, True, str(page_annex2)))

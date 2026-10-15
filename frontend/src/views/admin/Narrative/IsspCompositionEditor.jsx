@@ -25,6 +25,7 @@ const createSection = (title = "New section", parentOfficialKey = null) => ({
   id: createId(),
   title,
   parent_official_key: parentOfficialKey,
+  insert_before_official_key: null,
   children: [],
   blocks: []
 });
@@ -35,8 +36,8 @@ const createBlock = (type) => ({
   title: "",
   content: "",
   items: [],
-  columns: [],
-  rows: [],
+  columns: type === "table" ? ["Column 1", "Column 2"] : [],
+  rows: type === "table" ? [["", ""]] : [],
   questions: [],
   file_key: null,
   file_name: null
@@ -101,17 +102,32 @@ function toLines(value) {
   return (value || "").split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
-function tableToText(block) {
-  return [block.columns || [], ...(block.rows || [])].map((row) => row.join(" | ")).join("\n");
-}
+const BLOCK_LABELS = {
+  paragraph: "Paragraph",
+  bullet_list: "Bulleted list",
+  numbered_list: "Numbered list",
+  table: "Table",
+  survey: "Survey questions",
+  attachment: "Uploaded attachment"
+};
 
-function parseTable(value) {
-  const lines = value.split("\n").map((line) => line.split("|").map((cell) => cell.trim()));
-  const columns = lines.shift()?.filter(Boolean) || [];
-  const rows = lines.filter((row) => row.some(Boolean)).map((row) =>
-    Array.from({ length: columns.length }, (_, index) => row[index] || "")
-  );
-  return { columns, rows };
+function validateSections(sections, path = []) {
+  const problems = [];
+  sections.forEach((section) => {
+    const sectionPath = [...path, section.title || "Untitled section"];
+    const where = sectionPath.join(" > ");
+    if (!section.title?.trim()) problems.push(`A section has no title (${where}).`);
+    (section.blocks || []).forEach((block, index) => {
+      const name = `${where}: ${BLOCK_LABELS[block.type]} #${index + 1}`;
+      if (block.type === "paragraph" && !block.content?.trim()) problems.push(`${name} is empty. Write some text or remove it.`);
+      if ((block.type === "bullet_list" || block.type === "numbered_list") && !(block.items || []).length) problems.push(`${name} needs at least one item.`);
+      if (block.type === "survey" && !(block.questions || []).length) problems.push(`${name} needs at least one question.`);
+      if (block.type === "table" && !(block.columns || []).some((column) => column.trim())) problems.push(`${name} needs at least one column heading.`);
+      if (block.type === "attachment" && !(block.file_key && block.file_name)) problems.push(`${name} has no uploaded file yet.`);
+    });
+    problems.push(...validateSections(section.children || [], sectionPath));
+  });
+  return problems;
 }
 
 function formatRecordValue(value) {
@@ -120,15 +136,84 @@ function formatRecordValue(value) {
   return String(value);
 }
 
-function BlockEditor({ block, onChange, onRemove, onUpload }) {
-  const label = {
-    paragraph: "Paragraph",
-    bullet_list: "Bulleted list",
-    numbered_list: "Numbered list",
-    table: "Table",
-    survey: "Survey questions",
-    attachment: "Uploaded attachment"
-  }[block.type];
+const inputClass = "w-full rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950";
+
+function TableEditor({ block, onChange }) {
+  const columns = block.columns || [];
+  const rows = block.rows || [];
+
+  const setColumn = (index, value) => onChange({ columns: columns.map((column, i) => i === index ? value : column) });
+  const setCell = (rowIndex, colIndex, value) => onChange({
+    rows: rows.map((row, i) => i === rowIndex ? row.map((cell, j) => j === colIndex ? value : cell) : row)
+  });
+  const addColumn = () => onChange({
+    columns: [...columns, `Column ${columns.length + 1}`],
+    rows: rows.map((row) => [...row, ""])
+  });
+  const removeColumn = (index) => onChange({
+    columns: columns.filter((_, i) => i !== index),
+    rows: rows.map((row) => row.filter((_, i) => i !== index))
+  });
+  const addRow = () => onChange({ rows: [...rows, columns.map(() => "")] });
+  const removeRow = (index) => onChange({ rows: rows.filter((_, i) => i !== index) });
+
+  return (
+    <div>
+      <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+        <table className="w-full min-w-[420px] text-sm">
+          <thead className="bg-slate-100 dark:bg-slate-800">
+            <tr>
+              {columns.map((column, index) => (
+                <th key={index} className="p-1.5 align-top">
+                  <div className="flex items-center gap-1">
+                    <input
+                      value={column}
+                      onChange={(event) => setColumn(index, event.target.value)}
+                      aria-label={`Column ${index + 1} heading`}
+                      placeholder={`Column ${index + 1}`}
+                      className="w-full min-w-[110px] rounded-lg border border-slate-300 px-2 py-1.5 text-sm font-semibold dark:border-slate-600 dark:bg-slate-950"
+                    />
+                    <button type="button" onClick={() => removeColumn(index)} disabled={columns.length <= 1} className="rounded-lg p-1 text-slate-500 hover:bg-rose-50 hover:text-rose-700 disabled:opacity-30" aria-label={`Remove column ${index + 1}`} title="Remove column"><Trash2 size={14} /></button>
+                  </div>
+                </th>
+              ))}
+              <th className="w-10" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIndex) => (
+              <tr key={rowIndex} className="border-t border-slate-200 dark:border-slate-700">
+                {columns.map((_, colIndex) => (
+                  <td key={colIndex} className="p-1.5">
+                    <input
+                      value={row[colIndex] || ""}
+                      onChange={(event) => setCell(rowIndex, colIndex, event.target.value)}
+                      aria-label={`Row ${rowIndex + 1}, ${columns[colIndex] || `column ${colIndex + 1}`}`}
+                      className="w-full min-w-[110px] rounded-lg border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-950"
+                    />
+                  </td>
+                ))}
+                <td className="p-1.5">
+                  <button type="button" onClick={() => removeRow(rowIndex)} className="rounded-lg p-1 text-slate-500 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove row ${rowIndex + 1}`} title="Remove row"><Trash2 size={14} /></button>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={columns.length + 1} className="p-3 text-center text-xs text-slate-500">No rows yet. Click “Add row”.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button type="button" onClick={addRow} className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"><Plus size={14} /> Add row</button>
+        <button type="button" onClick={addColumn} disabled={columns.length >= 20} className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-800"><Plus size={14} /> Add column</button>
+      </div>
+    </div>
+  );
+}
+
+function BlockEditor({ block, onChange, onRemove, onUpload, uploading }) {
+  const label = BLOCK_LABELS[block.type];
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-slate-700 dark:bg-slate-900">
@@ -143,7 +228,7 @@ function BlockEditor({ block, onChange, onRemove, onUpload }) {
           value={block.title || ""}
           onChange={(event) => onChange({ title: event.target.value })}
           placeholder="Block heading (optional)"
-          className="mb-2 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
+          className={`mb-2 ${inputClass}`}
         />
       )}
       {block.type === "paragraph" && (
@@ -152,40 +237,45 @@ function BlockEditor({ block, onChange, onRemove, onUpload }) {
           onChange={(event) => onChange({ content: event.target.value })}
           rows={4}
           placeholder="Write the section content"
-          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
+          className={inputClass}
         />
       )}
       {(block.type === "bullet_list" || block.type === "numbered_list" || block.type === "survey") && (
-        <textarea
-          value={(block.type === "survey" ? block.questions : block.items || []).join("\n")}
-          onChange={(event) => onChange(block.type === "survey" ? { questions: toLines(event.target.value) } : { items: toLines(event.target.value) })}
-          rows={4}
-          placeholder={block.type === "survey" ? "Enter one question per line" : "Enter one item per line"}
-          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-950"
-        />
+        <>
+          <textarea
+            value={block.type === "survey" ? (block.questionsText ?? (block.questions || []).join("\n")) : (block.itemsText ?? (block.items || []).join("\n"))}
+            onChange={(event) => onChange(block.type === "survey"
+              ? { questionsText: event.target.value, questions: toLines(event.target.value) }
+              : { itemsText: event.target.value, items: toLines(event.target.value) })}
+            rows={4}
+            placeholder={block.type === "survey" ? "Enter one question per line" : "Enter one item per line"}
+            className={inputClass}
+          />
+          <p className="mt-1 text-xs text-slate-500">{block.type === "survey" ? "One question per line." : "One item per line."}</p>
+        </>
       )}
-      {block.type === "table" && (
-        <textarea
-          value={tableToText(block)}
-          onChange={(event) => onChange(parseTable(event.target.value))}
-          rows={5}
-          placeholder={'Column A | Column B\nValue 1 | Value 2'}
-          className="w-full rounded-xl border border-slate-300 px-3 py-2 font-mono text-sm dark:border-slate-600 dark:bg-slate-950"
-        />
-      )}
+      {block.type === "table" && <TableEditor block={block} onChange={onChange} />}
       {block.type === "attachment" && (
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800">
-            <FilePlus2 size={16} />
-            <span>{block.file_name || "Upload a file"}</span>
-            <input
-              type="file"
-              accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
-              className="sr-only"
-              onChange={(event) => event.target.files?.[0] && onUpload(event.target.files[0])}
-            />
-          </label>
-          {block.file_key && <span className="text-xs text-emerald-700 dark:text-emerald-400">Uploaded and linked to this ISSP</span>}
+        <div className="rounded-xl border-2 border-dashed border-slate-300 p-4 text-center dark:border-slate-600">
+          {uploading ? (
+            <p className="flex items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Uploading...</p>
+          ) : block.file_key ? (
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <span className="inline-flex items-center gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-400"><FileText size={16} /> {block.file_name}</span>
+              <label className="cursor-pointer rounded-xl border border-slate-300 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800">
+                Replace file
+                <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" className="sr-only" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) onUpload(file); }} />
+              </label>
+              <button type="button" onClick={() => onChange({ file_key: null, file_name: null })} className="rounded-xl border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50 dark:border-slate-600">Remove file</button>
+            </div>
+          ) : (
+            <label className="inline-flex cursor-pointer flex-col items-center gap-1 text-sm font-medium text-slate-700 dark:text-slate-300">
+              <FilePlus2 size={22} className="text-slate-400" />
+              <span>Click to choose a file</span>
+              <span className="text-xs font-normal text-slate-500">PDF, Word, Excel, PNG or JPG</span>
+              <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" className="sr-only" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) onUpload(file); }} />
+            </label>
+          )}
         </div>
       )}
     </div>
@@ -202,7 +292,8 @@ export default function IsspCompositionEditor() {
   const [notice, setNotice] = useState("");
   const [uploadingId, setUploadingId] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
-
+  const [snapshot, setSnapshot] = useState(null);
+  const isDirty = snapshot !== null && JSON.stringify(composition) !== snapshot;
   useEffect(() => {
     let alive = true;
     if (cycleLoading || !activeCycle) return undefined;
@@ -211,11 +302,13 @@ export default function IsspCompositionEditor() {
     getIsspDocumentComposition(null, activeCycle)
       .then((data) => {
         if (!alive) return;
-        setComposition({
+        const loaded = {
           version: 2,
           sections: data.sections || [],
           official_sections: data.official_sections || {}
-        });
+        };
+        setComposition(loaded);
+        setSnapshot(JSON.stringify(loaded));
         setOutline(data.outline || []);
         setSavedAt(data.updated_at || null);
       })
@@ -309,19 +402,26 @@ export default function IsspCompositionEditor() {
   };
 
   const save = async () => {
-    setSaving(true);
     setError("");
     setNotice("");
+    const problems = validateSections(composition.sections);
+    if (problems.length) {
+      setError(`Please fix the following before saving:\n• ${problems.join("\n• ")}`);
+      return;
+    }
+    setSaving(true);
     try {
       const result = await saveIsspDocumentComposition(null, activeCycle, composition);
+      const saved = {
+        version: 2,
+        sections: result.sections || composition.sections,
+        official_sections: result.official_sections || composition.official_sections
+      };
       setSavedAt(result.updated_at || new Date().toISOString());
       setOutline(result.outline || []);
-      setComposition((current) => ({
-        ...current,
-        sections: result.sections || current.sections,
-        official_sections: result.official_sections || current.official_sections
-      }));
-      setNotice("ISSP outline saved. Generate a new ISSP to apply the changes to its documents.");
+      setComposition(saved);
+      setSnapshot(JSON.stringify(saved));
+      setNotice("Saved. Next step: open the Dashboard and click Compile PDF / Compile Word. The Vault only shows the last compiled file until you compile again.");
     } catch (saveError) {
       setError(saveError.message || "Unable to save this ISSP composition.");
     } finally {
@@ -329,14 +429,18 @@ export default function IsspCompositionEditor() {
     }
   };
 
+  const replacedSectionIds = new Set(
+    Object.values(composition.official_sections).map((setting) => setting.replacement_section_id).filter(Boolean)
+  );
+
   const renderSection = (section, depth = 0) => (
-    <section key={section.id}     className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 shadow-xs dark:border-slate-700 dark:bg-slate-950/20" style={{ marginLeft: depth ? 18 : 0 }}>
+    <section key={section.id} className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 shadow-xs dark:border-slate-700 dark:bg-slate-950/20" style={{ marginLeft: depth ? 18 : 0 }}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           value={section.title}
           onChange={(event) => updateSection(section.id, (current) => ({ ...current, title: event.target.value }))}
           aria-label="Section title"
-    className="min-w-[220px] flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold dark:border-slate-600 dark:bg-slate-950"
+          className="min-w-[220px] flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold dark:border-slate-600 dark:bg-slate-950"
         />
         <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, -1) }))} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section up" title="Move up"><ArrowUp size={16} /></button>
         <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, 1) }))} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section down" title="Move down"><ArrowDown size={16} /></button>
@@ -344,20 +448,34 @@ export default function IsspCompositionEditor() {
         <button type="button" onClick={() => deleteCustomSection(section.id)} className="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950" aria-label="Delete section" title="Delete section"><Trash2 size={16} /></button>
       </div>
 
+      {depth === 0 && !section.parent_official_key && !replacedSectionIds.has(section.id) && (
+        <label className="mb-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
+          Position in the ISSP
+          <select
+            value={section.insert_before_official_key || ""}
+            onChange={(event) => updateSection(section.id, (current) => ({ ...current, insert_before_official_key: event.target.value || null }))}
+            className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
+          >
+            <option value="">At the end (Supplemental Sections)</option>
+            {outline.map((node) => (
+              <option key={node.key} value={node.key}>Before: {composition.official_sections[node.key]?.title || node.title}</option>
+            ))}
+          </select>
+        </label>
+      )}
+
       <div className="mb-3 grid gap-3">
         {section.blocks.map((block) => (
           <BlockEditor
             key={block.id}
             block={block}
+            uploading={uploadingId === block.id}
             onChange={(patch) => updateBlock(section.id, block.id, patch)}
             onRemove={() => updateSection(section.id, (current) => ({ ...current, blocks: current.blocks.filter((item) => item.id !== block.id) }))}
             onUpload={(file) => uploadAttachment(section.id, block.id, file)}
           />
         ))}
       </div>
-      {uploadingId && section.blocks.some((block) => block.id === uploadingId) && (
-        <p className="mb-3 flex items-center gap-2 text-xs text-slate-500"><Loader2 size={14} className="animate-spin" /> Uploading attachment...</p>
-      )}
       <div className="mb-4 flex flex-wrap gap-2">
         {[
           ["paragraph", "Paragraph"],
@@ -498,17 +616,29 @@ export default function IsspCompositionEditor() {
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">ISSP outline</h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Cycle {activeCycle || "..."}. Manage document sections while preserving their source records.</p>
         </div>
-        <button type="button" onClick={save} disabled={saving || loading || cycleLoading} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50">
-          {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-          {saving ? "Saving" : "Save changes"}
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button type="button" onClick={save} disabled={saving || loading || cycleLoading} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50">
+            {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+            {saving ? "Saving" : "Save changes"}
+          </button>
+          {isDirty && <span className="text-xs font-medium text-amber-700 dark:text-amber-400">You have unsaved changes</span>}
+        </div>
       </header>
+
+      <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950 shadow-xs dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-100">
+        <p className="font-semibold">How it works</p>
+        <ol className="mt-1 list-decimal pl-5">
+          <li>Edit the outline here and click <strong>Save changes</strong>.</li>
+          <li>Go to the <strong>Dashboard</strong> and click <strong>Compile PDF / Compile Word</strong>. Saved changes only appear in a newly compiled file.</li>
+          <li>Download the result from the Dashboard or the Vault.</li>
+        </ol>
+      </div>
 
       <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-xs dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
         Hiding a section only removes it from this cycle’s generated documents. Source data remains in its existing planning module.
       </div>
 
-      {error && <div role="alert" className="flex items-start gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 shadow-xs dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200"><AlertCircle size={17} className="mt-0.5 shrink-0" />{error}</div>}
+      {error && <div role="alert" className="flex items-start gap-2 whitespace-pre-line rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 shadow-xs dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200"><AlertCircle size={17} className="mt-0.5 shrink-0" />{error}</div>}
       {notice && <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 shadow-xs dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">{notice}</div>}
       {loading || cycleLoading ? (
         <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-xs dark:border-slate-700 dark:bg-slate-900"><Loader2 size={18} className="inline-block animate-spin align-text-bottom" /> Loading composition...</div>

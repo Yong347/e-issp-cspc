@@ -625,6 +625,30 @@ def apply_pdf_outline_overrides(
 
     _reorder_pdf_root_sections(body, outline, anchors)
 
+    placed_before: Dict[str, List[tuple[Dict[str, Any], tuple[int, ...]]]] = {}
+    for section_index, section in enumerate(custom_sections):
+        target_key = section.get("insert_before_official_key")
+        target_node = nodes_by_key.get(target_key)
+        if (
+            section.get("parent_official_key")
+            or section["id"] in replacement_ids
+            or not target_node
+            or target_node["depth"] != 0
+            or not target_node["visible"]
+        ):
+            continue
+        wrapper = document.xpath("//*[@data-composition-section-id=$section_id]", section_id=section["id"])
+        target_element = next(
+            (item for item in anchors.get(target_key, []) if item.getparent() is not None),
+            None
+        )
+        if not wrapper or target_element is None:
+            continue
+        while target_element.getparent() is not body and target_element.getparent() is not None:
+            target_element = target_element.getparent()
+        wrapper[0].set("style", "page-break-before: always;")
+        target_element.addprevious(wrapper[0])
+        placed_before.setdefault(target_key, []).append((section, (section_index,)))
     toc_body = document.xpath("//*[@id='sec-toc']//tbody")
     if toc_body:
         toc_body = toc_body[0]
@@ -635,6 +659,10 @@ def apply_pdf_outline_overrides(
         }
         placed_prefixes = {
             "supplement-" + "-".join(str(index) for index in path)
+            for placed_nodes in placed_before.values()
+            for _, path in placed_nodes
+        } | {
+            "supplement-" + "-".join(str(index) for index in path)
             for sections_for_parent in placed_sections.values()
             for _, path in sections_for_parent
         }
@@ -644,9 +672,13 @@ def apply_pdf_outline_overrides(
             href = links[0].get("href", "") if links else ""
             if href == "#sec-supplemental":
                 handled_custom_ids = replacement_ids | {
-                    section["id"] for section in custom_sections if section.get("parent_official_key")
+                    section["id"] for section in custom_sections
+                    if section.get("parent_official_key") or any(
+                        section["id"] == placed["id"] for nodes in placed_before.values() for placed, _ in nodes
+                    )
                 }
                 if custom_sections and all(section["id"] in handled_custom_ids for section in custom_sections):
+                    toc_body.remove(row)
                     continue
                 supplemental_rows.append(row)
             elif href.startswith("#supplement"):
@@ -685,6 +717,9 @@ def apply_pdf_outline_overrides(
 
         def append_tree(nodes: List[Dict[str, Any]], depth: int = 0) -> None:
             for node in nodes:
+                if depth == 0:
+                    for section, path in placed_before.get(node["key"], []):
+                        append_custom_node(section, path, 0)
                 append_node(node, depth)
                 for section, path in placed_sections.get(node["key"], []):
                     append_custom_node(section, path, depth + 1)
