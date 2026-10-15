@@ -7,7 +7,7 @@ from app.admin.router import (
     list_issp_composition_versions,
     save_issp_document_composition,
 )
-from app.database.models import Base, MasterNarrative
+from app.database.models import AuditTrail, Base, MasterNarrative
 from app.schemas import IsspDocumentCompositionPayload
 
 
@@ -37,3 +37,6 @@ def test_each_save_records_a_restorable_version_and_history_is_capped():
         oldest = versions[-1]
         restored = get_issp_composition_version("2026-2028", oldest["id"], db, admin)
         assert restored.sections[0].title == "Title 3"
+
+        saves = db.query(AuditTrail).filter(AuditTrail.action == "ISSP_COMPOSITION_SAVED").count()
+        assert saves == MAX_COMPOSITION_VERSIONS + 3

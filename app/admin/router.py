@@ -1351,6 +1351,17 @@ def save_issp_document_composition(
         composition_json=record.composition_json,
         saved_by_user_id=admin["id"]
     ))
+    log_audit_event(
+        db=db,
+        action="ISSP_COMPOSITION_SAVED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        new_value={
+            "issp_period": issp_period,
+            "added_sections": len(payload.sections),
+            "customized_official_sections": len(payload.official_sections)
+        }
+    )
     db.flush()
     stale_ids = [
         row.id for row in db.query(IsspCompositionVersion.id)
@@ -1437,6 +1448,14 @@ async def upload_issp_composition_attachment(
     uploaded = storage_client.upload_binary(file_bytes, file_key)
     if not uploaded:
         raise HTTPException(status_code=500, detail="Failed to upload attachment to storage.")
+    log_audit_event(
+        db=db,
+        action="ISSP_COMPOSITION_FILE_UPLOADED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        new_value={"issp_period": issp_period, "file_name": safe_name, "size_bytes": len(file_bytes)}
+    )
+    db.commit()
     return {"file_key": file_key, "file_name": safe_name}
 
 
@@ -4881,6 +4900,14 @@ def trigger_document_generation(
 
     task_id = str(uuid.uuid4())
     dispatched_via_celery = False
+    log_audit_event(
+        db=db,
+        action="ISSP_COMPILE_REQUESTED",
+        module="GOVERNANCE",
+        user_id=admin["id"],
+        new_value={"issp_period": target_period, "format": clean_format}
+    )
+    db.commit()
 
     # Attempt Celery task queuing if Redis broker is operational
     try:
