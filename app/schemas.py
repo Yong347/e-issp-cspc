@@ -1488,9 +1488,14 @@ class BulkCeilingValidationPayload(BaseModel):
 
 class IsspCompositionBlock(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=1, max_length=64)
-    type: Literal["paragraph", "bullet_list", "numbered_list", "checklist", "table", "survey", "attachment"]
+    type: Literal["paragraph", "bullet_list", "numbered_list", "checklist", "table", "survey", "attachment", "page_break", "callout"]
     title: str = Field(default="", max_length=200)
     content: str = Field(default="", max_length=20000)
+    text_bold: bool = Field(default=False)
+    text_italic: bool = Field(default=False)
+    text_underline: bool = Field(default=False)
+    text_align: Literal["left", "center", "right", "justify"] = Field(default="left")
+    callout_style: Literal["info", "warning", "success"] = Field(default="info")
     items: List[str] = Field(default_factory=list, max_length=200)
     states: List[Literal["unchecked", "checked", "crossed"]] = Field(default_factory=list, max_length=200)
     columns: List[str] = Field(default_factory=list, max_length=20)
@@ -1514,6 +1519,8 @@ class IsspCompositionBlock(BaseModel):
             self.states = (list(self.states) + ["unchecked"] * len(self.items))[:len(self.items)]
         if self.type == "attachment" and not (self.file_key and self.file_name):
             raise ValueError("Attachment blocks require an uploaded file.")
+        if self.type == "callout" and not self.content.strip():
+            raise ValueError("Callout boxes require text.")
         return self
 
 

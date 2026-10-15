@@ -3497,12 +3497,42 @@ def create_issp_docx(
                 has_image = block_type == "attachment" and str(block.get("image_data_uri") or "").startswith("data:image")
                 if has_image and block_index > 0:
                     doc.add_page_break()
+                if block_type == "page_break":
+                    doc.add_page_break()
+                    continue
+                if block_type == "callout":
+                    callout_colors = {"info": "DBEAFE", "warning": "FEF3C7", "success": "D1FAE5"}
+                    shade = callout_colors.get(block.get("callout_style") or "info", callout_colors["info"])
+                    callout_table = doc.add_table(rows=1, cols=1)
+                    callout_table.autofit = True
+                    callout_cell = callout_table.rows[0].cells[0]
+                    set_cell_shading(callout_cell, shade)
+                    set_cell_margins(callout_cell, top=120, bottom=120, left=160, right=160)
+                    callout_cell.paragraphs[0].text = ""
+                    if block_title:
+                        title_run = callout_cell.paragraphs[0].add_run(block_title)
+                        title_run.bold = True
+                        callout_cell.add_paragraph(clean_str(block.get("content"), ""))
+                    else:
+                        callout_cell.paragraphs[0].add_run(clean_str(block.get("content"), ""))
+                    continue
                 if block_title:
                     doc.add_heading(block_title, level=min(level + 1, 4))
                 if block_type == "attachment" and clean_str(block.get("content"), ""):
                     doc.add_paragraph(clean_str(block.get("content"), ""))
                 if block_type == "paragraph":
-                    doc.add_paragraph(clean_str(block.get("content"), ""))
+                    align_map = {
+                        "left": WD_ALIGN_PARAGRAPH.LEFT,
+                        "center": WD_ALIGN_PARAGRAPH.CENTER,
+                        "right": WD_ALIGN_PARAGRAPH.RIGHT,
+                        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY
+                    }
+                    paragraph = doc.add_paragraph()
+                    paragraph.alignment = align_map.get(block.get("text_align") or "left", WD_ALIGN_PARAGRAPH.LEFT)
+                    run = paragraph.add_run(clean_str(block.get("content"), ""))
+                    run.bold = bool(block.get("text_bold"))
+                    run.italic = bool(block.get("text_italic"))
+                    run.underline = bool(block.get("text_underline"))
                 elif block_type == "checklist":
                     states = block.get("states") or []
                     symbols = {"unchecked": "\u2610", "checked": "\u2611", "crossed": "\u2612"}

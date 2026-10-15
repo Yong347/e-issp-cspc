@@ -9,16 +9,25 @@ import {
 } from "../../../api/admin";
 import {
   AlertCircle,
+  AlignCenter,
+  AlignJustify,
+  AlignLeft,
+  AlignRight,
   ArrowDown,
   ArrowUp,
+  Bold,
+  Copy,
   FilePlus2,
   FileText,
   Eye,
   EyeOff,
+  Italic,
   Loader2,
+  MinusSquare,
   Plus,
   Save,
-  Trash2
+  Trash2,
+  Underline
 } from "lucide-react";
 
 const createId = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -37,6 +46,11 @@ const createBlock = (type) => ({
   type,
   title: "",
   content: "",
+  text_bold: false,
+  text_italic: false,
+  text_underline: false,
+  text_align: "left",
+  callout_style: "info",
   items: type === "checklist" ? [""] : [],
   states: type === "checklist" ? ["unchecked"] : [],
   columns: type === "table" ? ["Column 1", "Column 2"] : [],
@@ -61,6 +75,16 @@ function insertSectionAfterTree(sections, sectionId, newSection) {
     ...section,
     children: insertSectionAfterTree(section.children || [], sectionId, newSection)
   }));
+}
+
+function cloneSectionWithNewIds(section) {
+  return {
+    ...section,
+    id: createId(),
+    title: `${section.title} (copy)`,
+    blocks: (section.blocks || []).map((block) => ({ ...block, id: createId() })),
+    children: (section.children || []).map((child) => cloneSectionWithNewIds(child))
+  };
 }
 
 function moveItem(list, index, direction) {
@@ -177,7 +201,9 @@ const BLOCK_LABELS = {
   checklist: "Checklist",
   table: "Table",
   survey: "Survey questions",
-  attachment: "Uploaded attachment"
+  attachment: "Uploaded attachment",
+  page_break: "Page break",
+  callout: "Callout box"
 };
 
 function validateSections(sections, path = []) {
@@ -194,6 +220,7 @@ function validateSections(sections, path = []) {
       if (block.type === "survey" && !(block.questions || []).length) problems.push(`${name} needs at least one question.`);
       if (block.type === "table" && !(block.columns || []).some((column) => column.trim())) problems.push(`${name} needs at least one column heading.`);
       if (block.type === "attachment" && !(block.file_key && block.file_name)) problems.push(`${name} has no uploaded file yet.`);
+      if (block.type === "callout" && !block.content?.trim()) problems.push(`${name} is empty. Write some text or remove it.`);
     });
     problems.push(...validateSections(section.children || [], sectionPath));
   });
@@ -282,7 +309,7 @@ function TableEditor({ block, onChange }) {
   );
 }
 
-function BlockEditor({ block, onChange, onRemove, onUpload, uploading, onMove }) {
+function BlockEditor({ block, onChange, onRemove, onUpload, uploading, onMove, onDuplicate }) {
   const label = BLOCK_LABELS[block.type];
 
   return (
@@ -292,17 +319,20 @@ function BlockEditor({ block, onChange, onRemove, onUpload, uploading, onMove })
         <div className="flex items-center gap-1">
           <button type="button" onClick={() => onMove(-1)} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move block up" title="Move up"><ArrowUp size={16} /></button>
           <button type="button" onClick={() => onMove(1)} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move block down" title="Move down"><ArrowDown size={16} /></button>
+          <button type="button" onClick={onDuplicate} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label={`Duplicate ${label.toLowerCase()}`} title="Duplicate block"><Copy size={16} /></button>
           <button type="button" onClick={onRemove} className="rounded-lg p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${label.toLowerCase()}`} title="Remove block">
             <Trash2 size={16} />
           </button>
         </div>
       </div>
-      <input
-        value={block.title || ""}
-        onChange={(event) => onChange({ title: event.target.value })}
-        placeholder={block.type === "attachment" ? "Image title, shown as a section-style header (optional)" : "Block heading (optional)"}
-        className={`mb-2 ${inputClass}`}
-      />
+      {block.type !== "page_break" && (
+        <input
+          value={block.title || ""}
+          onChange={(event) => onChange({ title: event.target.value })}
+          placeholder={block.type === "attachment" ? "Image title, shown as a section-style header (optional)" : "Block heading (optional)"}
+          className={`mb-2 ${inputClass}`}
+        />
+      )}
       {block.type === "attachment" && (
         <textarea
           value={block.content || ""}
@@ -313,13 +343,56 @@ function BlockEditor({ block, onChange, onRemove, onUpload, uploading, onMove })
         />
       )}
       {block.type === "paragraph" && (
-        <textarea
-          value={block.content || ""}
-          onChange={(event) => onChange({ content: event.target.value })}
-          rows={4}
-          placeholder="Write the section content"
-          className={inputClass}
-        />
+        <>
+          <div className="mb-2 flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1.5 dark:border-slate-700 dark:bg-slate-950/40">
+            <button type="button" onClick={() => onChange({ text_bold: !block.text_bold })} aria-pressed={!!block.text_bold} className={`rounded-lg p-1.5 ${block.text_bold ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"}`} title="Bold"><Bold size={14} /></button>
+            <button type="button" onClick={() => onChange({ text_italic: !block.text_italic })} aria-pressed={!!block.text_italic} className={`rounded-lg p-1.5 ${block.text_italic ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"}`} title="Italic"><Italic size={14} /></button>
+            <button type="button" onClick={() => onChange({ text_underline: !block.text_underline })} aria-pressed={!!block.text_underline} className={`rounded-lg p-1.5 ${block.text_underline ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"}`} title="Underline"><Underline size={14} /></button>
+            <span className="mx-1 h-5 w-px bg-slate-300 dark:bg-slate-700" />
+            {[["left", AlignLeft, "Align left"], ["center", AlignCenter, "Align center"], ["right", AlignRight, "Align right"], ["justify", AlignJustify, "Justify"]].map(([value, Icon, titleText]) => (
+              <button key={value} type="button" onClick={() => onChange({ text_align: value })} aria-pressed={(block.text_align || "left") === value} className={`rounded-lg p-1.5 ${(block.text_align || "left") === value ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"}`} title={titleText}><Icon size={14} /></button>
+            ))}
+          </div>
+          <textarea
+            value={block.content || ""}
+            onChange={(event) => onChange({ content: event.target.value })}
+            rows={4}
+            placeholder="Write the section content"
+            style={{
+              fontWeight: block.text_bold ? "bold" : "normal",
+              fontStyle: block.text_italic ? "italic" : "normal",
+              textDecoration: block.text_underline ? "underline" : "none",
+              textAlign: block.text_align || "left"
+            }}
+            className={inputClass}
+          />
+        </>
+      )}
+      {block.type === "callout" && (
+        <>
+          <div className="mb-2 flex gap-2">
+            {[["info", "Info (blue)"], ["warning", "Warning (amber)"], ["success", "Success (green)"]].map(([value, labelText]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => onChange({ callout_style: value })}
+                className={`rounded-xl border px-2.5 py-1.5 text-xs font-medium ${(block.callout_style || "info") === value
+                  ? { info: "border-blue-600 bg-blue-50 text-blue-800", warning: "border-amber-600 bg-amber-50 text-amber-800", success: "border-emerald-600 bg-emerald-50 text-emerald-800" }[value]
+                  : "border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-300"}`}
+              >{labelText}</button>
+            ))}
+          </div>
+          <textarea
+            value={block.content || ""}
+            onChange={(event) => onChange({ content: event.target.value })}
+            rows={3}
+            placeholder="Note or warning text shown in a highlighted box"
+            className={inputClass}
+          />
+        </>
+      )}
+      {block.type === "page_break" && (
+        <p className="flex items-center gap-2 rounded-xl border border-dashed border-slate-300 px-3 py-4 text-sm text-slate-500 dark:border-slate-600"><MinusSquare size={16} /> Everything after this starts on a new page.</p>
       )}
       {(block.type === "bullet_list" || block.type === "numbered_list" || block.type === "survey") && (
         <>
@@ -564,6 +637,11 @@ export default function IsspCompositionEditor() {
         <button type="button" onClick={() => setComposition((current) => ({ ...current, sections: moveSectionTree(current.sections, section.id, 1) }))} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Move section down" title="Move down"><ArrowDown size={16} /></button>
         <button type="button" onClick={() => addSection(section.id)} className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-2.5 py-2 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"><Plus size={14} /> Subsection</button>
         <button type="button" onClick={() => addSectionAfter(section.id)} className="inline-flex items-center gap-1 rounded-xl border border-emerald-700 px-2.5 py-2 text-xs font-medium text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/40"><Plus size={14} /> Section below</button>
+        <button
+          type="button"
+          onClick={() => setComposition((current) => ({ ...current, sections: insertSectionAfterTree(current.sections, section.id, cloneSectionWithNewIds(section)) }))}
+          className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-2.5 py-2 text-xs font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
+        ><Copy size={14} /> Duplicate</button>
         <button type="button" onClick={() => deleteCustomSection(section.id)} className="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950" aria-label="Delete section" title="Delete section"><Trash2 size={16} /></button>
       </div>
 
@@ -593,6 +671,12 @@ export default function IsspCompositionEditor() {
             onRemove={() => updateSection(section.id, (current) => ({ ...current, blocks: current.blocks.filter((item) => item.id !== block.id) }))}
             onUpload={(file) => uploadAttachment(section.id, block.id, file)}
             onMove={(direction) => updateSection(section.id, (current) => ({ ...current, blocks: moveItem(current.blocks, current.blocks.findIndex((item) => item.id === block.id), direction) }))}
+            onDuplicate={() => updateSection(section.id, (current) => {
+              const index = current.blocks.findIndex((item) => item.id === block.id);
+              const next = [...current.blocks];
+              next.splice(index + 1, 0, { ...block, id: createId() });
+              return { ...current, blocks: next };
+            })}
           />
         ))}
       </div>
@@ -604,7 +688,9 @@ export default function IsspCompositionEditor() {
           ["checklist", "Checklist"],
           ["table", "Table"],
           ["survey", "Survey questions"],
-          ["attachment", "Upload file"]
+          ["attachment", "Upload file"],
+          ["callout", "Callout box"],
+          ["page_break", "Page break"]
         ].map(([type, label]) => (
           <button
             key={type}

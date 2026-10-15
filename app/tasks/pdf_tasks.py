@@ -2934,6 +2934,24 @@ def generate_complete_issp_html(
         for block_index, block in enumerate(section.get("blocks", [])):
             block_title = html.escape(str(block.get("title") or ""))
             block_type = block.get("type")
+            if block_type == "page_break":
+                markup.append('<div style="break-after: page;"></div>')
+                continue
+            if block_type == "callout":
+                callout_style = block.get("callout_style") or "info"
+                callout_colors = {
+                    "info": ("#eff6ff", "#1d4ed8", "#1e3a8a"),
+                    "warning": ("#fffbeb", "#b45309", "#78350f"),
+                    "success": ("#ecfdf5", "#047857", "#064e3b")
+                }
+                bg, border, text = callout_colors.get(callout_style, callout_colors["info"])
+                callout_title = f'<div style="font-weight:bold; margin-bottom:3px;">{block_title}</div>' if block_title else ""
+                markup.append(
+                    f'<div style="background:{bg}; border-left:4px solid {border}; color:{text}; '
+                    f'padding:8px 12px; margin:8px 0; font-size:9pt; break-inside:avoid;">'
+                    f'{callout_title}{html.escape(str(block.get("content") or "")).replace(chr(10), "<br>")}</div>'
+                )
+                continue
             if block_type == "attachment":
                 file_name = html.escape(str(block.get("file_name") or "Uploaded file"))
                 file_url = html.escape(str(block.get("file_url") or ""), quote=True)
@@ -2962,7 +2980,17 @@ def generate_complete_issp_html(
             if block_title:
                 markup.append(f'<h{min(heading_level + 1, 6)}>{block_title}</h{min(heading_level + 1, 6)}>')
             if block_type == "paragraph":
-                markup.append(f'<p>{html.escape(str(block.get("content") or "")).replace(chr(10), "<br>")}</p>')
+                style_parts = [f"text-align:{html.escape(str(block.get('text_align') or 'left'))}"]
+                if block.get("text_bold"):
+                    style_parts.append("font-weight:bold")
+                if block.get("text_italic"):
+                    style_parts.append("font-style:italic")
+                if block.get("text_underline"):
+                    style_parts.append("text-decoration:underline")
+                markup.append(
+                    f'<p style="{";".join(style_parts)}">'
+                    f'{html.escape(str(block.get("content") or "")).replace(chr(10), "<br>")}</p>'
+                )
             elif block_type in ("bullet_list", "numbered_list"):
                 tag = "ul" if block_type == "bullet_list" else "ol"
                 entries = "".join(f'<li>{html.escape(str(item))}</li>' for item in block.get("items", []))
